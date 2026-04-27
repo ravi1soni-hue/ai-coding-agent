@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebSocket Client Test</title>
+  <style>
+    body { font-family: sans-serif; background: #181c24; color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; }
+    #log { width: 400px; height: 200px; background: #222; border-radius: 8px; padding: 10px; overflow-y: auto; margin-bottom: 10px; }
+    input, button { font-size: 1rem; padding: 8px; border-radius: 4px; border: none; margin: 2px; }
+    button { background: #4f8cff; color: #fff; cursor: pointer; }
+    button:active { background: #3461a4; }
+  </style>
+</head>
+<body>
+  <h2>WebSocket Client</h2>
+  <div id="log"></div>
+  <input id="msg" type="text" placeholder="Type a message..." />
+  <button onclick="sendMsg()">Send</button>
+  <script>
+    const log = document.getElementById('log');
+    const ws = new WebSocket('ws://localhost:3000');
+    ws.onopen = () => logMsg('Connected to WebSocket!');
+    ws.onmessage = (e) => logMsg('Server: ' + e.data);
+    ws.onclose = () => logMsg('Disconnected.');
+    ws.onerror = (e) => logMsg('Error: ' + e.message);
+    function sendMsg() {
+      const val = document.getElementById('msg').value;
+      ws.send(val);
+      logMsg('You: ' + val);
+      document.getElementById('msg').value = '';
+    }
+    function logMsg(msg) {
+      log.innerHTML += msg + '<br />';
+      log.scrollTop = log.scrollHeight;
+    }
+  </script>
+</body>
+</html>

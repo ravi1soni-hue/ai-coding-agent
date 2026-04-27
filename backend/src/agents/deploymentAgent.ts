@@ -1,0 +1,9 @@
+// Deployment Agent: simulates deployment and returns URLs
+export async function deploymentAgent(input: { frontend: string; backend: string }) {
+  // In production, deploy using Railway/Vercel APIs
+  // Here, return sample URLs
+  return {
+    frontend_url: `https://${input.frontend}.vercel.app`,
+    backend_url: `https://${input.backend}.railway.app`,
+  };
+}
