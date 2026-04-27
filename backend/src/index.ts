@@ -42,6 +42,17 @@ async function start() {
 		index: ['index.html'],
 	});
 
+	// Debug endpoint to list frontend files
+	fastify.get('/debug-frontend-files', async () => {
+		const dir = path.join(__dirname, '../../frontend');
+		try {
+			const files = fs.readdirSync(dir);
+			return { files };
+		} catch (e) {
+			return { error: (e as Error).message };
+		}
+	});
+
 	await registerRoutes(fastify);
 
 	// Create HTTP server from Fastify
