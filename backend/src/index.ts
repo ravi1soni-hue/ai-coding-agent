@@ -9,7 +9,18 @@ import { connectPostgres } from './db/postgres';
 import { ensureVectorTable } from './db/vectorStore';
 import http from 'http';
 
+import fs from 'fs';
 async function start() {
+		// Debug endpoint to list frontend files
+		fastify.get('/debug-frontend-files', async () => {
+			const dir = path.join(__dirname, '../../frontend');
+			try {
+				const files = fs.readdirSync(dir);
+				return { files };
+			} catch (e) {
+				return { error: e.message };
+			}
+		});
 	try {
 		// Initialize Redis
 		await connectRedis();
