@@ -2,10 +2,14 @@
 export async function testFixAgent(input: { buildFn: () => Promise<{ success: boolean; logs: string }> }) {
   let retries = 0;
   let result;
-  do {
-    result = await input.buildFn();
-    if (result.success) return { ...result, fixed: retries > 0 };
-    retries++;
-  } while (retries < 3);
-  throw new Error('Build/test failed after 3 retries.');
+  try {
+    do {
+      result = await input.buildFn();
+      if (result.success) return { ...result, fixed: retries > 0 };
+      retries++;
+    } while (retries < 3);
+    throw new Error('Build/test failed after 3 retries.');
+  } catch (err) {
+    return { success: false, logs: result?.logs || '', fixed: false, error: (err as any)?.message || String(err) };
+  }
 }

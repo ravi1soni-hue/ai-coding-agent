@@ -8,8 +8,23 @@ const static_1 = __importDefault(require("@fastify/static"));
 const path_1 = __importDefault(require("path"));
 const routes_1 = require("./api/routes");
 const socket_1 = require("./api/socket");
+const redis_1 = require("./cache/redis");
+const postgres_1 = require("./db/postgres");
+const vectorStore_1 = require("./db/vectorStore");
 const http_1 = __importDefault(require("http"));
 async function start() {
+    try {
+        // Initialize Redis
+        await (0, redis_1.connectRedis)();
+        // Initialize Postgres
+        await (0, postgres_1.connectPostgres)();
+        // Ensure vectors table and pgvector extension
+        await (0, vectorStore_1.ensureVectorTable)();
+    }
+    catch (err) {
+        console.error('Fatal error initializing infra:', err);
+        process.exit(1);
+    }
     const fastify = (0, fastify_1.default)({ logger: true });
     // Serve static frontend
     fastify.register(static_1.default, {
