@@ -23,13 +23,7 @@ async function start() {
         }
 
         const fastify = Fastify({
-                logger: {
-                        level: 'info',
-                        transport: {
-                                target: 'pino-pretty',
-                                options: { colorize: true },
-                        },
-                },
+                logger: { level: 'info' },
         });
 
         // Serve static frontend
