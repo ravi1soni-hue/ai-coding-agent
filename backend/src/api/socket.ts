@@ -1,7 +1,14 @@
 // Simple WebSocket server using ws
 import { Server } from 'ws';
 import http from 'http';
-import { runOrchestration } from '../orchestration/langgraph';
+
+import { requirementAnalysisAgent } from '../agents/requirementAnalysisAgent';
+import { clarificationAgent } from '../agents/clarificationAgent';
+import { confirmationGate } from '../agents/confirmationGate';
+import { systemDesignAgent } from '../agents/systemDesignAgent';
+import { codeGenerationAgent } from '../agents/codeGenerationAgent';
+import { testFixAgent } from '../agents/testFixAgent';
+import { deploymentAgent } from '../agents/deploymentAgent';
 
 
 export function createSocketServer(server: http.Server) {
@@ -17,37 +24,37 @@ export function createSocketServer(server: http.Server) {
 
         // Step 1: Requirement Analysis
         ws.send(JSON.stringify({ type: 'progress', progress: (progress += 0.12), status: 'Analyzing requirements...' }));
-        const requirements = await require('../orchestration/langgraph').requirementAnalysisAgent({ user_message: userMsg });
+        const requirements = await requirementAnalysisAgent({ user_message: userMsg });
         ws.send(JSON.stringify({ type: 'stream', token: `Requirements: ${JSON.stringify(requirements)}\n` }));
 
         // Step 2: Clarification
         ws.send(JSON.stringify({ type: 'progress', progress: (progress += 0.12), status: 'Clarifying requirements...' }));
-        const clarifications = await require('../orchestration/langgraph').clarificationAgent(requirements);
+        const clarifications = await clarificationAgent(requirements);
         ws.send(JSON.stringify({ type: 'stream', token: `Clarifications: ${JSON.stringify(clarifications)}\n` }));
 
         // Step 3: Confirmation Gate
         ws.send(JSON.stringify({ type: 'progress', progress: (progress += 0.12), status: 'Confirming requirements...' }));
-        const confirmation = await require('../orchestration/langgraph').confirmationGate(clarifications);
+        const confirmation = await confirmationGate(clarifications);
         ws.send(JSON.stringify({ type: 'stream', token: `Confirmation: ${JSON.stringify(confirmation)}\n` }));
 
         // Step 4: System Design
         ws.send(JSON.stringify({ type: 'progress', progress: (progress += 0.12), status: 'Designing system...' }));
-        const systemDesign = await require('../orchestration/langgraph').systemDesignAgent(requirements);
+        const systemDesign = await systemDesignAgent(requirements);
         ws.send(JSON.stringify({ type: 'stream', token: `System Design: ${JSON.stringify(systemDesign)}\n` }));
 
         // Step 5: Code Generation
         ws.send(JSON.stringify({ type: 'progress', progress: (progress += 0.12), status: 'Generating code...' }));
-        const codeGen = await require('../orchestration/langgraph').codeGenerationAgent(systemDesign);
+        const codeGen = await codeGenerationAgent(systemDesign);
         ws.send(JSON.stringify({ type: 'stream', token: `Code Patch: ${JSON.stringify(codeGen)}\n` }));
 
         // Step 6: Test & Fix
         ws.send(JSON.stringify({ type: 'progress', progress: (progress += 0.12), status: 'Testing and fixing...' }));
-        const testResult = await require('../orchestration/langgraph').testFixAgent({ buildFn: async () => ({ success: true, logs: 'Build successful.' }) });
+        const testResult = await testFixAgent({ buildFn: async () => ({ success: true, logs: 'Build successful.' }) });
         ws.send(JSON.stringify({ type: 'stream', token: `Test Result: ${JSON.stringify(testResult)}\n` }));
 
         // Step 7: Deployment
         ws.send(JSON.stringify({ type: 'progress', progress: 1, status: 'Deploying...' }));
-        const deployment = await require('../orchestration/langgraph').deploymentAgent({ frontend: 'frontend', backend: 'backend' });
+        const deployment = await deploymentAgent({ frontend: 'frontend', backend: 'backend' });
         ws.send(JSON.stringify({ type: 'stream', token: `Deployment: ${JSON.stringify(deployment)}\n` }));
 
         ws.send(JSON.stringify({ type: 'done' }));
