@@ -8,8 +8,6 @@ export const config = {
   POSTGRES_URL: process.env.POSTGRES_URL || '',
   OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
   RAILWAY_TOKEN: process.env.RAILWAY_TOKEN || '',
-  QDRANT_URL: process.env.QDRANT_URL || '',
-  QDRANT_API_KEY: process.env.QDRANT_API_KEY || '',
   GPT4O_MINI_MODEL_ID: process.env.GPT4O_MINI_MODEL_ID || '',
   GPT5_MINI_MODEL_ID: process.env.GPT5_MINI_MODEL_ID || '',
   GPT5_2_MODEL_ID: process.env.GPT5_2_MODEL_ID || '',
