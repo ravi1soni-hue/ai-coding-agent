@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Website Builder – Voice & Chat</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      font-family: 'Inter', sans-serif;
+      background: #181c24;
+      color: #fff;
+    }
+    body {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      width: 100vw;
+      height: 100vh;
+    }
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      width: 100vw;
+      height: 100%;
+      padding: 0;
+    }
+    .header {
+      width: 100vw;
+      background: #23283a;
+      padding: 24px 0 12px 0;
+      text-align: center;
+      box-shadow: 0 2px 12px #0003;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 2.2rem;
+      font-weight: 700;
+    }
+    .header h2 {
+      margin: 8px 0 0 0;
+      font-size: 1.2rem;
+      font-weight: 400;
+      color: #b3b8c7;
+    }
+    .chat-area {
+      flex: 1;
+      width: 100vw;
+      max-width: 700px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      padding: 0 0 16px 0;
+    }
+    #chat {
+      flex: 1;
+      overflow-y: auto;
+      background: #20243a;
+      border-radius: 12px;
+      padding: 24px 18px 18px 18px;
+      margin: 18px 0 0 0;
+      min-height: 320px;
+      max-height: 60vh;
+      box-shadow: 0 2px 12px #0002;
+    }
+    .msg { margin: 12px 0; }
+    .user { color: #4f8cff; font-weight: 600; }
+    .ai { color: #fff; background: #2a2f4a; border-radius: 8px; padding: 8px 12px; display: inline-block; }
+    .streaming { color: #ffb84f; background: #2a2f4a; border-radius: 8px; padding: 8px 12px; display: inline-block; font-style: italic; }
+    .input-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 18px;
+      width: 100%;
+    }
+    input {
+      flex: 1;
+      font-size: 1rem;
+      padding: 12px;
+      border-radius: 8px;
+      border: none;
+      background: #23283a;
+      color: #fff;
+    }
+    button {
+      background: #4f8cff;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 12px 20px;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:active { background: #3461a4; }
+    .mic { background: #ff4f8c; margin-left: 0; }
+    .mic.active { background: #ffb84f; color: #23283a; }
+    .mic svg { vertical-align: middle; }
+    #copyBtn {
+      margin-top: 14px;
+      width: 100%;
+      font-size: 1.05rem;
+      background: #4f8cff;
+    }
+    #status {
+      margin-top: 12px;
+      text-align: center;
+      font-size: 1.05em;
+      min-height: 24px;
+    }
+    .progress-bar {
+      width: 100%;
+      height: 8px;
+      background: #23283a;
+      border-radius: 6px;
+      margin: 10px 0 0 0;
+      overflow: hidden;
+      position: relative;
+    }
+    .progress-bar-inner {
+      height: 100%;
+      background: linear-gradient(90deg, #4f8cff, #ffb84f);
+      width: 0%;
+      transition: width 0.3s;
+    }
+    @media (max-width: 700px) {
+      .chat-area { max-width: 100vw; }
+    }
+  </style>
+</head>
+<body>
+  <div class="main">
+    <div class="header">
+      <h1>AI Website Builder</h1>
+      <h2>Build websites with natural language and AI</h2>
+    </div>
+    <div class="chat-area">
+      <div id="chat"></div>
+      <div id="streaming" class="streaming" style="display:none;"></div>
+      <div class="progress-bar" id="progressBar" style="display:none;">
+        <div class="progress-bar-inner" id="progressBarInner"></div>
+      </div>
+      <div class="input-row">
+        <input id="msg" type="text" placeholder="Type your website idea or question..." autocomplete="off" />
+        <button id="sendBtn" onclick="sendMsg()">Send</button>
+        <button class="mic" id="micBtn" onclick="toggleMic()" title="Speak"><svg width="20" height="20" fill="currentColor" viewBox="0 0 20 20"><path d="M10 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.93V19a1 1 0 1 0 2 0v-1.07A7 7 0 0 0 17 11z"/></svg></button>
+      </div>
+      <button id="copyBtn" onclick="copyChatLogs()">Copy Chat Logs</button>
+      <div id="status"></div>
+    </div>
+  </div>
+  <script>
+    const chat = document.getElementById('chat');
+    const msgInput = document.getElementById('msg');
+    const micBtn = document.getElementById('micBtn');
+    let ws;
+    let recognizing = false;
+    let recognition;
+    let waiting = false;
+    const sendBtn = document.getElementById('sendBtn');
+    const statusDiv = document.getElementById('status');
+    const streamingDiv = document.getElementById('streaming');
+    const progressBar = document.getElementById('progressBar');
+    const progressBarInner = document.getElementById('progressBarInner');
+
+    function appendMsg(text, sender) {
+      const div = document.createElement('div');
+      div.className = 'msg ' + sender;
+      div.innerHTML = sender === 'user' ? `<span class='user'>You:</span> ${text}` : `<span class='ai'>${text}</span>`;
+      chat.appendChild(div);
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    function setStatus(msg, type = '') {
+      statusDiv.textContent = msg;
+      statusDiv.style.color = type === 'error' ? '#ff4f8c' : (type === 'success' ? '#4f8cff' : '#fff');
+    }
+
+    function setWaiting(isWaiting, progress = 0, progressMsg = '') {
+      waiting = isWaiting;
+      msgInput.disabled = isWaiting;
+      sendBtn.disabled = isWaiting;
+      if (isWaiting) {
+        setStatus(progressMsg || 'AI is thinking...');
+        progressBar.style.display = 'block';
+        progressBarInner.style.width = (progress * 100) + '%';
+      } else {
+        setStatus('');
+        progressBar.style.display = 'none';
+        progressBarInner.style.width = '0%';
+      }
+    }
+
+    function streamResponseStart() {
+      streamingDiv.style.display = 'block';
+      streamingDiv.textContent = '';
+    }
+    function streamResponseUpdate(token) {
+      streamingDiv.textContent += token;
+      streamingDiv.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
+    function streamResponseEnd() {
+      if (streamingDiv.textContent) {
+        appendMsg(streamingDiv.textContent, 'ai');
+      }
+      streamingDiv.style.display = 'none';
+      streamingDiv.textContent = '';
+    }
+
+    function sendMsg(text) {
+      const val = text || msgInput.value;
+      if (!val || waiting || !ws || ws.readyState !== 1) return;
+      appendMsg(val, 'user');
+      setWaiting(true, 0.1, 'AI is thinking...');
+      streamResponseStart();
+      try {
+        ws.send(val);
+      } catch (e) {
+        setStatus('Failed to send message.', 'error');
+        setWaiting(false);
+        streamResponseEnd();
+      }
+      msgInput.value = '';
+    }
+
+    function copyChatLogs() {
+      let logs = '';
+      document.querySelectorAll('#chat .msg').forEach(div => {
+        logs += div.textContent + '\n';
+      });
+      navigator.clipboard.writeText(logs.trim()).then(() => {
+        setStatus('Chat logs copied!', 'success');
+      }, () => {
+        setStatus('Failed to copy chat logs.', 'error');
+      });
+    }
+
+    function setupWS(retry = 0) {
+      ws = new WebSocket('ws://localhost:3000');
+      ws.onopen = () => {
+        appendMsg('Connected to AI Website Builder!', 'ai');
+        setStatus('Connected!', 'success');
+      };
+      ws.onmessage = (e) => {
+        // Try to parse for streaming/progress protocol
+        let data = e.data;
+        try {
+          const obj = JSON.parse(data);
+          if (obj.type === 'progress') {
+            setWaiting(true, obj.progress, obj.status || 'AI is working...');
+            if (obj.token) streamResponseUpdate(obj.token);
+            return;
+          } else if (obj.type === 'stream') {
+            streamResponseUpdate(obj.token || '');
+            return;
+          } else if (obj.type === 'error') {
+            setStatus(obj.message || 'AI error.', 'error');
+            setWaiting(false);
+            streamResponseEnd();
+            return;
+          } else if (obj.type === 'done') {
+            setWaiting(false);
+            streamResponseEnd();
+            return;
+          }
+        } catch (err) {
+          // Not JSON, treat as plain message
+        }
+        // Fallback: treat as plain message
+        streamResponseEnd();
+        appendMsg(data, 'ai');
+        setWaiting(false);
+      };
+      ws.onclose = () => {
+        setStatus('Disconnected from server.', 'error');
+        appendMsg('Disconnected from server.', 'ai');
+        setWaiting(false);
+        streamResponseEnd();
+        // Try to reconnect after 2s, up to 5 times
+        if (retry < 5) setTimeout(() => setupWS(retry + 1), 2000);
+      };
+      ws.onerror = (e) => {
+        setStatus('WebSocket error.', 'error');
+        setWaiting(false);
+        streamResponseEnd();
+      };
+    }
+
+    // Voice input (Web Speech API)
+    function toggleMic() {
+      if (!('webkitSpeechRecognition' in window)) {
+        alert('Voice input not supported in this browser.');
+        return;
+      }
+      if (!recognition) {
+        recognition = new webkitSpeechRecognition();
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.lang = 'en-US';
+        recognition.onresult = function(event) {
+          const transcript = event.results[0][0].transcript;
+          sendMsg(transcript);
+        };
+        recognition.onend = function() {
+          recognizing = false;
+          micBtn.classList.remove('active');
+        };
+      }
+      if (!recognizing) {
+        recognition.start();
+        recognizing = true;
+        micBtn.classList.add('active');
+      } else {
+        recognition.stop();
+        recognizing = false;
+        micBtn.classList.remove('active');
+      }
+    }
+
+    msgInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') sendMsg();
+    });
+
+    setupWS();
+  </script>
+</body>
+</html>
