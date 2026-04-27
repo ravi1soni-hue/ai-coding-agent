@@ -50,7 +50,7 @@ export function createSocketServer(server: http.Server) {
 
         ws.send(JSON.stringify({ type: 'done' }));
       } catch (err) {
-        ws.send(JSON.stringify({ type: 'error', message: err?.message || 'AI process failed.' }));
+        ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'AI process failed.' }));
       }
     });
   });
@@ -62,7 +62,7 @@ async function runStep(fn: () => Promise<any>, ws: any, status: string) {
   try {
     return await fn();
   } catch (err) {
-    ws.send(JSON.stringify({ type: 'error', message: status + ' failed: ' + (err?.message || err) }));
+    ws.send(JSON.stringify({ type: 'error', message: status + ' failed: ' + ((err as any)?.message || err) }));
     throw err;
   }
 }
