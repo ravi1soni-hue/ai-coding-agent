@@ -27,14 +27,14 @@ async function start() {
 
         // Serve static frontend
         fastify.register(fastifyStatic, {
-                root: path.join(__dirname, '../../frontend'),
+                root: path.join(__dirname, '../frontend'),
                 prefix: '/',
                 index: ['index.html'],
         });
 
         // Debug endpoint to list frontend files
         fastify.get('/debug-frontend-files', async () => {
-                const dir = path.join(__dirname, '../../frontend');
+                const dir = path.join(__dirname, '../frontend');
                 try {
                         const files = fs.readdirSync(dir);
                         return { files };
