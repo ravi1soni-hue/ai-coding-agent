@@ -17,7 +17,7 @@ async function requirementAnalysisAgent(input) {
             chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/chat/completions',
             embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
         });
-        const systemPrompt = `Extract structured website requirements from the following user message. Respond ONLY in JSON with keys: website_type, pages, backend_required, auth_required, deployment_pref.`;
+        const systemPrompt = `Extract structured website requirements from the following user message. Respond ONLY with valid JSON with keys: website_type, pages, backend_required, auth_required, deployment_pref. Do NOT include any Markdown code block markers (no triple backticks or 'json'), just return raw JSON.`;
         const completion = await llmProxy.chatCompletion([
             { role: 'system', content: systemPrompt },
             { role: 'user', content: input.user_message }
@@ -28,7 +28,9 @@ async function requirementAnalysisAgent(input) {
         let content = completion.choices?.[0]?.message?.content || '{}';
         // Log the raw LLM content with a fixed tag for debugging
         console.log('[LLM_RAW_CONTENT_REQUIREMENT_ANALYSIS]', content);
-        // Extract the first JSON object from the string
+        // Remove all Markdown code block markers (handles ```json, ``` etc.)
+        content = content.replace(/```[a-zA-Z]*\s*|```/g, '').trim();
+        // Now extract the first JSON object
         const jsonMatch = content.match(/{[\s\S]*}/);
         if (!jsonMatch) {
             console.error('[requirementAnalysisAgent] No JSON object found in LLM output:', { content });
