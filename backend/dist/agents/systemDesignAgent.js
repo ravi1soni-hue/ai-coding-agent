@@ -24,7 +24,10 @@ async function systemDesignAgent(input) {
         if (process.env.NODE_ENV !== 'production') {
             console.log('[systemDesignAgent] LLM completion:', completion);
         }
-        const result = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+        let content = completion.choices?.[0]?.message?.content || '{}';
+        // Remove Markdown code block if present
+        content = content.replace(/^```json\s*|^```\s*|```$/gim, '').trim();
+        const result = JSON.parse(content);
         if (!result.frontend || !result.backend) {
             throw new Error('Malformed systemDesignAgent output');
         }

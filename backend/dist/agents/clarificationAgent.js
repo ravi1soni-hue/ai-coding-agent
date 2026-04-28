@@ -25,7 +25,10 @@ async function clarificationAgent(input) {
         if (process.env.NODE_ENV !== 'production') {
             console.log('[clarificationAgent] LLM completion:', completion);
         }
-        const result = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+        let content = completion.choices?.[0]?.message?.content || '{}';
+        // Remove Markdown code block if present
+        content = content.replace(/^```json\s*|^```\s*|```$/gim, '').trim();
+        const result = JSON.parse(content);
         if (!('questions' in result) || !('confirmed' in result)) {
             throw new Error('Malformed clarificationAgent output');
         }

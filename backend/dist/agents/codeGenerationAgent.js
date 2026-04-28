@@ -44,7 +44,10 @@ async function codeGenerationAgent(input) {
         if (process.env.NODE_ENV !== 'production') {
             console.log('[codeGenerationAgent] LLM completion:', completion);
         }
-        const result = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+        let content = completion.choices?.[0]?.message?.content || '{}';
+        // Remove Markdown code block if present
+        content = content.replace(/^```json\s*|^```\s*|```$/gim, '').trim();
+        const result = JSON.parse(content);
         if (!('patch' in result)) {
             throw new Error('Malformed codeGenerationAgent output');
         }
