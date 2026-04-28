@@ -26,9 +26,20 @@ async function requirementAnalysisAgent(input) {
             console.log('[requirementAnalysisAgent] LLM completion:', completion);
         }
         let content = completion.choices?.[0]?.message?.content || '{}';
-        // Remove Markdown code block if present
-        content = content.replace(/^```json\s*|^```\s*|```$/gim, '').trim();
-        const result = JSON.parse(content);
+        // Log the raw LLM content with a fixed tag for debugging
+        console.log('[LLM_RAW_CONTENT_REQUIREMENT_ANALYSIS]', content);
+        // Remove all Markdown code block markers and trim
+        content = content.replace(/```[a-zA-Z]*\s*([\s\S]*?)```/g, '$1').replace(/^```[a-zA-Z]*|```$/gm, '').trim();
+        // Remove any leading/trailing quotes or whitespace
+        content = content.replace(/^['"`\s]+|['"`\s]+$/g, '');
+        let result;
+        try {
+            result = JSON.parse(content);
+        }
+        catch (e) {
+            console.error('[requirementAnalysisAgent] JSON parse error:', e, { content });
+            throw new Error('Malformed LLM output: ' + content);
+        }
         if (!result.website_type || !Array.isArray(result.pages)) {
             throw new Error('Malformed requirementAnalysisAgent output');
         }

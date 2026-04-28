@@ -25,9 +25,18 @@ async function systemDesignAgent(input) {
             console.log('[systemDesignAgent] LLM completion:', completion);
         }
         let content = completion.choices?.[0]?.message?.content || '{}';
-        // Remove Markdown code block if present
-        content = content.replace(/^```json\s*|^```\s*|```$/gim, '').trim();
-        const result = JSON.parse(content);
+        // Remove all Markdown code block markers and trim
+        content = content.replace(/```[a-zA-Z]*\s*([\s\S]*?)```/g, '$1').replace(/^```[a-zA-Z]*|```$/gm, '').trim();
+        // Remove any leading/trailing quotes or whitespace
+        content = content.replace(/^['"`\s]+|['"`\s]+$/g, '');
+        let result;
+        try {
+            result = JSON.parse(content);
+        }
+        catch (e) {
+            console.error('[systemDesignAgent] JSON parse error:', e, { content });
+            throw new Error('Malformed LLM output: ' + content);
+        }
         if (!result.frontend || !result.backend) {
             throw new Error('Malformed systemDesignAgent output');
         }
