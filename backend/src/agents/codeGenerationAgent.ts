@@ -43,14 +43,25 @@ export async function codeGenerationAgent(input: any) {
       console.log('[codeGenerationAgent] LLM completion:', completion);
     }
     let content = completion.choices?.[0]?.message?.content || '{}';
-    // Strip Markdown code block markers (```json, ```, etc.)
-    content = content.replace(/```[a-zA-Z]*\s*|\n?```/g, '').trim();
-    // Extract first JSON object if there's extra text
+    // Log the raw LLM content for debugging
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[LLM_RAW_CONTENT_CODEGEN]', content);
+    }
+    // Always remove all Markdown code block markers (handles ```json, ``` etc.)
+    content = content.replace(/```[a-zA-Z]*\s*|```/g, '').trim();
+    // Now extract the first JSON object
     const jsonMatch = content.match(/{[\s\S]*}/);
     if (!jsonMatch) {
-      throw new Error('No JSON object found in LLM response');
+      console.error('[codeGenerationAgent] No JSON object found in LLM output:', { content });
+      throw new Error('Malformed LLM output: No JSON object found');
     }
-    const result = JSON.parse(jsonMatch[0]);
+    let result;
+    try {
+      result = JSON.parse(jsonMatch[0]);
+    } catch (e) {
+      console.error('[codeGenerationAgent] JSON parse error:', e, { content: jsonMatch[0] });
+      throw new Error('Malformed LLM output: ' + jsonMatch[0]);
+    }
     if (!('patch' in result)) {
       throw new Error('Malformed codeGenerationAgent output');
     }

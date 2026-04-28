@@ -26,14 +26,25 @@ export async function clarificationAgent(input: any) {
       console.log('[clarificationAgent] LLM completion:', completion);
     }
     let content = completion.choices?.[0]?.message?.content || '{}';
-    // Strip Markdown code block markers (```json, ```, etc.)
-    content = content.replace(/```[a-zA-Z]*\s*|\n?```/g, '').trim();
-    // Extract first JSON object if there's extra text
+    // Log the raw LLM content for debugging
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[LLM_RAW_CONTENT_CLARIFICATION]', content);
+    }
+    // Always remove all Markdown code block markers (handles ```json, ``` etc.)
+    content = content.replace(/```[a-zA-Z]*\s*|```/g, '').trim();
+    // Now extract the first JSON object
     const jsonMatch = content.match(/{[\s\S]*}/);
     if (!jsonMatch) {
-      throw new Error('No JSON object found in LLM response');
+      console.error('[clarificationAgent] No JSON object found in LLM output:', { content });
+      throw new Error('Malformed LLM output: No JSON object found');
     }
-    const result = JSON.parse(jsonMatch[0]);
+    let result;
+    try {
+      result = JSON.parse(jsonMatch[0]);
+    } catch (e) {
+      console.error('[clarificationAgent] JSON parse error:', e, { content: jsonMatch[0] });
+      throw new Error('Malformed LLM output: ' + jsonMatch[0]);
+    }
     if (!('questions' in result) || !('confirmed' in result)) {
       throw new Error('Malformed clarificationAgent output');
     }

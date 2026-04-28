@@ -23,7 +23,7 @@ export async function requirementAnalysisAgent(input: { user_message: string }):
       chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/chat/completions',
       embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
     });
-    const systemPrompt = `Extract structured website requirements from the following user message. Respond ONLY in JSON with keys: website_type, pages, backend_required, auth_required, deployment_pref.`;
+    const systemPrompt = `Extract structured website requirements from the following user message. Respond ONLY with valid JSON with keys: website_type, pages, backend_required, auth_required, deployment_pref. Do NOT include any Markdown code block markers (no triple backticks or 'json'), just return raw JSON.`;
     const completion = await llmProxy.chatCompletion([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: input.user_message }
@@ -32,14 +32,25 @@ export async function requirementAnalysisAgent(input: { user_message: string }):
       console.log('[requirementAnalysisAgent] LLM completion:', completion);
     }
     let content = completion.choices?.[0]?.message?.content || '{}';
-    // Strip Markdown code block markers (```json, ```, etc.)
-    content = content.replace(/```[a-zA-Z]*\s*|\n?```/g, '').trim();
-    // Extract first JSON object if there's extra text
+    // Log the raw LLM content for debugging
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[LLM_RAW_CONTENT_REQUIREMENT_ANALYSIS]', content);
+    }
+    // Always remove all Markdown code block markers (handles ```json, ``` etc.)
+    content = content.replace(/```[a-zA-Z]*\s*|```/g, '').trim();
+    // Now extract the first JSON object
     const jsonMatch = content.match(/{[\s\S]*}/);
     if (!jsonMatch) {
-      throw new Error('No JSON object found in LLM response');
+      console.error('[requirementAnalysisAgent] No JSON object found in LLM output:', { content });
+      throw new Error('Malformed LLM output: No JSON object found');
     }
-    const result = JSON.parse(jsonMatch[0]);
+    let result;
+    try {
+      result = JSON.parse(jsonMatch[0]);
+    } catch (e) {
+      console.error('[requirementAnalysisAgent] JSON parse error:', e, { content: jsonMatch[0] });
+      throw new Error('Malformed LLM output: ' + jsonMatch[0]);
+    }
     if (!result.website_type || !Array.isArray(result.pages)) {
       throw new Error('Malformed requirementAnalysisAgent output');
     }
