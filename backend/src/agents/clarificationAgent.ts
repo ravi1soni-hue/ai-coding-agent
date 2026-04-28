@@ -25,7 +25,15 @@ export async function clarificationAgent(input: any) {
     if (process.env.NODE_ENV !== 'production') {
       console.log('[clarificationAgent] LLM completion:', completion);
     }
-    const result = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    let content = completion.choices?.[0]?.message?.content || '{}';
+    // Strip Markdown code block markers (```json, ```, etc.)
+    content = content.replace(/```[a-zA-Z]*\s*|\n?```/g, '').trim();
+    // Extract first JSON object if there's extra text
+    const jsonMatch = content.match(/{[\s\S]*}/);
+    if (!jsonMatch) {
+      throw new Error('No JSON object found in LLM response');
+    }
+    const result = JSON.parse(jsonMatch[0]);
     if (!('questions' in result) || !('confirmed' in result)) {
       throw new Error('Malformed clarificationAgent output');
     }
