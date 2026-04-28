@@ -25,17 +25,21 @@ async function systemDesignAgent(input) {
             console.log('[systemDesignAgent] LLM completion:', completion);
         }
         let content = completion.choices?.[0]?.message?.content || '{}';
-        // Remove all Markdown code block markers and trim
-        content = content.replace(/```[a-zA-Z]*\s*([\s\S]*?)```/g, '$1').replace(/^```[a-zA-Z]*|```$/gm, '').trim();
-        // Remove any leading/trailing quotes or whitespace
-        content = content.replace(/^['"`\s]+|['"`\s]+$/g, '');
+        // Always remove all Markdown code block markers (handles ```json, ``` etc.)
+        content = content.replace(/```[a-zA-Z]*\s*|```/g, '').trim();
+        // Now extract the first JSON object
+        const jsonMatch = content.match(/{[\s\S]*}/);
+        if (!jsonMatch) {
+            console.error('[systemDesignAgent] No JSON object found in LLM output:', { content });
+            throw new Error('Malformed LLM output: No JSON object found');
+        }
         let result;
         try {
-            result = JSON.parse(content);
+            result = JSON.parse(jsonMatch[0]);
         }
         catch (e) {
-            console.error('[systemDesignAgent] JSON parse error:', e, { content });
-            throw new Error('Malformed LLM output: ' + content);
+            console.error('[systemDesignAgent] JSON parse error:', e, { content: jsonMatch[0] });
+            throw new Error('Malformed LLM output: ' + jsonMatch[0]);
         }
         if (!result.frontend || !result.backend) {
             throw new Error('Malformed systemDesignAgent output');
