@@ -11,6 +11,7 @@ const llmProxy = new LLMProxyClient({
 });
 
 export async function clarificationAgent(input: any) {
+  console.log('[clarificationAgent] called with:', input);
   try {
     if (!input) throw new Error('Input required');
     const modelId = getModelIdForTask('clarification');
@@ -18,13 +19,16 @@ export async function clarificationAgent(input: any) {
     const completion = await llmProxy.chatCompletion([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: JSON.stringify(input) }
-    ], modelId);
+    ], modelId, 0.8, 0.9, 1000);
+    console.log('[clarificationAgent] LLM completion:', completion);
     const result = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
     if (!('questions' in result) || !('confirmed' in result)) {
       throw new Error('Malformed clarificationAgent output');
     }
+    console.log('[clarificationAgent] result:', result);
     return result;
   } catch (err) {
+    console.error('[clarificationAgent] error:', err);
     throw err;
   }
 }

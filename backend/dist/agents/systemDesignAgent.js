@@ -10,6 +10,7 @@ const llmProxy = new llmProxyClient_1.LLMProxyClient({
     embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
 });
 async function systemDesignAgent(input) {
+    console.log('[systemDesignAgent] called with:', input);
     try {
         if (!input)
             throw new Error('Input required');
@@ -18,14 +19,17 @@ async function systemDesignAgent(input) {
         const completion = await llmProxy.chatCompletion([
             { role: 'system', content: systemPrompt },
             { role: 'user', content: JSON.stringify(input) }
-        ], modelId);
+        ], modelId, 0.8, 0.9, 1000);
+        console.log('[systemDesignAgent] LLM completion:', completion);
         const result = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
         if (!result.frontend || !result.backend) {
             throw new Error('Malformed systemDesignAgent output');
         }
+        console.log('[systemDesignAgent] result:', result);
         return result;
     }
     catch (err) {
+        console.error('[systemDesignAgent] error:', err);
         throw err;
     }
 }

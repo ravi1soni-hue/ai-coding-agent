@@ -12,6 +12,7 @@ const llmProxy = new LLMProxyClient({
 });
 
 export async function codeGenerationAgent(input: any) {
+  console.log('[codeGenerationAgent] called with:', input);
   try {
     if (!input) throw new Error('Input required');
     const modelId = getModelIdForTask('code_generation');
@@ -37,13 +38,16 @@ export async function codeGenerationAgent(input: any) {
     const completion = await llmProxy.chatCompletion([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
-    ], modelId);
+    ], modelId, 0.8, 0.9, 1000);
+    console.log('[codeGenerationAgent] LLM completion:', completion);
     const result = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
     if (!('patch' in result)) {
       throw new Error('Malformed codeGenerationAgent output');
     }
+    console.log('[codeGenerationAgent] result:', result);
     return result;
   } catch (err) {
+    console.error('[codeGenerationAgent] error:', err);
     throw err;
   }
 }

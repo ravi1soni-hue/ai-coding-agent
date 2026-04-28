@@ -11,6 +11,7 @@ const llmProxy = new llmProxyClient_1.LLMProxyClient({
     embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
 });
 async function requirementAnalysisAgent(input) {
+    console.log('[requirementAnalysisAgent] called with:', input);
     try {
         if (!input?.user_message)
             throw new Error('user_message required');
@@ -19,14 +20,17 @@ async function requirementAnalysisAgent(input) {
         const completion = await llmProxy.chatCompletion([
             { role: 'system', content: systemPrompt },
             { role: 'user', content: input.user_message }
-        ], modelId);
+        ], modelId, 0.8, 0.9, 1000);
+        console.log('[requirementAnalysisAgent] LLM completion:', completion);
         const result = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
         if (!result.website_type || !Array.isArray(result.pages)) {
             throw new Error('Malformed requirementAnalysisAgent output');
         }
+        console.log('[requirementAnalysisAgent] result:', result);
         return result;
     }
     catch (err) {
+        console.error('[requirementAnalysisAgent] error:', err);
         throw err;
     }
 }

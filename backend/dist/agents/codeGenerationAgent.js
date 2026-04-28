@@ -11,6 +11,7 @@ const llmProxy = new llmProxyClient_1.LLMProxyClient({
     embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
 });
 async function codeGenerationAgent(input) {
+    console.log('[codeGenerationAgent] called with:', input);
     try {
         if (!input)
             throw new Error('Input required');
@@ -38,14 +39,17 @@ async function codeGenerationAgent(input) {
         const completion = await llmProxy.chatCompletion([
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt }
-        ], modelId);
+        ], modelId, 0.8, 0.9, 1000);
+        console.log('[codeGenerationAgent] LLM completion:', completion);
         const result = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
         if (!('patch' in result)) {
             throw new Error('Malformed codeGenerationAgent output');
         }
+        console.log('[codeGenerationAgent] result:', result);
         return result;
     }
     catch (err) {
+        console.error('[codeGenerationAgent] error:', err);
         throw err;
     }
 }

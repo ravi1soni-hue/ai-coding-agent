@@ -23,12 +23,15 @@ export function createSocketServer(server: http.Server) {
         const userMsg = message.toString();
 
         // Step 1: Requirement Analysis
+        console.log('[socket] Step 1: Requirement Analysis start', { userMsg });
         ws.send(JSON.stringify({ type: 'progress', progress: (progress += 0.12), status: 'Analyzing requirements...' }));
         let requirements;
         try {
           requirements = await requirementAnalysisAgent({ user_message: userMsg });
+          console.log('[socket] Step 1: Requirement Analysis result', requirements);
           ws.send(JSON.stringify({ type: 'stream', token: `Requirements: ${JSON.stringify(requirements)}\n` }));
         } catch (err) {
+          console.error('[socket] Step 1: Requirement Analysis error', err);
           ws.send(JSON.stringify({
             type: 'error',
             message: (err as any)?.message || 'Requirement analysis failed.',
@@ -42,12 +45,15 @@ export function createSocketServer(server: http.Server) {
         }
 
         // Step 2: Clarification
+        console.log('[socket] Step 2: Clarification start', { requirements });
         ws.send(JSON.stringify({ type: 'progress', progress: (progress += 0.12), status: 'Clarifying requirements...' }));
         let clarifications;
         try {
           clarifications = await clarificationAgent(requirements);
+          console.log('[socket] Step 2: Clarification result', clarifications);
           ws.send(JSON.stringify({ type: 'stream', token: `Clarifications: ${JSON.stringify(clarifications)}\n` }));
         } catch (err) {
+          console.error('[socket] Step 2: Clarification error', err);
           ws.send(JSON.stringify({
             type: 'error',
             message: (err as any)?.message || 'Clarification failed.',
@@ -61,12 +67,15 @@ export function createSocketServer(server: http.Server) {
         }
 
         // Step 3: Confirmation Gate
+        console.log('[socket] Step 3: Confirmation Gate start', { clarifications });
         ws.send(JSON.stringify({ type: 'progress', progress: (progress += 0.12), status: 'Confirming requirements...' }));
         let confirmation;
         try {
           confirmation = await confirmationGate(clarifications);
+          console.log('[socket] Step 3: Confirmation Gate result', confirmation);
           ws.send(JSON.stringify({ type: 'stream', token: `Confirmation: ${JSON.stringify(confirmation)}\n` }));
         } catch (err) {
+          console.error('[socket] Step 3: Confirmation Gate error', err);
           ws.send(JSON.stringify({
             type: 'error',
             message: (err as any)?.message || 'Confirmation failed.',
@@ -80,12 +89,15 @@ export function createSocketServer(server: http.Server) {
         }
 
         // Step 4: System Design
+        console.log('[socket] Step 4: System Design start', { requirements });
         ws.send(JSON.stringify({ type: 'progress', progress: (progress += 0.12), status: 'Designing system...' }));
         let systemDesign;
         try {
           systemDesign = await systemDesignAgent(requirements);
+          console.log('[socket] Step 4: System Design result', systemDesign);
           ws.send(JSON.stringify({ type: 'stream', token: `System Design: ${JSON.stringify(systemDesign)}\n` }));
         } catch (err) {
+          console.error('[socket] Step 4: System Design error', err);
           ws.send(JSON.stringify({
             type: 'error',
             message: (err as any)?.message || 'System design failed.',
@@ -99,12 +111,15 @@ export function createSocketServer(server: http.Server) {
         }
 
         // Step 5: Code Generation
+        console.log('[socket] Step 5: Code Generation start', { systemDesign });
         ws.send(JSON.stringify({ type: 'progress', progress: (progress += 0.12), status: 'Generating code...' }));
         let codeGen;
         try {
           codeGen = await codeGenerationAgent(systemDesign);
+          console.log('[socket] Step 5: Code Generation result', codeGen);
           ws.send(JSON.stringify({ type: 'stream', token: `Code Patch: ${JSON.stringify(codeGen)}\n` }));
         } catch (err) {
+          console.error('[socket] Step 5: Code Generation error', err);
           ws.send(JSON.stringify({
             type: 'error',
             message: (err as any)?.message || 'Code generation failed.',
