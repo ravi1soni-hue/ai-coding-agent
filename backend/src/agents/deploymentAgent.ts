@@ -1,7 +1,9 @@
 import { deployToVercel } from './vercelDeploy';
 
 export async function deploymentAgent(input: { frontend: string; backend: string }) {
-  console.log('[deploymentAgent] called with:', input);
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('[deploymentAgent] called with:', input);
+  }
   try {
     if (!input.frontend) throw new Error('frontend required');
     // Deploy frontend to Vercel
@@ -13,7 +15,9 @@ export async function deploymentAgent(input: { frontend: string; backend: string
       vercel_deployment_id: vercelResult.deploymentId,
       vercel_inspect_url: vercelResult.inspectUrl
     };
-    console.log('[deploymentAgent] result:', result);
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[deploymentAgent] result:', result);
+    }
     return result;
   } catch (err) {
     console.error('[deploymentAgent] error:', err);

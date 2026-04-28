@@ -5,13 +5,15 @@ import { LLMProxyClient } from './llmProxyClient';
 import { embeddingAgent } from './embeddingAgent';
 
 export async function codeGenerationAgent(input: any) {
-  console.log('[codeGenerationAgent] called with:', input);
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('[codeGenerationAgent] called with:', input);
+  }
   try {
     if (!input) throw new Error('Input required');
     const { model, apiKey } = getModelConfigForTask('code_generation');
     const llmProxy = new LLMProxyClient({
       apiKey,
-      chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v3/chat/completions',
+      chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/chat/completions',
       embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
     });
     let retrievedPatches = [];
@@ -36,13 +38,17 @@ export async function codeGenerationAgent(input: any) {
     const completion = await llmProxy.chatCompletion([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
-    ], model, 0.8, 0.9, 1000);
-    console.log('[codeGenerationAgent] LLM completion:', completion);
+    ], 'gpt-5-chat', 0.8, 0.9, 1000);
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[codeGenerationAgent] LLM completion:', completion);
+    }
     const result = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
     if (!('patch' in result)) {
       throw new Error('Malformed codeGenerationAgent output');
     }
-    console.log('[codeGenerationAgent] result:', result);
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[codeGenerationAgent] result:', result);
+    }
     return result;
   } catch (err) {
     console.error('[codeGenerationAgent] error:', err);
