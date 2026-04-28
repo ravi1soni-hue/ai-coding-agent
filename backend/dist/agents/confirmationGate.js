@@ -10,6 +10,6 @@ async function confirmationGate(input) {
         return { confirmed: true };
     }
     catch (err) {
-        return { confirmed: false, error: err?.message || String(err) };
+        throw err;
     }
 }

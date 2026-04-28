@@ -3,6 +3,11 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+const env_1 = require("./config/env");
+// Warn if OpenAI API key is missing or looks invalid
+if (!env_1.config.OPENAI_API_KEY || env_1.config.OPENAI_API_KEY.length < 20 || env_1.config.OPENAI_API_KEY.includes('sk-') === false) {
+    console.warn('[WARNING] OPENAI_API_KEY is missing or may be invalid. Check your .env or Railway environment variables.');
+}
 const fastify_1 = __importDefault(require("fastify"));
 const static_1 = __importDefault(require("@fastify/static"));
 const path_1 = __importDefault(require("path"));

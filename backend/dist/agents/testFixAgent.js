@@ -15,6 +15,6 @@ async function testFixAgent(input) {
         throw new Error('Build/test failed after 3 retries.');
     }
     catch (err) {
-        return { success: false, logs: result?.logs || '', fixed: false, error: err?.message || String(err) };
+        throw err;
     }
 }

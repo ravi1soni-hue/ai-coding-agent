@@ -10,6 +10,6 @@ export async function testFixAgent(input: { buildFn: () => Promise<{ success: bo
     } while (retries < 3);
     throw new Error('Build/test failed after 3 retries.');
   } catch (err) {
-    return { success: false, logs: result?.logs || '', fixed: false, error: (err as any)?.message || String(err) };
+    throw err;
   }
 }

@@ -1,10 +1,11 @@
 
 import { getModelIdForTask } from './modelRouter';
 import { config } from '../config/env';
-import OpenAI from 'openai';
 import { searchVectors } from '../db/vectorStore';
+import { LLMProxyClient } from './llmProxyClient';
+import { embeddingAgent } from './embeddingAgent';
 
-const openai = new OpenAI({ apiKey: config.OPENAI_API_KEY });
+const llmProxy = new LLMProxyClient({ apiKey: config.OPENAI_API_KEY });
 
 export async function codeGenerationAgent(input: any) {
   try {
@@ -14,6 +15,8 @@ export async function codeGenerationAgent(input: any) {
     // If embedding is available in input, retrieve similar code patches for RAG
     if (input.embedding && Array.isArray(input.embedding)) {
       try {
+        // Use embeddingAgent to get embedding if needed (example: input.text)
+        // const embedding = await embeddingAgent(input.text);
         const similar = await searchVectors({
           user_id: input.user_id || 'unknown',
           task: 'code_patch',
@@ -27,20 +30,16 @@ export async function codeGenerationAgent(input: any) {
     }
     const systemPrompt = `Given the system design, generate ONLY patch-based code updates (never full repo), and output repo URLs if needed. Respond ONLY in JSON: { patch: string, frontendRepo: string, backendRepo: string }`;
     const userPrompt = JSON.stringify({ ...input, retrievedPatches });
-    const completion = await openai.chat.completions.create({
-      model: modelId,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ],
-      response_format: { type: 'json_object' }
-    });
-    const result = JSON.parse(completion.choices[0].message.content || '{}');
+    const completion = await llmProxy.chatCompletion([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ], modelId);
+    const result = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
     if (!('patch' in result)) {
       throw new Error('Malformed codeGenerationAgent output');
     }
     return result;
   } catch (err) {
-    return { patch: '', frontendRepo: '', backendRepo: '', error: (err as any)?.message || String(err) };
+    throw err;
   }
 }

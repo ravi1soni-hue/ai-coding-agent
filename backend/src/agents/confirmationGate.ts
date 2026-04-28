@@ -6,6 +6,6 @@ export async function confirmationGate(input: { confirmed: boolean }) {
     }
     return { confirmed: true };
   } catch (err) {
-    return { confirmed: false, error: (err as any)?.message || String(err) };
+    throw err;
   }
 }

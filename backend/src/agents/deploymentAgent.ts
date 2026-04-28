@@ -9,6 +9,6 @@ export async function deploymentAgent(input: { frontend: string; backend: string
       backend_url: `https://${input.backend}.railway.app`,
     };
   } catch (err) {
-    return { frontend_url: '', backend_url: '', error: (err as any)?.message || String(err) };
+    throw err;
   }
 }

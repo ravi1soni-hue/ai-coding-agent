@@ -2,29 +2,25 @@
 
 import { getModelIdForTask } from './modelRouter';
 import { config } from '../config/env';
-import OpenAI from 'openai';
+import { LLMProxyClient } from './llmProxyClient';
 
-const openai = new OpenAI({ apiKey: config.OPENAI_API_KEY });
+const llmProxy = new LLMProxyClient({ apiKey: config.OPENAI_API_KEY });
 
 export async function clarificationAgent(input: any) {
   try {
     if (!input) throw new Error('Input required');
     const modelId = getModelIdForTask('clarification');
     const systemPrompt = `Given the following structured requirements, ask ONLY blocking clarification questions (no scope expansion). Respond ONLY in JSON: { questions: string[], confirmed: boolean }.`;
-    const completion = await openai.chat.completions.create({
-      model: modelId,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: JSON.stringify(input) }
-      ],
-      response_format: { type: 'json_object' }
-    });
-    const result = JSON.parse(completion.choices[0].message.content || '{}');
+    const completion = await llmProxy.chatCompletion([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: JSON.stringify(input) }
+    ], modelId);
+    const result = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
     if (!('questions' in result) || !('confirmed' in result)) {
       throw new Error('Malformed clarificationAgent output');
     }
     return result;
   } catch (err) {
-    return { questions: [], confirmed: false, error: (err as any)?.message || String(err) };
+    throw err;
   }
 }

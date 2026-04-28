@@ -14,6 +14,6 @@ async function deploymentAgent(input) {
         };
     }
     catch (err) {
-        return { frontend_url: '', backend_url: '', error: err?.message || String(err) };
+        throw err;
     }
 }
