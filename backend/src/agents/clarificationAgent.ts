@@ -10,7 +10,6 @@ export async function clarificationAgent(input: any) {
     const { model, apiKey } = getModelConfigForTask('clarification');
     const llmProxy = new LLMProxyClient({
       apiKey,
-      chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v3/chat/completions',
       embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
     });
     const systemPrompt = `Given the following structured requirements, ask ONLY blocking clarification questions (no scope expansion). Respond ONLY in JSON: { questions: string[], confirmed: boolean }.`;

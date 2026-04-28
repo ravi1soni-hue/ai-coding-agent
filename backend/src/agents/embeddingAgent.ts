@@ -8,8 +8,6 @@ export async function embeddingAgent(text: string): Promise<number[]> {
     const { apiKey } = getModelConfigForTask('embedding');
     const llmProxy = new LLMProxyClient({
       apiKey,
-      chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v3/chat/completions',
-      embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v3/text/embeddings',
     });
     // The new embedding method expects an array of texts and returns an array of arrays
     const result = await llmProxy.embedding([text], 746);
