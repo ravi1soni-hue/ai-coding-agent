@@ -8,7 +8,7 @@ export async function systemDesignAgent(input: any) {
     const { model, apiKey } = getModelConfigForTask('core_reasoning');
     const llmProxy = new LLMProxyClient({
       apiKey,
-      chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v3/chat/completions',
+      chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/chat/completions',
       embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
     });
     const systemPrompt = `Given the requirements, decide the full technical architecture. Respond ONLY in JSON: { frontend, backend, database, auth, hosting: { frontend, backend } }`;
