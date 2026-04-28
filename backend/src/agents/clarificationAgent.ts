@@ -4,7 +4,11 @@ import { getModelIdForTask } from './modelRouter';
 import { config } from '../config/env';
 import { LLMProxyClient } from './llmProxyClient';
 
-const llmProxy = new LLMProxyClient({ apiKey: config.OPENAI_API_KEY });
+const llmProxy = new LLMProxyClient({
+  apiKey: config.OPENAI_API_KEY,
+  chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v3/chat/completions',
+  embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
+});
 
 export async function clarificationAgent(input: any) {
   try {

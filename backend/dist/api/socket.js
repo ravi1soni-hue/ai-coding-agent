@@ -26,7 +26,15 @@ function createSocketServer(server) {
                     ws.send(JSON.stringify({ type: 'stream', token: `Requirements: ${JSON.stringify(requirements)}\n` }));
                 }
                 catch (err) {
-                    ws.send(JSON.stringify({ type: 'error', message: err?.message || 'Requirement analysis failed.' }));
+                    ws.send(JSON.stringify({
+                        type: 'error',
+                        message: err?.message || 'Requirement analysis failed.',
+                        error: {
+                            name: err?.name,
+                            stack: err?.stack,
+                            details: err
+                        }
+                    }));
                     return;
                 }
                 // Step 2: Clarification
@@ -37,7 +45,15 @@ function createSocketServer(server) {
                     ws.send(JSON.stringify({ type: 'stream', token: `Clarifications: ${JSON.stringify(clarifications)}\n` }));
                 }
                 catch (err) {
-                    ws.send(JSON.stringify({ type: 'error', message: err?.message || 'Clarification failed.' }));
+                    ws.send(JSON.stringify({
+                        type: 'error',
+                        message: err?.message || 'Clarification failed.',
+                        error: {
+                            name: err?.name,
+                            stack: err?.stack,
+                            details: err
+                        }
+                    }));
                     return;
                 }
                 // Step 3: Confirmation Gate
@@ -48,7 +64,15 @@ function createSocketServer(server) {
                     ws.send(JSON.stringify({ type: 'stream', token: `Confirmation: ${JSON.stringify(confirmation)}\n` }));
                 }
                 catch (err) {
-                    ws.send(JSON.stringify({ type: 'error', message: err?.message || 'Confirmation failed.' }));
+                    ws.send(JSON.stringify({
+                        type: 'error',
+                        message: err?.message || 'Confirmation failed.',
+                        error: {
+                            name: err?.name,
+                            stack: err?.stack,
+                            details: err
+                        }
+                    }));
                     return;
                 }
                 // Step 4: System Design
@@ -59,7 +83,15 @@ function createSocketServer(server) {
                     ws.send(JSON.stringify({ type: 'stream', token: `System Design: ${JSON.stringify(systemDesign)}\n` }));
                 }
                 catch (err) {
-                    ws.send(JSON.stringify({ type: 'error', message: err?.message || 'System design failed.' }));
+                    ws.send(JSON.stringify({
+                        type: 'error',
+                        message: err?.message || 'System design failed.',
+                        error: {
+                            name: err?.name,
+                            stack: err?.stack,
+                            details: err
+                        }
+                    }));
                     return;
                 }
                 // Step 5: Code Generation
@@ -70,7 +102,15 @@ function createSocketServer(server) {
                     ws.send(JSON.stringify({ type: 'stream', token: `Code Patch: ${JSON.stringify(codeGen)}\n` }));
                 }
                 catch (err) {
-                    ws.send(JSON.stringify({ type: 'error', message: err?.message || 'Code generation failed.' }));
+                    ws.send(JSON.stringify({
+                        type: 'error',
+                        message: err?.message || 'Code generation failed.',
+                        error: {
+                            name: err?.name,
+                            stack: err?.stack,
+                            details: err
+                        }
+                    }));
                     return;
                 }
                 // Step 6: Test & Fix
@@ -81,7 +121,15 @@ function createSocketServer(server) {
                     ws.send(JSON.stringify({ type: 'stream', token: `Test Result: ${JSON.stringify(testResult)}\n` }));
                 }
                 catch (err) {
-                    ws.send(JSON.stringify({ type: 'error', message: err?.message || 'Test/fix failed.' }));
+                    ws.send(JSON.stringify({
+                        type: 'error',
+                        message: err?.message || 'Test/fix failed.',
+                        error: {
+                            name: err?.name,
+                            stack: err?.stack,
+                            details: err
+                        }
+                    }));
                     return;
                 }
                 // Step 7: Deployment
@@ -92,13 +140,29 @@ function createSocketServer(server) {
                     ws.send(JSON.stringify({ type: 'stream', token: `Deployment: ${JSON.stringify(deployment)}\n` }));
                 }
                 catch (err) {
-                    ws.send(JSON.stringify({ type: 'error', message: err?.message || 'Deployment failed.' }));
+                    ws.send(JSON.stringify({
+                        type: 'error',
+                        message: err?.message || 'Deployment failed.',
+                        error: {
+                            name: err?.name,
+                            stack: err?.stack,
+                            details: err
+                        }
+                    }));
                     return;
                 }
                 ws.send(JSON.stringify({ type: 'done' }));
             }
             catch (err) {
-                ws.send(JSON.stringify({ type: 'error', message: err?.message || 'AI process failed.' }));
+                ws.send(JSON.stringify({
+                    type: 'error',
+                    message: err?.message || 'AI process failed.',
+                    error: {
+                        name: err?.name,
+                        stack: err?.stack,
+                        details: err
+                    }
+                }));
             }
         });
     });

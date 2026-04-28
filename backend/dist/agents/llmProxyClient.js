@@ -9,11 +9,11 @@ const axios_1 = __importDefault(require("axios"));
 class LLMProxyClient {
     constructor(options) {
         this.apiKey = options.apiKey;
-        this.url = options.url || 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings';
+        this.chatUrl = options.chatUrl || 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/chat/completions';
+        this.embeddingUrl = options.embeddingUrl || 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings';
     }
     async chatCompletion(messages, model) {
-        // This is a placeholder. You may need to adjust the payload and endpoint for chat completion if your proxy supports it.
-        const response = await axios_1.default.post(this.url.replace('embeddings', 'chat/completions'), {
+        const response = await axios_1.default.post(this.chatUrl, {
             model,
             messages,
             response_format: { type: 'json_object' },
@@ -24,14 +24,15 @@ class LLMProxyClient {
             },
         });
         if (response.status !== 200) {
-            throw new Error(`LLM Proxy failed: ${response.status} ${JSON.stringify(response.data)}`);
+            throw new Error(`LLM Proxy chatCompletion failed: ${response.status} ${JSON.stringify(response.data)}`);
         }
         return response.data;
     }
-    async embedding(text) {
-        const response = await axios_1.default.post(this.url, {
+    async embedding(text, model) {
+        const response = await axios_1.default.post(this.embeddingUrl, {
             texts: [text],
-            dimensions: 736,
+            model,
+            response_format: { type: 'json_object' },
         }, {
             headers: {
                 'Content-Type': 'application/json',

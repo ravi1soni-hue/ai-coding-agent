@@ -29,7 +29,15 @@ export function createSocketServer(server: http.Server) {
           requirements = await requirementAnalysisAgent({ user_message: userMsg });
           ws.send(JSON.stringify({ type: 'stream', token: `Requirements: ${JSON.stringify(requirements)}\n` }));
         } catch (err) {
-          ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Requirement analysis failed.' }));
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: (err as any)?.message || 'Requirement analysis failed.',
+            error: {
+              name: (err as any)?.name,
+              stack: (err as any)?.stack,
+              details: err
+            }
+          }));
           return;
         }
 
@@ -40,7 +48,15 @@ export function createSocketServer(server: http.Server) {
           clarifications = await clarificationAgent(requirements);
           ws.send(JSON.stringify({ type: 'stream', token: `Clarifications: ${JSON.stringify(clarifications)}\n` }));
         } catch (err) {
-          ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Clarification failed.' }));
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: (err as any)?.message || 'Clarification failed.',
+            error: {
+              name: (err as any)?.name,
+              stack: (err as any)?.stack,
+              details: err
+            }
+          }));
           return;
         }
 
@@ -51,7 +67,15 @@ export function createSocketServer(server: http.Server) {
           confirmation = await confirmationGate(clarifications);
           ws.send(JSON.stringify({ type: 'stream', token: `Confirmation: ${JSON.stringify(confirmation)}\n` }));
         } catch (err) {
-          ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Confirmation failed.' }));
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: (err as any)?.message || 'Confirmation failed.',
+            error: {
+              name: (err as any)?.name,
+              stack: (err as any)?.stack,
+              details: err
+            }
+          }));
           return;
         }
 
@@ -62,7 +86,15 @@ export function createSocketServer(server: http.Server) {
           systemDesign = await systemDesignAgent(requirements);
           ws.send(JSON.stringify({ type: 'stream', token: `System Design: ${JSON.stringify(systemDesign)}\n` }));
         } catch (err) {
-          ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'System design failed.' }));
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: (err as any)?.message || 'System design failed.',
+            error: {
+              name: (err as any)?.name,
+              stack: (err as any)?.stack,
+              details: err
+            }
+          }));
           return;
         }
 
@@ -73,7 +105,15 @@ export function createSocketServer(server: http.Server) {
           codeGen = await codeGenerationAgent(systemDesign);
           ws.send(JSON.stringify({ type: 'stream', token: `Code Patch: ${JSON.stringify(codeGen)}\n` }));
         } catch (err) {
-          ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Code generation failed.' }));
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: (err as any)?.message || 'Code generation failed.',
+            error: {
+              name: (err as any)?.name,
+              stack: (err as any)?.stack,
+              details: err
+            }
+          }));
           return;
         }
 
@@ -84,7 +124,15 @@ export function createSocketServer(server: http.Server) {
           testResult = await testFixAgent({ buildFn: async () => ({ success: true, logs: 'Build successful.' }) });
           ws.send(JSON.stringify({ type: 'stream', token: `Test Result: ${JSON.stringify(testResult)}\n` }));
         } catch (err) {
-          ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Test/fix failed.' }));
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: (err as any)?.message || 'Test/fix failed.',
+            error: {
+              name: (err as any)?.name,
+              stack: (err as any)?.stack,
+              details: err
+            }
+          }));
           return;
         }
 
@@ -95,13 +143,29 @@ export function createSocketServer(server: http.Server) {
           deployment = await deploymentAgent({ frontend: 'frontend', backend: 'backend' });
           ws.send(JSON.stringify({ type: 'stream', token: `Deployment: ${JSON.stringify(deployment)}\n` }));
         } catch (err) {
-          ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Deployment failed.' }));
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: (err as any)?.message || 'Deployment failed.',
+            error: {
+              name: (err as any)?.name,
+              stack: (err as any)?.stack,
+              details: err
+            }
+          }));
           return;
         }
 
         ws.send(JSON.stringify({ type: 'done' }));
       } catch (err) {
-        ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'AI process failed.' }));
+        ws.send(JSON.stringify({
+          type: 'error',
+          message: (err as any)?.message || 'AI process failed.',
+          error: {
+            name: (err as any)?.name,
+            stack: (err as any)?.stack,
+            details: err
+          }
+        }));
       }
     });
   });

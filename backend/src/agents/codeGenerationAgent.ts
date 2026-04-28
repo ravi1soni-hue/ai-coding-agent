@@ -5,7 +5,11 @@ import { searchVectors } from '../db/vectorStore';
 import { LLMProxyClient } from './llmProxyClient';
 import { embeddingAgent } from './embeddingAgent';
 
-const llmProxy = new LLMProxyClient({ apiKey: config.OPENAI_API_KEY });
+const llmProxy = new LLMProxyClient({
+  apiKey: config.OPENAI_API_KEY,
+  chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v3/chat/completions',
+  embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
+});
 
 export async function codeGenerationAgent(input: any) {
   try {

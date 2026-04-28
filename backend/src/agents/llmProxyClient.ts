@@ -3,22 +3,24 @@ import axios, { AxiosResponse } from 'axios';
 
 export interface LLMProxyOptions {
   apiKey: string;
-  url?: string;
+  chatUrl?: string;
+  embeddingUrl?: string;
 }
 
 export class LLMProxyClient {
   private apiKey: string;
-  private url: string;
+  private chatUrl: string;
+  private embeddingUrl: string;
 
   constructor(options: LLMProxyOptions) {
     this.apiKey = options.apiKey;
-    this.url = options.url || 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings';
+    this.chatUrl = options.chatUrl || 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/chat/completions';
+    this.embeddingUrl = options.embeddingUrl || 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings';
   }
 
   async chatCompletion(messages: any[], model: string): Promise<any> {
-    // This is a placeholder. You may need to adjust the payload and endpoint for chat completion if your proxy supports it.
     const response: AxiosResponse<any> = await axios.post(
-      this.url.replace('embeddings', 'chat/completions'),
+      this.chatUrl,
       {
         model,
         messages,
@@ -32,17 +34,18 @@ export class LLMProxyClient {
       }
     );
     if (response.status !== 200) {
-      throw new Error(`LLM Proxy failed: ${response.status} ${JSON.stringify(response.data)}`);
+      throw new Error(`LLM Proxy chatCompletion failed: ${response.status} ${JSON.stringify(response.data)}`);
     }
     return response.data;
   }
 
-  async embedding(text: string): Promise<number[]> {
+  async embedding(text: string, model: string): Promise<number[]> {
     const response: AxiosResponse<any> = await axios.post(
-      this.url,
+      this.embeddingUrl,
       {
         texts: [text],
-        dimensions: 736,
+        model,
+        response_format: { type: 'json_object' },
       },
       {
         headers: {
