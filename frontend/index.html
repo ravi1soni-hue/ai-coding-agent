@@ -216,6 +216,8 @@
     let waiting = false;
     let lastUserMsg = '';
 
+    // Log buffer for detailed logs
+    let logBuffer = [];
     function appendMsg(text, sender, type = '') {
       const div = document.createElement('div');
       div.className = 'msg ' + sender;
@@ -225,16 +227,35 @@
       div.appendChild(bubble);
       chat.appendChild(div);
       chat.scrollTop = chat.scrollHeight;
+      // Add to log buffer with timestamp and type
+      logBuffer.push({
+        time: new Date().toISOString(),
+        sender,
+        type,
+        text: (typeof text === 'string' ? text.replace(/<[^>]+>/g, '') : text)
+      });
     }
 
     function setStatus(msg, type = '') {
       statusDiv.textContent = msg;
       statusDiv.style.color = type === 'error' ? '#ff4f8c' : (type === 'success' ? '#4f8cff' : '#fff');
+      logBuffer.push({
+        time: new Date().toISOString(),
+        sender: 'status',
+        type,
+        text: msg
+      });
     }
 
     function setConnectionStatus(msg, type = '') {
       connectionStatus.textContent = msg;
       connectionStatus.style.color = type === 'error' ? '#ff4f8c' : (type === 'success' ? '#4f8cff' : '#ffb84f');
+      logBuffer.push({
+        time: new Date().toISOString(),
+        sender: 'connection',
+        type,
+        text: msg
+      });
     }
 
     function setWaiting(isWaiting, progress = 0, progressMsg = '') {
@@ -286,13 +307,13 @@
 
     function copyChatLogs() {
       let logs = '';
-      document.querySelectorAll('#chat .msg').forEach(div => {
-        logs += div.textContent + '\n';
+      logBuffer.forEach(entry => {
+        logs += `[${entry.time}] [${entry.sender}${entry.type ? '/' + entry.type : ''}] ${entry.text}\n`;
       });
       navigator.clipboard.writeText(logs.trim()).then(() => {
-        setStatus('Chat logs copied!', 'success');
+        setStatus('Detailed logs copied!', 'success');
       }, () => {
-        setStatus('Failed to copy chat logs.', 'error');
+        setStatus('Failed to copy logs.', 'error');
       });
     }
 
@@ -319,7 +340,15 @@
             return;
           } else if (obj.type === 'error') {
             setStatus(obj.message || 'AI error.', 'error');
-            appendMsg(`<b>Error:</b> ${obj.message} <button onclick='retryLastStep()'>Retry</button>`, 'ai', 'error');
+            let errorDetails = '';
+            if (obj.error) {
+              errorDetails += `<br/><b>Name:</b> ${obj.error.name || ''}`;
+              if (obj.error.stack) errorDetails += `<br/><b>Stack:</b><pre style='white-space:pre-wrap;max-width:100%;overflow-x:auto;'>${obj.error.stack}</pre>`;
+              if (obj.error.details && typeof obj.error.details === 'object') {
+                errorDetails += `<br/><b>Details:</b> <pre style='white-space:pre-wrap;max-width:100%;overflow-x:auto;'>${JSON.stringify(obj.error.details, null, 2)}</pre>`;
+              }
+            }
+            appendMsg(`<b>Error:</b> ${obj.message} <button onclick='retryLastStep()'>Retry</button>${errorDetails}`, 'ai', 'error');
             setWaiting(false);
             streamResponseEnd();
             return;
