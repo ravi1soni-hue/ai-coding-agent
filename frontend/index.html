@@ -288,7 +288,23 @@
       // No-op for now (could add animation)
     }
 
+    // --- Clarification/confirmation form state ---
+    let clarificationForm = null;
     function sendMsg(text) {
+      if (clarificationForm) {
+        // If clarification form is open, submit its data
+        const formData = {};
+        clarificationForm.querySelectorAll('input,textarea').forEach(input => {
+          formData[input.name] = input.value;
+        });
+        ws.send(JSON.stringify(formData));
+        appendMsg('<b>You answered:</b><br>' + Object.entries(formData).map(([k,v]) => `<b>${k}:</b> ${v}`).join('<br>'), 'user');
+        clarificationForm.remove();
+        clarificationForm = null;
+        setWaiting(true, 0.1, 'AI is thinking...');
+        streamResponseStart();
+        return;
+      }
       const val = text || msgInput.value;
       if (!val || waiting || !ws || ws.readyState !== 1) return;
       appendMsg(val, 'user');
@@ -337,6 +353,53 @@
             return;
           } else if (obj.type === 'stream') {
             streamResponseUpdate(obj.token || '');
+            return;
+          } else if (obj.type === 'clarification') {
+            setWaiting(false);
+            // Show a nice form for questions
+            if (clarificationForm) clarificationForm.remove();
+            clarificationForm = document.createElement('form');
+            clarificationForm.style.background = '#23283a';
+            clarificationForm.style.padding = '18px';
+            clarificationForm.style.borderRadius = '12px';
+            clarificationForm.style.margin = '18px 0';
+            clarificationForm.style.display = 'flex';
+            clarificationForm.style.flexDirection = 'column';
+            clarificationForm.style.gap = '12px';
+            let html = '<b>AI needs more info to continue:</b><br>';
+            if (obj.questions && obj.questions.length > 0) {
+              obj.questions.forEach((q, i) => {
+                html += `<label style='margin-bottom:4px;'><b>Q${i+1}:</b> ${q}</label><input name="${q.replace(/[^a-zA-Z0-9_]/g,'_')}" style='padding:8px;border-radius:6px;border:none;background:#20243a;color:#fff;' required />`;
+              });
+            }
+            if (obj.needsConfirmation) {
+              html += `<label><b>Please confirm to continue:</b></label><button type='submit' style='background:#4f8cff;color:#fff;padding:10px 18px;border-radius:8px;border:none;font-size:1rem;margin-top:8px;'>Confirm & Continue</button>`;
+            } else {
+              html += `<button type='submit' style='background:#4f8cff;color:#fff;padding:10px 18px;border-radius:8px;border:none;font-size:1rem;margin-top:8px;'>Submit Answers</button>`;
+            }
+            clarificationForm.innerHTML = html;
+            clarificationForm.onsubmit = (ev) => { ev.preventDefault(); sendMsg(); };
+            appendMsg(clarificationForm.outerHTML, 'ai', 'status');
+            // Actually insert the form into the DOM for interaction
+            chat.appendChild(clarificationForm);
+            clarificationForm.scrollIntoView({ behavior: 'smooth' });
+            return;
+          } else if (obj.type === 'confirmation') {
+            setWaiting(false);
+            if (clarificationForm) clarificationForm.remove();
+            clarificationForm = document.createElement('form');
+            clarificationForm.style.background = '#23283a';
+            clarificationForm.style.padding = '18px';
+            clarificationForm.style.borderRadius = '12px';
+            clarificationForm.style.margin = '18px 0';
+            clarificationForm.style.display = 'flex';
+            clarificationForm.style.flexDirection = 'column';
+            clarificationForm.style.gap = '12px';
+            clarificationForm.innerHTML = `<b>AI needs your confirmation to continue:</b><br><div style='margin-bottom:8px;'>${obj.message || 'Please confirm to proceed.'}</div><button type='submit' style='background:#4f8cff;color:#fff;padding:10px 18px;border-radius:8px;border:none;font-size:1rem;'>Confirm & Continue</button>`;
+            clarificationForm.onsubmit = (ev) => { ev.preventDefault(); sendMsg(); };
+            appendMsg(clarificationForm.outerHTML, 'ai', 'status');
+            chat.appendChild(clarificationForm);
+            clarificationForm.scrollIntoView({ behavior: 'smooth' });
             return;
           } else if (obj.type === 'error') {
             setStatus(obj.message || 'AI error.', 'error');
