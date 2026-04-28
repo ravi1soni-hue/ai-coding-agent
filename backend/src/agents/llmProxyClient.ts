@@ -1,5 +1,5 @@
 // LLM Proxy Client for Coforge
-import axios, { AxiosResponse } from 'axios';
+// Use fetch instead of axios for LLM proxy calls
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const util = require('util');
 
@@ -26,33 +26,28 @@ export class LLMProxyClient {
     console.log(`[LLMProxyClient] ${message}${data ? ': ' + util.inspect(data, { depth: 5 }) : ''}`);
   }
 
-  async chatCompletion(messages: any[], model: string, temperature = 0.8, top_p = 0.9, max_tokens = 1000): Promise<any> {
+  async chatCompletion(messages: any[], _model: string, temperature = 0.8, top_p = 0.9, max_tokens = 1000): Promise<any> {
+    // Force model to 'gpt-5-chat' for compatibility with working project
+    const model = 'gpt-5-chat';
     this.log('chatCompletion called', { model, messages, temperature, top_p, max_tokens });
     try {
-      const response: AxiosResponse<any> = await axios.post(
-        this.chatUrl,
-        {
-          model,
-          messages,
-          temperature,
-          top_p,
-          max_tokens,
+      const response = await fetch(this.chatUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-KEY': this.apiKey,
         },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'X-API-KEY': this.apiKey,
-          },
-        }
-      );
-      this.log('chatCompletion response', { status: response.status, data: response.data });
-      if (response.status !== 200) {
-        this.log('chatCompletion error', { status: response.status, data: response.data });
-        throw new Error(`LLM Proxy chatCompletion failed: ${response.status} ${JSON.stringify(response.data)}`);
+        body: JSON.stringify({ model, messages, temperature, top_p, max_tokens }),
+      });
+      const data = await response.json();
+      this.log('chatCompletion response', { status: response.status, data });
+      if (!response.ok) {
+        this.log('chatCompletion error', { status: response.status, data });
+        throw new Error(`LLM Proxy chatCompletion failed: ${response.status} ${JSON.stringify(data)}`);
       }
-      return response.data;
-    } catch (err) {
-      this.log('chatCompletion exception', err);
+      return data;
+    } catch (err: any) {
+      this.log('chatCompletion FETCH ERROR', err);
       throw err;
     }
   }
@@ -60,25 +55,21 @@ export class LLMProxyClient {
   async embedding(texts: string[], dimensions = 746): Promise<number[][]> {
     this.log('embedding called', { texts, dimensions });
     try {
-      const response: AxiosResponse<any> = await axios.post(
-        this.embeddingUrl,
-        {
-          texts,
-          dimensions,
+      const response = await fetch(this.embeddingUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-KEY': this.apiKey,
         },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'X-API-KEY': this.apiKey,
-          },
-        }
-      );
-      this.log('embedding response', { status: response.status, data: response.data });
-      if (response.status !== 200) {
-        this.log('embedding error', { status: response.status, data: response.data });
-        throw new Error(`LLM Proxy embedding failed: ${response.status} ${JSON.stringify(response.data)}`);
+        body: JSON.stringify({ texts, dimensions }),
+      });
+      const data = await response.json();
+      this.log('embedding response', { status: response.status, data });
+      if (!response.ok) {
+        this.log('embedding error', { status: response.status, data });
+        throw new Error(`LLM Proxy embedding failed: ${response.status} ${JSON.stringify(data)}`);
       }
-      return response.data.embeddings.map((e: any) => Array.isArray(e) ? e.map(Number) : [Number(e)]);
+      return data.embeddings.map((e: any) => Array.isArray(e) ? e.map(Number) : [Number(e)]);
     } catch (err) {
       this.log('embedding exception', err);
       throw err;
