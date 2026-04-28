@@ -21,7 +21,15 @@ export async function systemDesignAgent(input: any) {
     if (process.env.NODE_ENV !== 'production') {
       console.log('[systemDesignAgent] LLM completion:', completion);
     }
-    const result = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    let content = completion.choices?.[0]?.message?.content || '{}';
+    // Remove Markdown code block markers (```json, ```, etc.)
+    content = content.replace(/```[a-zA-Z]*\s*|\n?```/g, '').trim();
+    // Extract first JSON object if there's extra text
+    const jsonMatch = content.match(/{[\s\S]*}/);
+    if (!jsonMatch) {
+      throw new Error('No JSON object found in LLM response');
+    }
+    const result = JSON.parse(jsonMatch[0]);
     if (!result.frontend || !result.backend) {
       throw new Error('Malformed systemDesignAgent output');
     }
