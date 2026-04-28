@@ -45,6 +45,10 @@ async function codeGenerationAgent(input) {
             console.log('[codeGenerationAgent] LLM completion:', completion);
         }
         let content = completion.choices?.[0]?.message?.content || '{}';
+        // Log the raw LLM content for debugging
+        if (process.env.NODE_ENV !== 'production') {
+            console.log('[LLM_RAW_CONTENT_CODEGEN]', content);
+        }
         // Always remove all Markdown code block markers (handles ```json, ``` etc.)
         content = content.replace(/```[a-zA-Z]*\s*|```/g, '').trim();
         // Now extract the first JSON object

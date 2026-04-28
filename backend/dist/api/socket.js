@@ -27,6 +27,9 @@ function createSocketServer(server) {
             pendingQuestions: [],
             context: {},
         };
+        // Track answers for step-by-step clarification
+        let clarificationAnswers = {};
+        let clarificationIndex = 0;
         async function runFlow(userMsg, userClarificationAnswers = null) {
             try {
                 // Step 1: Requirement Analysis
@@ -51,15 +54,20 @@ function createSocketServer(server) {
                     ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Clarifying requirements...' }));
                     try {
                         let clarInput = session.requirements || {};
+                        // Merge all previous answers
+                        clarInput = { ...clarInput, ...clarificationAnswers };
                         if (userClarificationAnswers && typeof userClarificationAnswers === 'object') {
                             clarInput = { ...clarInput, ...userClarificationAnswers };
                         }
                         session.clarifications = await (0, clarificationAgent_1.clarificationAgent)(clarInput);
                         if (session.clarifications && Array.isArray(session.clarifications.questions) && session.clarifications.questions.length > 0 && !session.clarifications.confirmed) {
-                            ws.send(JSON.stringify({ type: 'clarification', questions: session.clarifications.questions, context: clarInput }));
                             session.pendingQuestions = session.clarifications.questions;
-                            session.step = 'clarification_wait';
-                            return;
+                            // Send only the next unanswered question
+                            if (clarificationIndex < session.pendingQuestions.length) {
+                                ws.send(JSON.stringify({ type: 'clarification', question: session.pendingQuestions[clarificationIndex], index: clarificationIndex + 1, total: session.pendingQuestions.length, context: clarInput }));
+                                session.step = 'clarification_wait';
+                                return;
+                            }
                         }
                         else if (session.clarifications && !session.clarifications.confirmed) {
                             ws.send(JSON.stringify({ type: 'clarification', questions: [], needsConfirmation: true, context: clarInput }));
@@ -160,20 +168,23 @@ function createSocketServer(server) {
         ws.on('message', async (message) => {
             // If waiting for clarification/confirmation, treat message as user answer
             if (session.step === 'clarification_wait') {
-                // Assume message is JSON or plain text answer to questions
-                let userAnswers = {};
-                try {
-                    userAnswers = JSON.parse(message.toString());
+                // Only one question at a time
+                let answer = message.toString();
+                // Map answer to the current question
+                if (session.pendingQuestions && clarificationIndex < session.pendingQuestions.length) {
+                    clarificationAnswers[session.pendingQuestions[clarificationIndex]] = answer;
+                    clarificationIndex++;
                 }
-                catch {
-                    // fallback: treat as plain text, map to first question
-                    if (session.pendingQuestions && session.pendingQuestions.length > 0) {
-                        userAnswers[session.pendingQuestions[0] || 'answer'] = message.toString();
-                    }
+                // If more questions, ask next; else, continue
+                if (clarificationIndex < session.pendingQuestions.length) {
+                    ws.send(JSON.stringify({ type: 'clarification', question: session.pendingQuestions[clarificationIndex], index: clarificationIndex + 1, total: session.pendingQuestions.length, context: session.requirements }));
+                    return;
                 }
-                session.step = 'clarification';
-                await runFlow(null, userAnswers);
-                return;
+                else {
+                    session.step = 'clarification';
+                    await runFlow(null, clarificationAnswers);
+                    return;
+                }
             }
             else if (session.step === 'confirmation_wait') {
                 // User confirms, resume
