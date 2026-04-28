@@ -11,7 +11,7 @@ export async function codeGenerationAgent(input: any) {
     const { model, apiKey } = getModelConfigForTask('code_generation');
     const llmProxy = new LLMProxyClient({
       apiKey,
-      chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v3/chat/completions',
+      chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/chat/completions',
       embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
     });
     let retrievedPatches = [];
