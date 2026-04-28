@@ -11,23 +11,23 @@ export type TaskType =
   | 'voice'
   | 'embedding';
 
-export function getModelIdForTask(task: TaskType): string {
+export function getModelConfigForTask(task: TaskType): { model: string; apiKey: string } {
   switch (task) {
     case 'core_reasoning':
-      return config.GPT4O_MINI_MODEL_ID || 'gpt-4o-mini';
+      return { model: config.GPT4O_MINI_MODEL_ID || 'gpt-4o-mini', apiKey: config.GPT4O_MINI_API_KEY };
     case 'code_generation':
-      return config.GPT5_MINI_MODEL_ID || 'gpt-5-mini';
+      return { model: config.GPT5_MINI_MODEL_ID || 'gpt-5-mini', apiKey: config.GPT5_MINI_API_KEY };
     case 'agent_orchestration':
-      return config.GPT5_2_MODEL_ID || 'gpt-5-2';
+      return { model: config.GPT5_2_MODEL_ID || 'gpt-5-2', apiKey: config.GPT5_2_API_KEY };
     case 'clarification':
-      return config.GPT4O_MODEL_ID || 'gpt-4o';
+      return { model: config.GPT4O_MODEL_ID || 'gpt-4o', apiKey: config.GPT4O_API_KEY };
     case 'summary':
-      return config.GPT4O_MODEL_ID || 'gpt-4o';
+      return { model: config.GPT4O_MODEL_ID || 'gpt-4o', apiKey: config.GPT4O_API_KEY };
     case 'voice':
-      return config.GPT4O_MODEL_ID || 'gpt-4o';
+      return { model: config.GPT4O_MODEL_ID || 'gpt-4o', apiKey: config.GPT4O_API_KEY };
     case 'embedding':
-      return config.EMBEDDING_MODEL_ID || 'embedding-model';
+      return { model: config.EMBEDDING_MODEL_ID || 'embedding-model', apiKey: config.EMBEDDING_API_KEY };
     default:
-      return config.GPT4O_MINI_MODEL_ID || 'gpt-4o-mini';
+      return { model: config.GPT4O_MINI_MODEL_ID || 'gpt-4o-mini', apiKey: config.GPT4O_MINI_API_KEY };
   }
 }

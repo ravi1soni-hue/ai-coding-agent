@@ -2,20 +2,19 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.codeGenerationAgent = codeGenerationAgent;
 const modelRouter_1 = require("./modelRouter");
-const env_1 = require("../config/env");
 const vectorStore_1 = require("../db/vectorStore");
 const llmProxyClient_1 = require("./llmProxyClient");
-const llmProxy = new llmProxyClient_1.LLMProxyClient({
-    apiKey: env_1.config.OPENAI_API_KEY,
-    chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v3/chat/completions',
-    embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
-});
 async function codeGenerationAgent(input) {
     console.log('[codeGenerationAgent] called with:', input);
     try {
         if (!input)
             throw new Error('Input required');
-        const modelId = (0, modelRouter_1.getModelIdForTask)('code_generation');
+        const { model, apiKey } = (0, modelRouter_1.getModelConfigForTask)('code_generation');
+        const llmProxy = new llmProxyClient_1.LLMProxyClient({
+            apiKey,
+            chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v3/chat/completions',
+            embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
+        });
         let retrievedPatches = [];
         // If embedding is available in input, retrieve similar code patches for RAG
         if (input.embedding && Array.isArray(input.embedding)) {
@@ -39,7 +38,7 @@ async function codeGenerationAgent(input) {
         const completion = await llmProxy.chatCompletion([
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt }
-        ], modelId, 0.8, 0.9, 1000);
+        ], model, 0.8, 0.9, 1000);
         console.log('[codeGenerationAgent] LLM completion:', completion);
         const result = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
         if (!('patch' in result)) {

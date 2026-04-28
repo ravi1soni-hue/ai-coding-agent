@@ -1,21 +1,19 @@
 
-import { getModelIdForTask } from './modelRouter';
-import { config } from '../config/env';
+import { getModelConfigForTask } from './modelRouter';
 import { searchVectors } from '../db/vectorStore';
 import { LLMProxyClient } from './llmProxyClient';
 import { embeddingAgent } from './embeddingAgent';
-
-const llmProxy = new LLMProxyClient({
-  apiKey: config.OPENAI_API_KEY,
-  chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v3/chat/completions',
-  embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
-});
 
 export async function codeGenerationAgent(input: any) {
   console.log('[codeGenerationAgent] called with:', input);
   try {
     if (!input) throw new Error('Input required');
-    const modelId = getModelIdForTask('code_generation');
+    const { model, apiKey } = getModelConfigForTask('code_generation');
+    const llmProxy = new LLMProxyClient({
+      apiKey,
+      chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v3/chat/completions',
+      embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
+    });
     let retrievedPatches = [];
     // If embedding is available in input, retrieve similar code patches for RAG
     if (input.embedding && Array.isArray(input.embedding)) {
@@ -38,7 +36,7 @@ export async function codeGenerationAgent(input: any) {
     const completion = await llmProxy.chatCompletion([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
-    ], modelId, 0.8, 0.9, 1000);
+    ], model, 0.8, 0.9, 1000);
     console.log('[codeGenerationAgent] LLM completion:', completion);
     const result = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
     if (!('patch' in result)) {

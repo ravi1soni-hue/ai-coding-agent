@@ -9,8 +9,13 @@ export const config = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
   RAILWAY_TOKEN: process.env.RAILWAY_TOKEN || '',
   GPT4O_MINI_MODEL_ID: process.env.GPT4O_MINI_MODEL_ID || '',
+  GPT4O_MINI_API_KEY: process.env.GPT4O_MINI_API_KEY || process.env.OPENAI_API_KEY || '',
   GPT5_MINI_MODEL_ID: process.env.GPT5_MINI_MODEL_ID || '',
+  GPT5_MINI_API_KEY: process.env.GPT5_MINI_API_KEY || process.env.OPENAI_API_KEY || '',
   GPT5_2_MODEL_ID: process.env.GPT5_2_MODEL_ID || '',
+  GPT5_2_API_KEY: process.env.GPT5_2_API_KEY || process.env.OPENAI_API_KEY || '',
   GPT4O_MODEL_ID: process.env.GPT4O_MODEL_ID || '',
+  GPT4O_API_KEY: process.env.GPT4O_API_KEY || process.env.OPENAI_API_KEY || '',
   EMBEDDING_MODEL_ID: process.env.EMBEDDING_MODEL_ID || '',
+  EMBEDDING_API_KEY: process.env.EMBEDDING_API_KEY || process.env.OPENAI_API_KEY || '',
 };

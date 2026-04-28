@@ -1,26 +1,26 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getModelIdForTask = getModelIdForTask;
+exports.getModelConfigForTask = getModelConfigForTask;
 // Model Router Utility
 // Selects the correct model for each task based on your plan
 const env_1 = require("../config/env");
-function getModelIdForTask(task) {
+function getModelConfigForTask(task) {
     switch (task) {
         case 'core_reasoning':
-            return env_1.config.GPT4O_MINI_MODEL_ID || 'gpt-4o-mini';
+            return { model: env_1.config.GPT4O_MINI_MODEL_ID || 'gpt-4o-mini', apiKey: env_1.config.GPT4O_MINI_API_KEY };
         case 'code_generation':
-            return env_1.config.GPT5_MINI_MODEL_ID || 'gpt-5-mini';
+            return { model: env_1.config.GPT5_MINI_MODEL_ID || 'gpt-5-mini', apiKey: env_1.config.GPT5_MINI_API_KEY };
         case 'agent_orchestration':
-            return env_1.config.GPT5_2_MODEL_ID || 'gpt-5-2';
+            return { model: env_1.config.GPT5_2_MODEL_ID || 'gpt-5-2', apiKey: env_1.config.GPT5_2_API_KEY };
         case 'clarification':
-            return env_1.config.GPT4O_MODEL_ID || 'gpt-4o';
+            return { model: env_1.config.GPT4O_MODEL_ID || 'gpt-4o', apiKey: env_1.config.GPT4O_API_KEY };
         case 'summary':
-            return env_1.config.GPT4O_MODEL_ID || 'gpt-4o';
+            return { model: env_1.config.GPT4O_MODEL_ID || 'gpt-4o', apiKey: env_1.config.GPT4O_API_KEY };
         case 'voice':
-            return env_1.config.GPT4O_MODEL_ID || 'gpt-4o';
+            return { model: env_1.config.GPT4O_MODEL_ID || 'gpt-4o', apiKey: env_1.config.GPT4O_API_KEY };
         case 'embedding':
-            return env_1.config.EMBEDDING_MODEL_ID || 'embedding-model';
+            return { model: env_1.config.EMBEDDING_MODEL_ID || 'embedding-model', apiKey: env_1.config.EMBEDDING_API_KEY };
         default:
-            return env_1.config.GPT4O_MINI_MODEL_ID || 'gpt-4o-mini';
+            return { model: env_1.config.GPT4O_MINI_MODEL_ID || 'gpt-4o-mini', apiKey: env_1.config.GPT4O_MINI_API_KEY };
     }
 }
