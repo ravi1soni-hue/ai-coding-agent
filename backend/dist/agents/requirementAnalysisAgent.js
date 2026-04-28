@@ -28,17 +28,19 @@ async function requirementAnalysisAgent(input) {
         let content = completion.choices?.[0]?.message?.content || '{}';
         // Log the raw LLM content with a fixed tag for debugging
         console.log('[LLM_RAW_CONTENT_REQUIREMENT_ANALYSIS]', content);
-        // Remove all Markdown code block markers and trim
-        content = content.replace(/```[a-zA-Z]*\s*([\s\S]*?)```/g, '$1').replace(/^```[a-zA-Z]*|```$/gm, '').trim();
-        // Remove any leading/trailing quotes or whitespace
-        content = content.replace(/^['"`\s]+|['"`\s]+$/g, '');
+        // Extract the first JSON object from the string
+        const jsonMatch = content.match(/{[\s\S]*}/);
+        if (!jsonMatch) {
+            console.error('[requirementAnalysisAgent] No JSON object found in LLM output:', { content });
+            throw new Error('Malformed LLM output: No JSON object found');
+        }
         let result;
         try {
-            result = JSON.parse(content);
+            result = JSON.parse(jsonMatch[0]);
         }
         catch (e) {
-            console.error('[requirementAnalysisAgent] JSON parse error:', e, { content });
-            throw new Error('Malformed LLM output: ' + content);
+            console.error('[requirementAnalysisAgent] JSON parse error:', e, { content: jsonMatch[0] });
+            throw new Error('Malformed LLM output: ' + jsonMatch[0]);
         }
         if (!result.website_type || !Array.isArray(result.pages)) {
             throw new Error('Malformed requirementAnalysisAgent output');
