@@ -97,7 +97,15 @@ export function createSocketServer(server: http.Server) {
             console.log('[CLARIFICATION]', session.clarifications);
             // Conversational flow
             if (session.clarifications && session.clarifications.question && !session.clarifications.confirmed) {
-              ws.send(JSON.stringify({ type: 'message', message: session.clarifications.question }));
+              let questionMsg = session.clarifications.question;
+              // Defensive: if questionMsg is a JSON string, parse and extract .question
+              if (typeof questionMsg === 'string' && questionMsg.trim().startsWith('{')) {
+                try {
+                  const parsed = JSON.parse(questionMsg);
+                  if (parsed && typeof parsed.question === 'string') questionMsg = parsed.question;
+                } catch {}
+              }
+              ws.send(JSON.stringify({ type: 'message', message: questionMsg }));
               session.step = 'clarification_wait';
               return;
             } else if (session.clarifications && !session.clarifications.confirmed) {
