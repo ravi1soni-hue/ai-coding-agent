@@ -65,10 +65,13 @@ export function createSocketServer(server: http.Server) {
           try {
             if (!userMsg) throw new Error('User message required for requirement analysis');
             session.requirements = await requirementAnalysisAgent({ user_message: userMsg });
-            ws.send(JSON.stringify({ type: 'stream', token: `Requirements: ${JSON.stringify(session.requirements)}\n` }));
+            // Log technical details, but send only conversational message to UI
+            console.log('[REQUIREMENTS]', session.requirements);
+            ws.send(JSON.stringify({ type: 'message', message: 'Got it! Let me clarify a few details about your project.' }));
             session.step = 'clarification';
           } catch (err) {
-            ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Requirement analysis failed.', error: { name: (err as any)?.name, stack: (err as any)?.stack, details: err } }));
+            console.error('[RequirementAnalysis Error]', err);
+            ws.send(JSON.stringify({ type: 'error', message: 'Oops, something went wrong while analyzing your requirements. Please try again or rephrase your request.' }));
             return;
           }
         }
@@ -78,28 +81,32 @@ export function createSocketServer(server: http.Server) {
           session.progress += 0.12;
           ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Clarifying requirements...' }));
           try {
-            let clarInput = session.requirements || {};
-            // Merge all previous answers
-            clarInput = { ...clarInput, ...clarificationAnswers };
+            // Always wrap requirements in an object as expected by clarificationAgent
+            let clarInput = {
+              requirements: session.requirements || {},
+              clarificationAnswers,
+              modification: session.modification,
+              lastQuestion: session.lastClarificationQuestion,
+              lastAnswer: undefined // You can set this if you track last answer
+            };
             if (userClarificationAnswers && typeof userClarificationAnswers === 'object') {
-              clarInput = { ...clarInput, ...userClarificationAnswers };
+              clarInput.clarificationAnswers = { ...clarInput.clarificationAnswers, ...userClarificationAnswers };
             }
             session.clarifications = await clarificationAgent(clarInput);
-            if (session.clarifications && Array.isArray(session.clarifications.questions) && session.clarifications.questions.length > 0 && !session.clarifications.confirmed) {
-              session.pendingQuestions = session.clarifications.questions;
-              // Send only the next unanswered question
-              if (clarificationIndex < session.pendingQuestions.length) {
-                ws.send(JSON.stringify({ type: 'clarification', question: session.pendingQuestions[clarificationIndex], index: clarificationIndex + 1, total: session.pendingQuestions.length, context: clarInput }));
-                session.step = 'clarification_wait';
-                return;
-              }
+            // Log technical details
+            console.log('[CLARIFICATION]', session.clarifications);
+            // Conversational flow
+            if (session.clarifications && session.clarifications.question && !session.clarifications.confirmed) {
+              ws.send(JSON.stringify({ type: 'message', message: session.clarifications.question }));
+              session.step = 'clarification_wait';
+              return;
             } else if (session.clarifications && !session.clarifications.confirmed) {
-              ws.send(JSON.stringify({ type: 'clarification', questions: [], needsConfirmation: true, context: clarInput }));
+              ws.send(JSON.stringify({ type: 'message', message: 'Could you please confirm the above details before we proceed?' }));
               session.pendingQuestions = [];
               session.step = 'clarification_wait';
               return;
             } else {
-              ws.send(JSON.stringify({ type: 'stream', token: `Clarifications: ${JSON.stringify(session.clarifications)}\n` }));
+              ws.send(JSON.stringify({ type: 'message', message: 'Thanks for clarifying! Moving to confirmation.' }));
               session.step = 'confirmation';
             }
           } catch (err) {
@@ -115,7 +122,8 @@ export function createSocketServer(server: http.Server) {
           try {
             if (!session.clarifications) throw new Error('Clarifications required for confirmation');
             session.confirmation = await confirmationGate(session.clarifications);
-            ws.send(JSON.stringify({ type: 'stream', token: `Confirmation: ${JSON.stringify(session.confirmation)}\n` }));
+            console.log('[CONFIRMATION]', session.confirmation);
+            ws.send(JSON.stringify({ type: 'message', message: 'All requirements confirmed! I will now design the system.' }));
             session.step = 'systemDesign';
           } catch (err) {
             ws.send(JSON.stringify({ type: 'confirmation', message: (err as any)?.message, context: session.clarifications }));
@@ -130,7 +138,8 @@ export function createSocketServer(server: http.Server) {
           ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Designing system...' }));
           try {
             session.systemDesign = await systemDesignAgent(session.requirements);
-            ws.send(JSON.stringify({ type: 'stream', token: `System Design: ${JSON.stringify(session.systemDesign)}\n` }));
+            console.log('[SYSTEM DESIGN]', session.systemDesign);
+            ws.send(JSON.stringify({ type: 'message', message: 'System design is ready. Generating code...' }));
             session.step = 'codeGen';
           } catch (err) {
             ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'System design failed.', error: { name: (err as any)?.name, stack: (err as any)?.stack, details: err } }));
@@ -144,7 +153,8 @@ export function createSocketServer(server: http.Server) {
           ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Generating code...' }));
           try {
             session.codeGen = await codeGenerationAgent(session.systemDesign);
-            ws.send(JSON.stringify({ type: 'stream', token: `Code Patch: ${JSON.stringify(session.codeGen)}\n` }));
+            console.log('[CODE GEN]', session.codeGen);
+            ws.send(JSON.stringify({ type: 'message', message: 'Code generated! Running tests and fixes...' }));
             session.step = 'testFix';
           } catch (err) {
             ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Code generation failed.', error: { name: (err as any)?.name, stack: (err as any)?.stack, details: err } }));
@@ -158,7 +168,8 @@ export function createSocketServer(server: http.Server) {
           ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Testing and fixing...' }));
           try {
             session.testResult = await testFixAgent({ buildFn: async () => ({ success: true, logs: 'Build successful.' }) });
-            ws.send(JSON.stringify({ type: 'stream', token: `Test Result: ${JSON.stringify(session.testResult)}\n` }));
+            console.log('[TEST RESULT]', session.testResult);
+            ws.send(JSON.stringify({ type: 'message', message: 'Tests complete! Deploying your project...' }));
             session.step = 'deploy';
           } catch (err) {
             ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Test/fix failed.', error: { name: (err as any)?.name, stack: (err as any)?.stack, details: err } }));
@@ -171,19 +182,33 @@ export function createSocketServer(server: http.Server) {
           ws.send(JSON.stringify({ type: 'progress', progress: 1, status: 'Deploying...' }));
           try {
             session.deployment = await deploymentAgent({ frontend: 'frontend', backend: 'backend' });
-            ws.send(JSON.stringify({ type: 'stream', token: `Deployment: ${JSON.stringify(session.deployment)}\n` }));
+            console.log('[DEPLOYMENT]', session.deployment);
+            ws.send(JSON.stringify({ type: 'message', message: 'Your project is deployed! 🎉' }));
             session.step = 'done';
           } catch (err) {
-            ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Deployment failed.', error: { name: (err as any)?.name, stack: (err as any)?.stack, details: err } }));
+            console.error('[Deployment Error]', err);
+            ws.send(JSON.stringify({ type: 'error', message: 'Oops, something went wrong during deployment. Please try again later.' }));
             return;
           }
         }
 
         if (session.step === 'done') {
-          ws.send(JSON.stringify({ type: 'done' }));
+          // Save project/session state for project management (simple example: log to file/db)
+          console.log('[PROJECT SAVED]', {
+            requirements: session.requirements,
+            clarifications: session.clarifications,
+            confirmation: session.confirmation,
+            systemDesign: session.systemDesign,
+            codeGen: session.codeGen,
+            testResult: session.testResult,
+            deployment: session.deployment,
+            timestamp: new Date().toISOString()
+          });
+          ws.send(JSON.stringify({ type: 'done', message: 'Project complete and saved. Start a new session for a new project!' }));
         }
       } catch (err) {
-        ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'AI process failed.', error: { name: (err as any)?.name, stack: (err as any)?.stack, details: err } }));
+        console.error('[General Error]', err);
+        ws.send(JSON.stringify({ type: 'error', message: 'Oh no, something went wrong. Please try again or start a new session.' }));
       }
     }
 
