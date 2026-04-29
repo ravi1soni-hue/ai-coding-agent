@@ -67,7 +67,7 @@ export function createSocketServer(server: http.Server) {
             session.requirements = await requirementAnalysisAgent({ user_message: userMsg });
             // Log technical details, but send only conversational message to UI
             console.log('[REQUIREMENTS]', session.requirements);
-            ws.send(JSON.stringify({ type: 'message', message: 'Got it! Let me clarify a few details about your project.' }));
+            ws.send(JSON.stringify({ type: 'stream', token: 'Got it! Let me clarify a few details about your project.' }));
             session.step = 'clarification';
           } catch (err) {
             console.error('[RequirementAnalysis Error]', err);
@@ -105,16 +105,16 @@ export function createSocketServer(server: http.Server) {
                   if (parsed && typeof parsed.question === 'string') questionMsg = parsed.question;
                 } catch {}
               }
-              ws.send(JSON.stringify({ type: 'message', message: questionMsg }));
+              ws.send(JSON.stringify({ type: 'clarification', question: questionMsg }));
               session.step = 'clarification_wait';
               return;
             } else if (session.clarifications && !session.clarifications.confirmed) {
-              ws.send(JSON.stringify({ type: 'message', message: 'Could you please confirm the above details before we proceed?' }));
+              ws.send(JSON.stringify({ type: 'confirmation', message: 'Could you please confirm the above details before we proceed?' }));
               session.pendingQuestions = [];
               session.step = 'clarification_wait';
               return;
             } else {
-              ws.send(JSON.stringify({ type: 'message', message: 'Thanks for clarifying! Moving to confirmation.' }));
+              ws.send(JSON.stringify({ type: 'stream', token: 'Thanks for clarifying! Moving to confirmation.' }));
               session.step = 'confirmation';
             }
           } catch (err) {
@@ -131,7 +131,7 @@ export function createSocketServer(server: http.Server) {
             if (!session.clarifications) throw new Error('Clarifications required for confirmation');
             session.confirmation = await confirmationGate(session.clarifications);
             console.log('[CONFIRMATION]', session.confirmation);
-            ws.send(JSON.stringify({ type: 'message', message: 'All requirements confirmed! I will now design the system.' }));
+            ws.send(JSON.stringify({ type: 'stream', token: 'All requirements confirmed! I will now design the system.' }));
             session.step = 'systemDesign';
           } catch (err) {
             ws.send(JSON.stringify({ type: 'confirmation', message: (err as any)?.message, context: session.clarifications }));
@@ -147,7 +147,7 @@ export function createSocketServer(server: http.Server) {
           try {
             session.systemDesign = await systemDesignAgent(session.requirements);
             console.log('[SYSTEM DESIGN]', session.systemDesign);
-            ws.send(JSON.stringify({ type: 'message', message: 'System design is ready. Generating code...' }));
+            ws.send(JSON.stringify({ type: 'stream', token: 'System design is ready. Generating code...' }));
             session.step = 'codeGen';
           } catch (err) {
             ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'System design failed.', error: { name: (err as any)?.name, stack: (err as any)?.stack, details: err } }));
@@ -162,7 +162,7 @@ export function createSocketServer(server: http.Server) {
           try {
             session.codeGen = await codeGenerationAgent(session.systemDesign);
             console.log('[CODE GEN]', session.codeGen);
-            ws.send(JSON.stringify({ type: 'message', message: 'Code generated! Running tests and fixes...' }));
+            ws.send(JSON.stringify({ type: 'stream', token: 'Code generated! Running tests and fixes...' }));
             session.step = 'testFix';
           } catch (err) {
             ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Code generation failed.', error: { name: (err as any)?.name, stack: (err as any)?.stack, details: err } }));
@@ -177,7 +177,7 @@ export function createSocketServer(server: http.Server) {
           try {
             session.testResult = await testFixAgent({ buildFn: async () => ({ success: true, logs: 'Build successful.' }) });
             console.log('[TEST RESULT]', session.testResult);
-            ws.send(JSON.stringify({ type: 'message', message: 'Tests complete! Deploying your project...' }));
+            ws.send(JSON.stringify({ type: 'stream', token: 'Tests complete! Deploying your project...' }));
             session.step = 'deploy';
           } catch (err) {
             ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Test/fix failed.', error: { name: (err as any)?.name, stack: (err as any)?.stack, details: err } }));
@@ -191,7 +191,7 @@ export function createSocketServer(server: http.Server) {
           try {
             session.deployment = await deploymentAgent({ frontend: 'frontend', backend: 'backend' });
             console.log('[DEPLOYMENT]', session.deployment);
-            ws.send(JSON.stringify({ type: 'message', message: 'Your project is deployed! 🎉' }));
+            ws.send(JSON.stringify({ type: 'stream', token: 'Your project is deployed! 🎉' }));
             session.step = 'done';
           } catch (err) {
             console.error('[Deployment Error]', err);
