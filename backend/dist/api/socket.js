@@ -311,13 +311,14 @@ function createSocketServer(server) {
                     clarificationAnswers[session.pendingQuestions[clarificationIndex]] = answer;
                     clarificationIndex++;
                 }
+                // Always pass updated clarificationAnswers to runFlow
                 if (clarificationIndex < session.pendingQuestions.length) {
                     ws.send(JSON.stringify({ type: 'clarification', question: session.pendingQuestions[clarificationIndex], index: clarificationIndex + 1, total: session.pendingQuestions.length, context: session.requirements }));
                     return;
                 }
                 else {
                     session.step = 'clarification';
-                    await runFlow(null, clarificationAnswers);
+                    await runFlow(null, { ...clarificationAnswers });
                     return;
                 }
             }
