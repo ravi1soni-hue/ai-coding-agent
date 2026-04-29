@@ -26,6 +26,9 @@ function createSocketServer(server) {
             deployment: undefined,
             pendingQuestions: [],
             context: {},
+            modification: undefined,
+            modificationContext: undefined,
+            lastClarificationQuestion: undefined,
         };
         // Track answers for step-by-step clarification
         let clarificationAnswers = {};
@@ -166,16 +169,123 @@ function createSocketServer(server) {
             }
         }
         ws.on('message', async (message) => {
-            // If waiting for clarification/confirmation, treat message as user answer
+            let msg;
+            try {
+                msg = JSON.parse(message.toString());
+            }
+            catch {
+                msg = message.toString();
+            }
+            // Modification request (can come at any time)
+            if (typeof msg === 'object' && msg.type === 'modification' && msg.modification) {
+                // Accept modification request, update requirements/context
+                session.step = 'modification';
+                session.modification = msg.modification;
+                session.modificationContext = msg.context || {};
+                // Route through clarification if needed
+                let clarInput = {
+                    requirements: session.requirements,
+                    clarificationAnswers,
+                    modification: session.modification
+                };
+                let clarResult = await (0, clarificationAgent_1.clarificationAgent)(clarInput);
+                if (clarResult.question) {
+                    ws.send(JSON.stringify({ type: 'clarification', question: clarResult.question, context: clarInput }));
+                    session.step = 'clarification_wait_modification';
+                    session.lastClarificationQuestion = clarResult.question;
+                    return;
+                }
+                else {
+                    // No clarification needed, go to codegen
+                    session.step = 'codeGen_modification';
+                }
+            }
+            // Handle clarification answer for modification
+            if (session.step === 'clarification_wait_modification') {
+                let answer = typeof msg === 'object' ? msg.answer : msg;
+                if (session.lastClarificationQuestion) {
+                    clarificationAnswers[session.lastClarificationQuestion] = answer;
+                }
+                // Re-run clarification with new answer
+                let clarInput = {
+                    requirements: session.requirements,
+                    clarificationAnswers,
+                    modification: session.modification,
+                    lastQuestion: session.lastClarificationQuestion,
+                    lastAnswer: answer
+                };
+                let clarResult = await (0, clarificationAgent_1.clarificationAgent)(clarInput);
+                if (clarResult.question) {
+                    ws.send(JSON.stringify({ type: 'clarification', question: clarResult.question, context: clarInput }));
+                    session.lastClarificationQuestion = clarResult.question;
+                    return;
+                }
+                else {
+                    session.step = 'codeGen_modification';
+                }
+            }
+            // Handle code generation for modification
+            if (session.step === 'codeGen_modification') {
+                ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Generating code patch for modification...' }));
+                try {
+                    let codeGenInput = {
+                        systemDesign: session.systemDesign,
+                        requirements: session.requirements,
+                        modification: session.modification,
+                        context: session.modificationContext
+                    };
+                    session.codeGen = await (0, codeGenerationAgent_1.codeGenerationAgent)(codeGenInput);
+                    ws.send(JSON.stringify({ type: 'stream', token: `Code Patch: ${JSON.stringify(session.codeGen)}\n` }));
+                    session.step = 'testFix_modification';
+                }
+                catch (err) {
+                    ws.send(JSON.stringify({ type: 'error', message: err?.message || 'Code generation for modification failed.', error: { name: err?.name, stack: err?.stack, details: err } }));
+                    return;
+                }
+            }
+            // Test & Fix for modification
+            if (session.step === 'testFix_modification') {
+                ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Testing and fixing modification...' }));
+                try {
+                    session.testResult = await (0, testFixAgent_1.testFixAgent)({ buildFn: async () => ({ success: true, logs: 'Build successful.' }) });
+                    ws.send(JSON.stringify({ type: 'stream', token: `Test Result: ${JSON.stringify(session.testResult)}\n` }));
+                    session.step = 'deploy_modification';
+                }
+                catch (err) {
+                    ws.send(JSON.stringify({ type: 'error', message: err?.message || 'Test/fix for modification failed.', error: { name: err?.name, stack: err?.stack, details: err } }));
+                    return;
+                }
+            }
+            // Deploy modification
+            if (session.step === 'deploy_modification') {
+                ws.send(JSON.stringify({ type: 'progress', progress: 1, status: 'Deploying modification...' }));
+                try {
+                    session.deployment = await (0, deploymentAgent_1.deploymentAgent)({ frontend: 'frontend', backend: 'backend' });
+                    ws.send(JSON.stringify({ type: 'stream', token: `Deployment: ${JSON.stringify(session.deployment)}\n` }));
+                    session.step = 'done_modification';
+                }
+                catch (err) {
+                    ws.send(JSON.stringify({ type: 'error', message: err?.message || 'Deployment for modification failed.', error: { name: err?.name, stack: err?.stack, details: err } }));
+                    return;
+                }
+            }
+            if (session.step === 'done_modification') {
+                ws.send(JSON.stringify({ type: 'done', modification: true }));
+                // Reset modification state for further evolvement
+                session.step = 'done';
+                session.modification = undefined;
+                session.modificationContext = undefined;
+                clarificationAnswers = {};
+                clarificationIndex = 0;
+                return;
+            }
+            // --- Original flow ---
             if (session.step === 'clarification_wait') {
-                // Only one question at a time
-                let answer = message.toString();
-                // Map answer to the current question
+                let answer = typeof msg === 'object' ? msg.answer : msg;
                 if (session.pendingQuestions && clarificationIndex < session.pendingQuestions.length) {
                     clarificationAnswers[session.pendingQuestions[clarificationIndex]] = answer;
                     clarificationIndex++;
                 }
-                // If more questions, ask next; else, continue
                 if (clarificationIndex < session.pendingQuestions.length) {
                     ws.send(JSON.stringify({ type: 'clarification', question: session.pendingQuestions[clarificationIndex], index: clarificationIndex + 1, total: session.pendingQuestions.length, context: session.requirements }));
                     return;
@@ -187,7 +297,6 @@ function createSocketServer(server) {
                 }
             }
             else if (session.step === 'confirmation_wait') {
-                // User confirms, resume
                 if (session.clarifications)
                     session.clarifications.confirmed = true;
                 session.step = 'confirmation';
@@ -198,8 +307,7 @@ function createSocketServer(server) {
                 ws.send(JSON.stringify({ type: 'info', message: 'Please answer the pending questions or confirm to continue.' }));
                 return;
             }
-            // New session start
-            await runFlow(message.toString(), null);
+            await runFlow(typeof msg === 'object' ? msg.user_message : msg, null);
         });
     });
     return wss;

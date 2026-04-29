@@ -4,6 +4,19 @@ import { searchVectors } from '../db/vectorStore';
 import { LLMProxyClient } from './llmProxyClient';
 import { embeddingAgent } from './embeddingAgent';
 
+/**
+ * Patch-based code generation agent for continuous evolution.
+ * Accepts current state, requirements, and modification request.
+ * Generates only the necessary code changes (patches).
+ * input: {
+ *   systemDesign: object, // current system design
+ *   requirements: object, // current requirements
+ *   modification?: string, // user modification request
+ *   context?: any, // additional context (e.g., previous patches)
+ *   embedding?: any // for RAG
+ * }
+ * returns: { patch: string, frontendRepo?: string, backendRepo?: string }
+ */
 export async function codeGenerationAgent(input: any) {
   if (process.env.NODE_ENV !== 'production') {
     console.log('[codeGenerationAgent] called with:', input);
@@ -20,8 +33,6 @@ export async function codeGenerationAgent(input: any) {
     // If embedding is available in input, retrieve similar code patches for RAG
     if (input.embedding && Array.isArray(input.embedding)) {
       try {
-        // Use embeddingAgent to get embedding if needed (example: input.text)
-        // const embedding = await embeddingAgent(input.text);
         const similar = await searchVectors({
           user_id: input.user_id || 'unknown',
           task: 'code_patch',
@@ -33,11 +44,22 @@ export async function codeGenerationAgent(input: any) {
         // Ignore retrieval errors, fallback to no context
       }
     }
-    const systemPrompt = `Given the system design, generate ONLY patch-based code updates (never full repo), and output repo URLs if needed. Respond ONLY in JSON: { patch: string, frontendRepo: string, backendRepo: string }`;
-    const userPrompt = JSON.stringify({ ...input, retrievedPatches });
+    // Compose prompt for patch-based or modification-based codegen
+    let userPrompt = {
+      systemDesign: input.systemDesign,
+      requirements: input.requirements,
+      modification: input.modification,
+      context: input.context,
+      retrievedPatches
+    };
+    const systemPrompt = `You are a code generation agent for a continuous-evolution system.
+Given the current system design, requirements, and (if present) a user modification request, generate ONLY the minimal patch-based code updates needed (never full repo).
+If modification is present, generate a patch to apply the change to the existing codebase.
+Respond ONLY in JSON: { patch: string, frontendRepo?: string, backendRepo?: string }.`;
+
     const completion = await llmProxy.chatCompletion([
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
+      { role: 'user', content: JSON.stringify(userPrompt) }
     ], 'gpt-5-chat', 0.8, 0.9, 1000);
     if (process.env.NODE_ENV !== 'production') {
       console.log('[codeGenerationAgent] LLM completion:', completion);
