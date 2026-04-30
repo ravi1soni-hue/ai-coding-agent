@@ -40,10 +40,20 @@ async function start() {
 
         // Debug endpoint to list frontend files
         fastify.get('/debug-frontend-files', async (request, reply) => {
-                const dir = path.join(__dirname, '../frontend');
                 try {
+                        const dir = path.join(__dirname, '../frontend');
                         const files = fs.readdirSync(dir);
                         return reply.send({ files });
+                } catch (e: any) {
+                        return reply.status(500).send({ error: e.message });
+                }
+        });
+
+        // Debug endpoint to show contents of index.html
+        fastify.get('/debug-index-html', async (request, reply) => {
+                try {
+                        const file = fs.readFileSync(path.join(__dirname, '../frontend/index.html'), 'utf8');
+                        return reply.type('text/html').send(file);
                 } catch (e: any) {
                         return reply.status(500).send({ error: e.message });
                 }
