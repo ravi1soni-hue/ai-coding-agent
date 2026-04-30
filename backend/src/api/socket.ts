@@ -140,7 +140,6 @@ export function createSocketServer(server: http.Server) {
       codeGen: any;
       testResult: any;
       deployment: any;
-      pendingQuestions: string[];
       context: Record<string, any>;
       // For modification flow
       modification?: string;
@@ -163,7 +162,6 @@ export function createSocketServer(server: http.Server) {
       codeGen: snapshot?.code_gen,
       testResult: snapshot?.test_result,
       deployment: snapshot?.deployment,
-      pendingQuestions: [],
       context: {},
       modification: undefined,
       modificationContext: undefined,
@@ -182,8 +180,10 @@ export function createSocketServer(server: http.Server) {
     }
 
     // Track answers for step-by-step clarification
-    let clarificationAnswers: Record<string, string> = {};
-    let clarificationIndex = 0;
+    let clarificationAnswers: Record<string, string> =
+      session.clarifications?.context?.clarificationAnswers && typeof session.clarifications.context.clarificationAnswers === 'object'
+        ? { ...session.clarifications.context.clarificationAnswers }
+        : {};
 
     async function runFlow(userMsg: string | null, userClarificationAnswers: Record<string, any> | null = null) {
       try {
@@ -234,12 +234,12 @@ export function createSocketServer(server: http.Server) {
                   if (parsed && typeof parsed.question === 'string') questionMsg = parsed.question;
                 } catch {}
               }
+                session.lastClarificationQuestion = questionMsg;
               ws.send(JSON.stringify({ type: 'clarification', question: questionMsg })); // Only send plain question string
               session.step = 'clarification_wait';
               return;
             } else if (session.clarifications && !session.clarifications.confirmed) {
               ws.send(JSON.stringify({ type: 'confirmation', message: 'Could you please confirm the above details before we proceed?' })); // Only send plain confirmation message
-              session.pendingQuestions = [];
               session.step = 'clarification_wait';
               return;
             } else {
@@ -586,26 +586,19 @@ export function createSocketServer(server: http.Server) {
         session.modification = undefined;
         session.modificationContext = undefined;
         clarificationAnswers = {};
-        clarificationIndex = 0;
         return;
       }
 
       // --- Original flow ---
       if (session.step === 'clarification_wait') {
-        let answer = typeof msg === 'object' ? msg.answer : msg;
-        if (session.pendingQuestions && clarificationIndex < session.pendingQuestions.length) {
-          clarificationAnswers[session.pendingQuestions[clarificationIndex]] = answer;
-          clarificationIndex++;
+        const answer = typeof msg === 'object' ? msg.answer : msg;
+        if (session.lastClarificationQuestion && typeof answer === 'string' && answer.trim()) {
+          clarificationAnswers[session.lastClarificationQuestion] = answer.trim();
         }
-        // Always pass updated clarificationAnswers to runFlow
-        if (clarificationIndex < session.pendingQuestions.length) {
-          ws.send(JSON.stringify({ type: 'clarification', question: session.pendingQuestions[clarificationIndex], index: clarificationIndex + 1, total: session.pendingQuestions.length, context: session.requirements }));
-          return;
-        } else {
-          session.step = 'clarification';
-          await runFlow(null, { ...clarificationAnswers });
-          return;
-        }
+        session.lastClarificationQuestion = undefined;
+        session.step = 'clarification';
+        await runFlow(null, { ...clarificationAnswers });
+        return;
       } else if (session.step === 'confirmation_wait') {
         if (session.clarifications) session.clarifications.confirmed = true;
         session.step = 'confirmation';
