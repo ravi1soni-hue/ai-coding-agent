@@ -1,7 +1,7 @@
 import { config } from './config/env';
-// Warn if OpenAI API key is missing or looks invalid
-if (!config.OPENAI_API_KEY || config.OPENAI_API_KEY.length < 20 || config.OPENAI_API_KEY.includes('sk-') === false) {
-        console.warn('[WARNING] OPENAI_API_KEY is missing or may be invalid. Check your .env or Railway environment variables.');
+// Warn if API key is missing
+if (!config.OPENAI_API_KEY || config.OPENAI_API_KEY.length < 10) {
+        console.warn('[WARNING] OPENAI_API_KEY is missing or too short. Check your .env or Railway environment variables.');
 }
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
