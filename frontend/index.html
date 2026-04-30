@@ -4,91 +4,66 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI Website Builder</title>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
-  <style>
-    html, body {
-      height: 100%;
-      margin: 0;
-      padding: 0;
-      font-family: 'Inter', sans-serif;
-      background: #181c24;
-      color: #fff;
-    }
-    body {
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      width: 100vw;
-      height: 100vh;
-    }
-    .main {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: flex-start;
-      width: 100vw;
-      height: 100%;
-      padding: 0;
-    }
-    .header {
-      width: 100vw;
-      background: #23283a;
-      padding: 24px 0 12px 0;
-      text-align: center;
-      box-shadow: 0 2px 12px #0003;
-    }
-    .header h1 {
-      margin: 0;
-      font-size: 2.2rem;
-      font-weight: 700;
-    }
-    .header h2 {
-      margin: 8px 0 0 0;
-      font-size: 1.2rem;
-      font-weight: 400;
-      color: #b3b8c7;
-    }
-    .chat-area {
-      flex: 1;
-      width: 100vw;
-      max-width: 700px;
-      margin: 0 auto;
-      display: flex;
-      flex-direction: column;
-      padding: 0 0 16px 0;
-    }
-    #chat {
-      flex: 1;
-      overflow-y: auto;
-      background: #20243a;
-      border-radius: 12px;
-      padding: 24px 18px 18px 18px;
-      margin: 18px 0 0 0;
-      min-height: 320px;
-      max-height: 60vh;
-      box-shadow: 0 2px 12px #0002;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-    .msg { margin: 0; display: flex; }
-    .msg.user { justify-content: flex-end; }
-    .msg.ai { justify-content: flex-start; }
-    .bubble {
-      max-width: 80%;
-      padding: 12px 16px;
-      border-radius: 16px;
-      font-size: 1.08rem;
-      line-height: 1.5;
-      word-break: break-word;
-      box-shadow: 0 2px 8px #0002;
-    }
-    .bubble.user {
-      background: linear-gradient(90deg, #4f8cff, #3461a4);
-      color: #fff;
-      border-bottom-right-radius: 4px;
+      ws.onmessage = (e) => {
+        let data = e.data;
+        try {
+          const obj = JSON.parse(data);
+          if (obj.type === 'progress') {
+            setWaiting(true, obj.progress, obj.status || 'AI is working...');
+            if (obj.status) appendMsg(`<b>Step:</b> ${obj.status}`, 'ai', 'status');
+            if (obj.token) streamResponseUpdate(obj.token);
+            return;
+          } else if (obj.type === 'stream') {
+            streamResponseUpdate(obj.token || '');
+            return;
+          } else if (obj.type === 'clarification') {
+            setWaiting(false);
+            // Show clarification as a normal chat message
+            if (obj.question) {
+              appendMsg(`<b>AI needs more info to continue:</b><br><b>Q${obj.index || 1}/${obj.total || 1}:</b> ${obj.question}`, 'ai', 'status');
+            } else if (obj.needsConfirmation) {
+              appendMsg(`<b>Please confirm to continue.</b>`, 'ai', 'status');
+            }
+            // User should reply in the main chat input
+            return;
+          } else if (obj.type === 'confirmation') {
+            setWaiting(false);
+            appendMsg(`<b>AI needs your confirmation to continue:</b><br>${obj.message || 'Please confirm to proceed.'}`, 'ai', 'status');
+            // User should reply in the main chat input
+            return;
+          } else if (obj.type === 'error') {
+            setStatus(obj.message || 'AI error.', 'error');
+            let errorDetails = '';
+            if (obj.error) {
+              errorDetails += `<br/><b>Name:</b> ${obj.error.name || ''}`;
+              if (obj.error.stack) errorDetails += `<br/><b>Stack:</b><pre style='white-space:pre-wrap;max-width:100%;overflow-x:auto;'>${obj.error.stack}</pre>`;
+              if (obj.error.details && typeof obj.error.details === 'object') {
+                errorDetails += `<br/><b>Details:</b> <pre style='white-space:pre-wrap;max-width:100%;overflow-x:auto;'>${JSON.stringify(obj.error.details, null, 2)}</pre>`;
+              }
+            }
+            appendMsg(`<b>Error:</b> ${obj.message} <button onclick='retryLastStep()'>Retry</button>${errorDetails}`, 'ai', 'error');
+            setWaiting(false);
+            streamResponseEnd();
+            return;
+          } else if (obj.type === 'done') {
+            setWaiting(false);
+            streamResponseEnd();
+            appendMsg('<b>All steps complete!</b>', 'ai', 'status');
+            return;
+          } else if (obj.type === 'message') {
+            setWaiting(false);
+            // Only display the message property, never the whole object
+            appendMsg(obj.message, 'ai');
+            return;
+          }
+        } catch (err) {
+          // Not JSON, treat as plain message
+        }
+        streamResponseEnd();
+        // Only display plain string, never JSON
+        if (typeof data === 'string') appendMsg(data, 'ai');
+        setWaiting(false);
+      };
     }
     .bubble.ai {
       background: #2a2f4a;
@@ -289,22 +264,7 @@
     }
 
     // --- Clarification/confirmation form state ---
-    let clarificationForm = null;
     function sendMsg(text) {
-      if (clarificationForm) {
-        // If clarification form is open, submit its data
-        const formData = {};
-        clarificationForm.querySelectorAll('input,textarea').forEach(input => {
-          formData[input.name] = input.value;
-        });
-        ws.send(JSON.stringify(formData));
-        appendMsg('<b>You answered:</b><br>' + Object.entries(formData).map(([k,v]) => `<b>${k}:</b> ${v}`).join('<br>'), 'user');
-        clarificationForm.remove();
-        clarificationForm = null;
-        setWaiting(true, 0.1, 'AI is thinking...');
-        streamResponseStart();
-        return;
-      }
       const val = text || msgInput.value;
       if (!val || waiting || !ws || ws.readyState !== 1) return;
       appendMsg(val, 'user');
@@ -356,7 +316,7 @@
             return;
           } else if (obj.type === 'clarification') {
             setWaiting(false);
-            // Show a nice form for questions
+            // Show only one question at a time
             if (clarificationForm) clarificationForm.remove();
             clarificationForm = document.createElement('form');
             clarificationForm.style.background = '#23283a';
@@ -366,21 +326,16 @@
             clarificationForm.style.display = 'flex';
             clarificationForm.style.flexDirection = 'column';
             clarificationForm.style.gap = '12px';
-            let html = '<b>AI needs more info to continue:</b><br>';
-            if (obj.questions && obj.questions.length > 0) {
-              obj.questions.forEach((q, i) => {
-                html += `<label style='margin-bottom:4px;'><b>Q${i+1}:</b> ${q}</label><input name="${q.replace(/[^a-zA-Z0-9_]/g,'_')}" style='padding:8px;border-radius:6px;border:none;background:#20243a;color:#fff;' required />`;
-              });
-            }
-            if (obj.needsConfirmation) {
+            let html = `<b>AI needs more info to continue:</b><br>`;
+            if (obj.question) {
+              html += `<label style='margin-bottom:4px;'><b>Q${obj.index || 1}/${obj.total || 1}:</b> ${obj.question}</label><input name="answer" style='padding:8px;border-radius:6px;border:none;background:#20243a;color:#fff;' required autofocus />`;
+              html += `<button type='submit' style='background:#4f8cff;color:#fff;padding:10px 18px;border-radius:8px;border:none;font-size:1rem;margin-top:8px;'>Submit Answer</button>`;
+            } else if (obj.needsConfirmation) {
               html += `<label><b>Please confirm to continue:</b></label><button type='submit' style='background:#4f8cff;color:#fff;padding:10px 18px;border-radius:8px;border:none;font-size:1rem;margin-top:8px;'>Confirm & Continue</button>`;
-            } else {
-              html += `<button type='submit' style='background:#4f8cff;color:#fff;padding:10px 18px;border-radius:8px;border:none;font-size:1rem;margin-top:8px;'>Submit Answers</button>`;
             }
             clarificationForm.innerHTML = html;
             clarificationForm.onsubmit = (ev) => { ev.preventDefault(); sendMsg(); };
             appendMsg(clarificationForm.outerHTML, 'ai', 'status');
-            // Actually insert the form into the DOM for interaction
             chat.appendChild(clarificationForm);
             clarificationForm.scrollIntoView({ behavior: 'smooth' });
             return;
@@ -425,7 +380,16 @@
           // Not JSON, treat as plain message
         }
         streamResponseEnd();
-        appendMsg(data, 'ai');
+        // Defensive: If data looks like a JSON string with a question, extract and display only the question
+        let displayMsg = data;
+        if (typeof data === 'string' && data.trim().startsWith('{')) {
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed && typeof parsed.question === 'string') displayMsg = parsed.question;
+            else if (parsed && typeof parsed.message === 'string') displayMsg = parsed.message;
+          } catch {}
+        }
+        appendMsg(displayMsg, 'ai');
         setWaiting(false);
       };
       ws.onclose = () => {

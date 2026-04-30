@@ -105,11 +105,11 @@ export function createSocketServer(server: http.Server) {
                   if (parsed && typeof parsed.question === 'string') questionMsg = parsed.question;
                 } catch {}
               }
-              ws.send(JSON.stringify({ type: 'clarification', question: questionMsg }));
+              ws.send(JSON.stringify({ type: 'clarification', question: questionMsg })); // Only send plain question string
               session.step = 'clarification_wait';
               return;
             } else if (session.clarifications && !session.clarifications.confirmed) {
-              ws.send(JSON.stringify({ type: 'confirmation', message: 'Could you please confirm the above details before we proceed?' }));
+              ws.send(JSON.stringify({ type: 'confirmation', message: 'Could you please confirm the above details before we proceed?' })); // Only send plain confirmation message
               session.pendingQuestions = [];
               session.step = 'clarification_wait';
               return;
@@ -242,7 +242,7 @@ export function createSocketServer(server: http.Server) {
         };
         let clarResult = await clarificationAgent(clarInput);
         if (clarResult.question) {
-          ws.send(JSON.stringify({ type: 'clarification', question: clarResult.question, context: clarInput }));
+          ws.send(JSON.stringify({ type: 'clarification', question: clarResult.question })); // Only send plain question string
           session.step = 'clarification_wait_modification';
           session.lastClarificationQuestion = clarResult.question;
           return;
@@ -268,7 +268,7 @@ export function createSocketServer(server: http.Server) {
         };
         let clarResult = await clarificationAgent(clarInput);
         if (clarResult.question) {
-          ws.send(JSON.stringify({ type: 'clarification', question: clarResult.question, context: clarInput }));
+          ws.send(JSON.stringify({ type: 'clarification', question: clarResult.question })); // Only send plain question string
           session.lastClarificationQuestion = clarResult.question;
           return;
         } else {
@@ -287,7 +287,7 @@ export function createSocketServer(server: http.Server) {
             context: session.modificationContext
           };
           session.codeGen = await codeGenerationAgent(codeGenInput);
-          ws.send(JSON.stringify({ type: 'stream', token: `Code Patch: ${JSON.stringify(session.codeGen)}\n` }));
+          ws.send(JSON.stringify({ type: 'stream', token: `Code patch generated. Proceeding to tests...` }));
           session.step = 'testFix_modification';
         } catch (err) {
           ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Code generation for modification failed.', error: { name: (err as any)?.name, stack: (err as any)?.stack, details: err } }));
@@ -300,7 +300,7 @@ export function createSocketServer(server: http.Server) {
         ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Testing and fixing modification...' }));
         try {
           session.testResult = await testFixAgent({ buildFn: async () => ({ success: true, logs: 'Build successful.' }) });
-          ws.send(JSON.stringify({ type: 'stream', token: `Test Result: ${JSON.stringify(session.testResult)}\n` }));
+          ws.send(JSON.stringify({ type: 'stream', token: `Tests complete. Deploying your project...` }));
           session.step = 'deploy_modification';
         } catch (err) {
           ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Test/fix for modification failed.', error: { name: (err as any)?.name, stack: (err as any)?.stack, details: err } }));
@@ -313,7 +313,7 @@ export function createSocketServer(server: http.Server) {
         ws.send(JSON.stringify({ type: 'progress', progress: 1, status: 'Deploying modification...' }));
         try {
           session.deployment = await deploymentAgent({ frontend: 'frontend', backend: 'backend' });
-          ws.send(JSON.stringify({ type: 'stream', token: `Deployment: ${JSON.stringify(session.deployment)}\n` }));
+          ws.send(JSON.stringify({ type: 'stream', token: `Deployment complete!` }));
           session.step = 'done_modification';
         } catch (err) {
           ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Deployment for modification failed.', error: { name: (err as any)?.name, stack: (err as any)?.stack, details: err } }));
