@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 function makeSocketUrl() {
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
