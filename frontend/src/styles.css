@@ -38,6 +38,154 @@ body {
   padding: 1rem;
 }
 
+.authPageBg {
+  padding: 1.25rem;
+}
+
+.authLoading {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  padding: 16px 20px;
+  border-radius: 14px;
+  font-weight: 600;
+}
+
+.authShell {
+  width: min(1120px, 100%);
+  min-height: 720px;
+  display: grid;
+  grid-template-columns: 1.06fr 1fr;
+  background: #ffffff;
+  border-radius: 22px;
+  overflow: hidden;
+  border: 1px solid #ececf4;
+  box-shadow: 0 10px 36px rgba(26, 24, 40, 0.08);
+}
+
+.authFormPane {
+  padding: 48px 40px;
+  background: #f9f9fc;
+  display: flex;
+  flex-direction: column;
+}
+
+.authTitle {
+  margin: 0;
+  font-family: 'Montserrat', Arial, sans-serif;
+  font-size: 2rem;
+  line-height: 1.1;
+}
+
+.authSubtitle {
+  margin: 12px 0 18px;
+  color: var(--muted);
+  font-size: 0.96rem;
+}
+
+.authTabs {
+  background: #ececf4;
+  border-radius: 10px;
+  padding: 4px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-bottom: 18px;
+}
+
+.authTab {
+  border: none;
+  padding: 10px;
+  border-radius: 8px;
+  background: transparent;
+  color: #70707b;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.authTab.active {
+  background: #ffffff;
+  color: #111;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.authForm {
+  display: grid;
+  gap: 12px;
+}
+
+.authLabel {
+  display: grid;
+  gap: 6px;
+  font-size: 0.94rem;
+  color: #2a2a33;
+}
+
+.authInput {
+  border: 1px solid #d8d8e4;
+  border-radius: 10px;
+  background: #fff;
+  padding: 12px;
+  font-size: 0.96rem;
+}
+
+.authInput:focus {
+  outline: 2px solid rgba(180, 108, 255, 0.25);
+  border-color: rgba(180, 108, 255, 0.6);
+}
+
+.authError {
+  background: #ffecec;
+  color: #9d2f2f;
+  border: 1px solid #ffd6d6;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 0.9rem;
+}
+
+.authSubmit {
+  margin-top: 8px;
+  border: none;
+  border-radius: 10px;
+  padding: 12px;
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.98rem;
+  background: linear-gradient(90deg, #2f5fe8, #4aa5ef);
+  cursor: pointer;
+}
+
+.authSubmit:disabled {
+  opacity: 0.75;
+  cursor: not-allowed;
+}
+
+.authVisualPane {
+  position: relative;
+  min-height: 720px;
+  background: #111;
+}
+
+.authVisualImg {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.93;
+}
+
+.authVisualOverlay {
+  position: absolute;
+  left: 24px;
+  right: 24px;
+  bottom: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(9, 11, 17, 0.62);
+  color: #edf2ff;
+  padding: 14px 16px;
+  border-radius: 12px;
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+
 .assistantWrapper {
   background: var(--panel);
   border-radius: 32px;
@@ -72,6 +220,160 @@ body {
   display: flex;
   flex-direction: column;
   z-index: 2;
+}
+
+.chatTopBar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.chatIdentity {
+  display: grid;
+  gap: 2px;
+}
+
+.chatUserName {
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.chatUserEmail {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.chatTopActions {
+  display: flex;
+  gap: 8px;
+}
+
+.topActionBtn {
+  border: none;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+.topActionBtn.ghost {
+  background: #eef1f8;
+  color: #2b3350;
+}
+
+.historyFab {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 30;
+  border: none;
+  border-radius: 999px;
+  padding: 12px 16px;
+  background: #1f2437;
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 8px 22px rgba(15, 15, 24, 0.24);
+}
+
+.historyOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 12, 20, 0.45);
+  backdrop-filter: blur(4px);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.historyPanel {
+  width: min(740px, 100%);
+  max-height: 84vh;
+  overflow: hidden;
+  border-radius: 18px;
+  background: #fff;
+  border: 1px solid #ececf4;
+}
+
+.historyHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid #ececf4;
+}
+
+.historyHeader h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-family: 'Montserrat', Arial, sans-serif;
+}
+
+.historyBody {
+  padding: 12px;
+  overflow: auto;
+  max-height: calc(84vh - 60px);
+  display: grid;
+  gap: 10px;
+}
+
+.historyEmpty {
+  border: 1px dashed #d9daea;
+  border-radius: 10px;
+  padding: 16px;
+  color: #5f647e;
+  text-align: center;
+}
+
+.historyItem {
+  text-align: left;
+  border: 1px solid #e7e8f3;
+  border-radius: 12px;
+  padding: 10px;
+  background: #fbfbfe;
+  cursor: pointer;
+}
+
+.historyItem.active {
+  border-color: #b46cff;
+  box-shadow: inset 0 0 0 1px rgba(180, 108, 255, 0.3);
+}
+
+.historyItemTop {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.historyId {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.76rem;
+  color: #44485c;
+}
+
+.historyStatus {
+  font-size: 0.74rem;
+  text-transform: capitalize;
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: #eceffc;
+  color: #334385;
+}
+
+.historyMeta {
+  margin-top: 6px;
+  font-size: 0.79rem;
+  color: #555b75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .assistantDate {
@@ -215,6 +517,16 @@ body {
   padding: 10px;
 }
 
+.projectMeta {
+  margin-top: 8px;
+  font-size: 0.77rem;
+  color: #6a6a76;
+  max-width: 500px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .msg {
   font-size: 0.86rem;
   line-height: 1.4;
@@ -338,6 +650,19 @@ body {
 }
 
 @media (max-width: 900px) {
+  .authShell {
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+
+  .authFormPane {
+    padding: 28px 18px;
+  }
+
+  .authVisualPane {
+    min-height: 280px;
+  }
+
   .assistantWrapper {
     flex-direction: column;
     width: 98vw;
@@ -346,6 +671,12 @@ body {
 
   .assistantLeft {
     padding: 26px 14px 14px;
+  }
+
+  .chatTopBar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
   }
 
   .assistantTitle {
@@ -379,6 +710,14 @@ body {
 }
 
 @media (max-width: 600px) {
+  .authTitle {
+    font-size: 1.6rem;
+  }
+
+  .authVisualPane {
+    min-height: 220px;
+  }
+
   .assistantDate {
     font-size: 0.88rem;
     margin-bottom: 10px;
@@ -422,5 +761,20 @@ body {
   .assistantInput {
     font-size: 0.96rem;
     padding: 14px 0;
+  }
+
+  .chatTopActions {
+    width: 100%;
+  }
+
+  .topActionBtn {
+    flex: 1;
+  }
+
+  .historyFab {
+    right: 14px;
+    bottom: 14px;
+    padding: 10px 14px;
+    font-size: 0.9rem;
   }
 }

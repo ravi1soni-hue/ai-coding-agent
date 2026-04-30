@@ -12,6 +12,7 @@ import { registerRoutes } from './api/routes';
 import { createSocketServer } from './api/socket';
 import { connectRedis } from './cache/redis';
 import { connectPostgres } from './db/postgres';
+import { ensureCoreTables } from './db/schema';
 import { ensureVectorTable } from './db/vectorStore';
 
 async function start() {
@@ -20,6 +21,8 @@ async function start() {
                 await connectRedis();
                 // Initialize Postgres
                 await connectPostgres();
+                // Ensure auth/session/project tables
+                await ensureCoreTables();
                 // Ensure vectors table and pgvector extension
                 await ensureVectorTable();
         } catch (err) {

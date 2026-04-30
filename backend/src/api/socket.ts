@@ -9,13 +9,121 @@ import { systemDesignAgent } from '../agents/systemDesignAgent';
 import { codeGenerationAgent } from '../agents/codeGenerationAgent';
 import { testFixAgent } from '../agents/testFixAgent';
 import { deploymentAgent } from '../agents/deploymentAgent';
+import {
+  createProjectSession,
+  getOrCreateActiveProjectSession,
+  getUserFromSessionToken,
+  isProjectOwnedByUser,
+  parseCookie,
+  touchProjectSession,
+} from '../auth/authService';
+import { appendProjectEvent, getProjectSnapshot, saveProjectDeployment, updateProjectSnapshot } from '../db/projectStore';
 
 
 export function createSocketServer(server: http.Server) {
   const wss = new Server({ server });
 
-  wss.on('connection', (ws) => {
+  wss.on('connection', async (ws, request) => {
+    const cookies = parseCookie(request.headers.cookie);
+    const token = cookies.sid;
+    if (!token) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Authentication required. Please login again.' }));
+      ws.close();
+      return;
+    }
+
+    const user = await getUserFromSessionToken(token);
+    if (!user) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Session expired. Please login again.' }));
+      ws.close();
+      return;
+    }
+    const authedUser = user;
+
+    const url = new URL(request.url || '/', 'http://localhost');
+    const requestedProjectId = url.searchParams.get('projectId');
+    let projectId = await getOrCreateActiveProjectSession(authedUser.id);
+    if (requestedProjectId) {
+      const owned = await isProjectOwnedByUser(authedUser.id, requestedProjectId);
+      projectId = owned ? requestedProjectId : await createProjectSession(authedUser.id);
+    }
+
+    await touchProjectSession(authedUser.id, projectId);
+
+    const wsAny = ws as any;
+    const sendRaw = ws.send.bind(ws);
+
+    wsAny.send = (data: any) => {
+      sendRaw(data);
+      try {
+        const payload = typeof data === 'string' ? JSON.parse(data) : null;
+        if (!payload || typeof payload !== 'object') return;
+
+        const roleMap: Record<string, string> = {
+          info: 'system',
+          progress: 'system',
+          stream: 'assistant',
+          clarification: 'assistant',
+          confirmation: 'assistant',
+          error: 'error',
+          done: 'system',
+        };
+
+        const text =
+          payload.message ?? payload.token ?? payload.question ?? payload.status ?? (payload.type ? String(payload.type) : null);
+
+        void appendProjectEvent({
+          projectId,
+          userId: authedUser.id,
+          eventType: payload.type || 'outbound',
+          role: roleMap[payload.type] ?? 'system',
+          message: text,
+          payload,
+        });
+
+        if (payload.type === 'progress') {
+          void updateProjectSnapshot({
+            projectId,
+            userId: authedUser.id,
+            status: 'active',
+            currentStep: session.step,
+            progress: Number(payload.progress) || 0,
+          });
+        }
+
+        if (payload.type === 'error') {
+          void updateProjectSnapshot({
+            projectId,
+            userId: authedUser.id,
+            status: 'failed',
+            currentStep: session.step,
+          });
+        }
+
+        if (payload.type === 'done') {
+          void updateProjectSnapshot({
+            projectId,
+            userId: authedUser.id,
+            status: 'completed',
+            currentStep: 'done',
+            progress: 1,
+            requirements: session.requirements,
+            clarifications: session.clarifications,
+            confirmation: session.confirmation,
+            systemDesign: session.systemDesign,
+            codeGen: session.codeGen,
+            testResult: session.testResult,
+            deployment: session.deployment,
+          });
+        }
+      } catch {
+        // no-op for non-JSON socket payloads
+      }
+    };
+
     ws.send(JSON.stringify({ type: 'info', message: 'WebSocket connection established!' }));
+
+    const snapshot = await getProjectSnapshot({ userId: authedUser.id, projectId });
 
     // --- State management per connection ---
     type Session = {
@@ -36,21 +144,26 @@ export function createSocketServer(server: http.Server) {
       lastClarificationQuestion?: string;
     };
     const session: Session = {
-      progress: 0,
-      step: 'init',
-      requirements: undefined,
-      clarifications: undefined,
-      confirmation: undefined,
-      systemDesign: undefined,
-      codeGen: undefined,
-      testResult: undefined,
-      deployment: undefined,
+      progress: Number(snapshot?.progress) || 0,
+      step: snapshot?.current_step || 'init',
+      requirements: snapshot?.requirements,
+      clarifications: snapshot?.clarifications,
+      confirmation: snapshot?.confirmation,
+      systemDesign: snapshot?.system_design,
+      codeGen: snapshot?.code_gen,
+      testResult: snapshot?.test_result,
+      deployment: snapshot?.deployment,
       pendingQuestions: [],
       context: {},
       modification: undefined,
       modificationContext: undefined,
       lastClarificationQuestion: undefined,
     };
+
+    if (session.step === 'done' || session.step === 'done_modification') {
+      session.step = 'init';
+      session.progress = 0;
+    }
 
     // Track answers for step-by-step clarification
     let clarificationAnswers: Record<string, string> = {};
@@ -190,6 +303,21 @@ export function createSocketServer(server: http.Server) {
           ws.send(JSON.stringify({ type: 'progress', progress: 1, status: 'Deploying...' }));
           try {
             session.deployment = await deploymentAgent({ frontend: 'frontend', backend: 'backend' });
+            await saveProjectDeployment({
+              projectId,
+              userId: authedUser.id,
+              frontendUrl: session.deployment?.frontend_url,
+              backendUrl: session.deployment?.backend_url,
+              vercelDeploymentId: session.deployment?.vercel_deployment_id,
+              vercelInspectUrl: session.deployment?.vercel_inspect_url,
+              vercelStatus: session.deployment?.vercel_status,
+              vercelLogUrl: session.deployment?.vercel_log_url,
+              railwayDeploymentId: session.deployment?.railway_deployment_id,
+              railwayStatus: session.deployment?.railway_status,
+              railwayLogUrl: session.deployment?.railway_log_url,
+              railwayDashboardUrl: session.deployment?.railway_dashboard_url,
+              raw: session.deployment,
+            });
             console.log('[DEPLOYMENT]', session.deployment);
             ws.send(JSON.stringify({ type: 'stream', token: 'Your project is deployed! 🎉' }));
             session.step = 'done';
@@ -203,6 +331,8 @@ export function createSocketServer(server: http.Server) {
         if (session.step === 'done') {
           // Save project/session state for project management (simple example: log to file/db)
           console.log('[PROJECT SAVED]', {
+            userId: authedUser.id,
+            projectId,
             requirements: session.requirements,
             clarifications: session.clarifications,
             confirmation: session.confirmation,
@@ -212,7 +342,14 @@ export function createSocketServer(server: http.Server) {
             deployment: session.deployment,
             timestamp: new Date().toISOString()
           });
-          ws.send(JSON.stringify({ type: 'done', message: 'Project complete and saved. Start a new session for a new project!' }));
+          await touchProjectSession(authedUser.id, projectId);
+          ws.send(
+            JSON.stringify({
+              type: 'done',
+              projectId,
+              message: 'Project complete and saved. Start a new session for a new project!',
+            }),
+          );
         }
       } catch (err) {
         console.error('[General Error]', err);
@@ -226,6 +363,18 @@ export function createSocketServer(server: http.Server) {
         msg = JSON.parse(message.toString());
       } catch {
         msg = message.toString();
+      }
+
+      const userText = typeof msg === 'object' ? msg.user_message || msg.answer || msg.modification : msg;
+      if (typeof userText === 'string' && userText.trim()) {
+        await appendProjectEvent({
+          projectId,
+          userId: authedUser.id,
+          eventType: 'user_message',
+          role: 'user',
+          message: userText.trim(),
+          payload: msg,
+        });
       }
 
       // Modification request (can come at any time)
@@ -313,6 +462,21 @@ export function createSocketServer(server: http.Server) {
         ws.send(JSON.stringify({ type: 'progress', progress: 1, status: 'Deploying modification...' }));
         try {
           session.deployment = await deploymentAgent({ frontend: 'frontend', backend: 'backend' });
+          await saveProjectDeployment({
+            projectId,
+            userId: authedUser.id,
+            frontendUrl: session.deployment?.frontend_url,
+            backendUrl: session.deployment?.backend_url,
+            vercelDeploymentId: session.deployment?.vercel_deployment_id,
+            vercelInspectUrl: session.deployment?.vercel_inspect_url,
+            vercelStatus: session.deployment?.vercel_status,
+            vercelLogUrl: session.deployment?.vercel_log_url,
+            railwayDeploymentId: session.deployment?.railway_deployment_id,
+            railwayStatus: session.deployment?.railway_status,
+            railwayLogUrl: session.deployment?.railway_log_url,
+            railwayDashboardUrl: session.deployment?.railway_dashboard_url,
+            raw: session.deployment,
+          });
           ws.send(JSON.stringify({ type: 'stream', token: `Deployment complete!` }));
           session.step = 'done_modification';
         } catch (err) {

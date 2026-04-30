@@ -19,6 +19,14 @@ interface DeployToVercelOptions {
   projectName?: string;
 }
 
+type DeployToVercelResult = {
+  url: string;
+  inspectUrl: string | null;
+  deploymentId: string;
+  status: string;
+  logUrl: string | null;
+};
+
 // Vercel config from environment variables
 const VERCEL_ACCESS_TOKEN = process.env.VERCEL_ACCESS_TOKEN || '';
 const VERCEL_TEAM_ID = process.env.VERCEL_TEAM_ID || '';
@@ -26,7 +34,7 @@ const VERCEL_PROJECT_ID = process.env.VERCEL_PROJECT_ID || '';
 const CUSTOM_DOMAIN = process.env.VERCEL_CUSTOM_DOMAIN || '';
 
 // Deploys the frontend build output to Vercel using the REST API
-export async function deployToVercel({ buildDir = '../../frontend', projectName = 'ai-coding-agent-iota-ochre' }: DeployToVercelOptions = {}): Promise<{ url: string; inspectUrl: string | null; deploymentId: string }> {
+export async function deployToVercel({ buildDir = '../../frontend', projectName = 'ai-coding-agent-iota-ochre' }: DeployToVercelOptions = {}): Promise<DeployToVercelResult> {
   // Read all files in the build directory recursively
   function getFiles(dir: string, base: string = dir): VercelFile[] {
     let files: VercelFile[] = [];
@@ -76,6 +84,8 @@ export async function deployToVercel({ buildDir = '../../frontend', projectName 
   return {
     url: response.data.url,
     inspectUrl: response.data.inspectorUrl || null,
-    deploymentId: response.data.id
+    deploymentId: response.data.id,
+    status: response.data.readyState || 'READY',
+    logUrl: response.data.inspectorUrl || null,
   };
 }
