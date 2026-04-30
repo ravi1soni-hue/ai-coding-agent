@@ -153,7 +153,7 @@ export async function materializeProjectWorkspace(input: MaterializeInput): Prom
   }
 
   const archivePath = path.join(workspaceDir, 'source.tgz');
-  const tar = await runCommand('tar', ['-czf', 'source.tgz', '.'], workspaceDir, 30_000);
+  const tar = await runCommand('tar', ['-czf', 'source.tgz', '--exclude=./source.tgz', '.'], workspaceDir, 30_000);
   if (tar.exitCode !== 0) {
     throw new Error(`Failed to archive generated source: ${tar.stderr || tar.stdout}`);
   }
