@@ -126,18 +126,13 @@ function AuthPage({ mode, setMode, form, setForm, busy, error, onSubmit }) {
   );
 }
 
-function ChatWorkspace({ user, projectId, onLogout, onNewProject }) {
+function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory }) {
   const [connection, setConnection] = useState('connecting');
   const [statusText, setStatusText] = useState('Initializing');
   const [progress, setProgress] = useState(0);
   const [input, setInput] = useState('');
   const [todayText, setTodayText] = useState('');
-  const [messages, setMessages] = useState([
-    {
-      role: 'assistant',
-      text: 'Connected UI. Ask me to build your project and I will start the flow.',
-    },
-  ]);
+  const [messages, setMessages] = useState([]);
 
   const wsRef = useRef(null);
   const msgEndRef = useRef(null);
@@ -145,6 +140,12 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject }) {
 
   useEffect(() => {
     let active = true;
+
+    // Reset visible chat state when project context changes so messages never leak across projects.
+    setMessages([]);
+    setProgress(0);
+    setStatusText('Initializing');
+    setInput('');
 
     async function loadProjectEvents() {
       if (!projectId) return;
@@ -284,6 +285,12 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject }) {
   return (
     <div className="mainBg">
       <div className="assistantWrapper">
+        <div className="bgDecor" aria-hidden="true">
+          <span className="bgBubble bubbleOne" />
+          <span className="bgBubble bubbleTwo" />
+          <span className="bgBubble bubbleThree" />
+          <span className="bgRing" />
+        </div>
         <section className="assistantLeft">
           <div className="assistantHeaderRow">
             <div>
@@ -295,11 +302,42 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject }) {
             <div className="assistantHeaderRight">
               <div className="assistantDate assistantDateCompact">{todayText}</div>
               <div className="chatTopActions">
-                <button className="topActionBtn" type="button" onClick={onNewProject}>
-                  New Project
+                <button
+                  className="iconActionBtn"
+                  type="button"
+                  onClick={onNewProject}
+                  aria-label="Start a new project"
+                  title="New Project"
+                >
+                  +
                 </button>
-                <button className="topActionBtn ghost" type="button" onClick={onLogout}>
-                  Logout
+                <button
+                  className="iconActionBtn ghost"
+                  type="button"
+                  onClick={onOpenHistory}
+                  aria-label="Open project history"
+                  title="History"
+                >
+                  <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+                    <path
+                      d="M12 3a9 9 0 0 0-8.485 6H2a1 1 0 1 0 0 2h2.4a1 1 0 0 0 1-1 6.6 6.6 0 1 1 1.912 4.668 1 1 0 1 0-1.414 1.414A8.6 8.6 0 1 0 3.4 10h.115A9 9 0 0 0 12 3zm0 4a1 1 0 0 0-1 1v4.2a1 1 0 0 0 .4.8l2.8 2.1a1 1 0 1 0 1.2-1.6L13 11.8V8a1 1 0 0 0-1-1z"
+                      fill="currentColor"
+                    />
+                  </svg>
+                </button>
+                <button
+                  className="iconActionBtn ghost"
+                  type="button"
+                  onClick={onLogout}
+                  aria-label="Log out"
+                  title="Logout"
+                >
+                  <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+                    <path
+                      d="M10 5a1 1 0 0 0 0 2h5v10h-5a1 1 0 1 0 0 2h6a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-6zm-4.707 6.293a1 1 0 0 0 0 1.414l2.999 3a1 1 0 1 0 1.414-1.414L8.414 13H14a1 1 0 1 0 0-2H8.414l1.292-1.293a1 1 0 0 0-1.414-1.414l-2.999 3z"
+                      fill="currentColor"
+                    />
+                  </svg>
                 </button>
               </div>
             </div>
@@ -507,10 +545,13 @@ export default function App() {
 
   return (
     <>
-      <ChatWorkspace user={user} projectId={projectId} onLogout={onLogout} onNewProject={onNewProject} />
-      <button className="historyFab" type="button" onClick={() => setHistoryOpen(true)}>
-        History
-      </button>
+      <ChatWorkspace
+        user={user}
+        projectId={projectId}
+        onLogout={onLogout}
+        onNewProject={onNewProject}
+        onOpenHistory={() => setHistoryOpen(true)}
+      />
 
       {historyOpen ? (
         <div className="historyOverlay" role="dialog" aria-modal="true">

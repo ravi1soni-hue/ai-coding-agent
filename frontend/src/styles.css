@@ -214,9 +214,109 @@ body {
   z-index: 1;
 }
 
+.bgDecor {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.bgBubble,
+.bgRing {
+  position: absolute;
+  display: block;
+}
+
+.bgBubble {
+  border-radius: 999px;
+  filter: blur(0.2px);
+  opacity: 0.6;
+}
+
+.bubbleOne {
+  width: 180px;
+  height: 180px;
+  top: -40px;
+  right: -40px;
+  background: radial-gradient(circle at 30% 30%, rgba(180, 108, 255, 0.35), rgba(180, 108, 255, 0.04) 70%);
+  animation: floatDriftA 9s ease-in-out infinite;
+}
+
+.bubbleTwo {
+  width: 220px;
+  height: 220px;
+  bottom: -70px;
+  left: -70px;
+  background: radial-gradient(circle at 35% 35%, rgba(92, 152, 255, 0.22), rgba(92, 152, 255, 0.03) 72%);
+  animation: floatDriftB 11s ease-in-out infinite;
+}
+
+.bubbleThree {
+  width: 130px;
+  height: 130px;
+  top: 38%;
+  right: 14%;
+  background: radial-gradient(circle at 40% 40%, rgba(255, 197, 112, 0.2), rgba(255, 197, 112, 0.03) 70%);
+  animation: floatDriftC 8s ease-in-out infinite;
+}
+
+.bgRing {
+  width: 320px;
+  height: 320px;
+  border-radius: 999px;
+  border: 1px solid rgba(180, 108, 255, 0.16);
+  top: 44%;
+  right: -120px;
+  transform-origin: center;
+  animation: orbitTilt 18s linear infinite;
+}
+
+@keyframes floatDriftA {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(-8px, 10px, 0);
+  }
+}
+
+@keyframes floatDriftB {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(10px, -8px, 0);
+  }
+}
+
+@keyframes floatDriftC {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(-6px, 7px, 0);
+  }
+}
+
+@keyframes orbitTilt {
+  0% {
+    transform: rotate(0deg) scale(1);
+  }
+  50% {
+    transform: rotate(180deg) scale(1.03);
+  }
+  100% {
+    transform: rotate(360deg) scale(1);
+  }
+}
+
 .assistantLeft {
   flex: 1 1 0;
-  padding: 28px 32px 24px;
+  padding: 28px 32px 20px;
   display: flex;
   flex-direction: column;
   z-index: 2;
@@ -231,14 +331,41 @@ body {
 }
 
 .assistantHeaderRight {
-  display: grid;
-  justify-items: end;
-  gap: 6px;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .chatTopActions {
   display: flex;
   gap: 8px;
+}
+
+.iconActionBtn {
+  border: none;
+  border-radius: 10px;
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  font-size: 1.3rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.iconActionBtn.ghost {
+  background: #eef1f8;
+  color: #2b3350;
+}
+
+.iconActionBtn svg {
+  display: block;
 }
 
 .topActionBtn {
@@ -255,22 +382,6 @@ body {
 .topActionBtn.ghost {
   background: #eef1f8;
   color: #2b3350;
-}
-
-.historyFab {
-  position: fixed;
-  right: 20px;
-  bottom: 24px;
-  z-index: 30;
-  border: none;
-  border-radius: 999px;
-  padding: 11px 16px;
-  background: #1f2437;
-  color: #fff;
-  font-weight: 700;
-  font-size: 0.95rem;
-  cursor: pointer;
-  box-shadow: 0 8px 22px rgba(15, 15, 24, 0.24);
 }
 
 .historyOverlay {
@@ -466,16 +577,17 @@ body {
 }
 
 .assistantInputRow {
-  margin-top: 8px;
+  margin-top: 10px;
   display: flex;
   align-items: center;
   width: 100%;
-  max-width: 500px;
+  max-width: 100%;
   background: #fff;
   border-radius: 24px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
   border: 1.5px solid var(--border);
-  padding: 4px 8px 4px 20px;
+  padding: 4px 8px 4px 16px;
+  margin-bottom: max(8px, env(safe-area-inset-bottom));
 }
 
 .assistantInput {
@@ -521,7 +633,7 @@ body {
   margin-top: 8px;
   font-size: 0.77rem;
   color: #6a6a76;
-  max-width: 500px;
+  max-width: 100%;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -573,18 +685,17 @@ body {
   }
 
   .assistantLeft {
-    padding: 26px 14px 14px;
+    padding: 26px 14px 12px;
   }
 
   .assistantHeaderRow {
     align-items: flex-start;
-    flex-direction: column;
-    gap: 8px;
+    flex-direction: row;
+    gap: 10px;
   }
 
   .assistantHeaderRight {
-    width: 100%;
-    justify-items: start;
+    width: auto;
     gap: 8px;
   }
 
@@ -655,12 +766,6 @@ body {
     max-height: 42vh;
   }
 
-  .historyFab {
-    right: 12px;
-    bottom: max(12px, env(safe-area-inset-bottom));
-    padding: 10px 14px;
-  }
-
   .historyOverlay {
     align-items: flex-end;
     padding: 8px;
@@ -705,17 +810,12 @@ body {
   }
 
   .chatTopActions {
-    width: 100%;
+    width: auto;
   }
 
-  .topActionBtn {
-    flex: 1;
+  .iconActionBtn {
+    width: 36px;
+    height: 36px;
   }
 
-  .historyFab {
-    right: 14px;
-    bottom: 14px;
-    padding: 10px 14px;
-    font-size: 0.9rem;
-  }
 }

@@ -619,6 +619,30 @@ export function createSocketServer(server: http.Server) {
         await runFlow(null, null);
         return;
       } else if (session.step !== 'init') {
+        // Recover from stale/non-resumable states by treating new user text as a fresh request.
+        // This avoids dead-ends after reconnects where the snapshot step is in-progress
+        // but no actionable clarification/confirmation prompt is actually pending.
+        if (typeof userText === 'string' && userText.trim()) {
+          session.progress = 0;
+          session.step = 'init';
+          session.requirements = undefined;
+          session.clarifications = undefined;
+          session.confirmation = undefined;
+          session.systemDesign = undefined;
+          session.codeGen = undefined;
+          session.testResult = undefined;
+          session.deployment = undefined;
+          session.modification = undefined;
+          session.modificationContext = undefined;
+          session.lastClarificationQuestion = undefined;
+          clarificationAnswers = {};
+          askedClarificationQuestions = [];
+
+          ws.send(JSON.stringify({ type: 'stream', token: 'Starting a new request from your latest prompt.' }));
+          await runFlow(userText, null);
+          return;
+        }
+
         ws.send(JSON.stringify({ type: 'info', message: 'Please answer the pending questions or confirm to continue.' }));
         return;
       }
