@@ -101,7 +101,12 @@ async function hashDirectory(rootDir: string): Promise<string> {
     const entries = await fs.readdir(currentDir, { withFileTypes: true });
     const sorted = entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of sorted) {
-      if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === '.git') {
+      if (
+        entry.name === 'node_modules' ||
+        entry.name === 'dist' ||
+        entry.name === '.git' ||
+        entry.name === 'source.tgz'
+      ) {
         continue;
       }
       const fullPath = path.join(currentDir, entry.name);
@@ -122,8 +127,9 @@ async function hashDirectory(rootDir: string): Promise<string> {
 
 export async function materializeProjectWorkspace(input: MaterializeInput): Promise<MaterializedRevision> {
   const projectSegment = sanitizeSegment(input.projectId);
+  const projectDir = path.join(WORKSPACE_ROOT, projectSegment);
   const revisionId = crypto.randomUUID();
-  const workspaceDir = path.join(WORKSPACE_ROOT, projectSegment, revisionId);
+  const workspaceDir = path.join(projectDir, revisionId);
 
   await fs.mkdir(workspaceDir, { recursive: true });
   await copyDir(FRONTEND_TEMPLATE_DIR, workspaceDir);
@@ -152,8 +158,21 @@ export async function materializeProjectWorkspace(input: MaterializeInput): Prom
     patchApplyLog = `${apply.stdout}\n${apply.stderr}`.trim();
   }
 
-  const archivePath = path.join(workspaceDir, 'source.tgz');
-  const tar = await runCommand('tar', ['-czf', 'source.tgz', '--exclude=./source.tgz', '.'], workspaceDir, 30_000);
+  const archivePath = path.join(projectDir, `${revisionId}.tgz`);
+  const tar = await runCommand(
+    'tar',
+    [
+      '-czf',
+      archivePath,
+      '--exclude=.git',
+      '--exclude=node_modules',
+      '--exclude=dist',
+      '--exclude=source.tgz',
+      '.',
+    ],
+    workspaceDir,
+    30_000
+  );
   if (tar.exitCode !== 0) {
     throw new Error(`Failed to archive generated source: ${tar.stderr || tar.stdout}`);
   }
