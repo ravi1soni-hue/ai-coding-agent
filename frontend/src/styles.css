@@ -190,7 +190,7 @@ body {
   background: var(--panel);
   border-radius: 32px;
   box-shadow: 0 4px 32px rgba(0, 0, 0, 0.06);
-  width: 1100px;
+  width: 760px;
   min-height: 700px;
   max-width: 98vw;
   margin: 0 auto;
@@ -216,28 +216,24 @@ body {
 
 .assistantLeft {
   flex: 1 1 0;
-  padding: 48px 44px 28px;
+  padding: 28px 32px 24px;
   display: flex;
   flex-direction: column;
   z-index: 2;
 }
 
-.chatTopBar {
+.assistantHeaderRow {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 10px;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 8px;
 }
 
-.chatIdentity {
+.assistantHeaderRight {
   display: grid;
-  gap: 0;
-}
-
-.chatUserName {
-  font-size: 0.95rem;
-  font-weight: 700;
+  justify-items: end;
+  gap: 6px;
 }
 
 .chatTopActions {
@@ -377,6 +373,12 @@ body {
   margin-bottom: 10px;
 }
 
+.assistantDateCompact {
+  font-size: 0.8rem;
+  margin-bottom: 0;
+  color: #5e6379;
+}
+
 .assistantTitle {
   font-size: 2rem;
   font-weight: 800;
@@ -386,10 +388,9 @@ body {
   font-family: 'Montserrat', Arial, sans-serif;
 }
 
-.assistantTitle .highlight {
+.assistantName {
   color: var(--accent);
-  font-style: italic;
-  font-weight: 700;
+  font-weight: 800;
 }
 
 .assistantQuestion {
@@ -420,6 +421,11 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.socketStatusCentered {
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .socketChip {
@@ -498,13 +504,15 @@ body {
 }
 
 .activityBox {
-  margin-top: 10px;
-  max-width: 500px;
+  margin-top: 8px;
+  width: 100%;
+  max-width: 100%;
   border-radius: 12px;
   background: #fff;
   border: 1px solid var(--border);
   min-height: 112px;
-  max-height: 320px;
+  max-height: none;
+  flex: 1;
   overflow: auto;
   padding: 10px;
 }
@@ -544,103 +552,6 @@ body {
   color: #9d2f2f;
 }
 
-.assistantRight {
-  flex: 1 1 0;
-  display: flex;
-  align-items: flex-end;
-  justify-content: flex-end;
-  position: relative;
-  min-width: 340px;
-  z-index: 2;
-}
-
-.assistantImgBg {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  top: 0;
-  width: 420px;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-}
-
-.assistantImg {
-  width: 340px;
-  height: 420px;
-  object-fit: cover;
-  border-radius: 24px;
-  margin-right: 32px;
-  box-shadow: 0 4px 32px rgba(0, 0, 0, 0.12);
-}
-
-.assistantCircles {
-  position: absolute;
-  right: 60px;
-  top: 60px;
-  z-index: 1;
-  pointer-events: none;
-}
-
-.circle {
-  position: absolute;
-  border-radius: 50%;
-  border: 2px solid #f3eaff;
-  opacity: 0.7;
-}
-
-.circle1 {
-  width: 320px;
-  height: 320px;
-}
-
-.circle2 {
-  width: 220px;
-  height: 220px;
-  left: 50px;
-  top: 50px;
-  border-color: #ffeaff;
-}
-
-.circle3 {
-  width: 120px;
-  height: 120px;
-  left: 100px;
-  top: 100px;
-  border-color: var(--accent);
-}
-
-@media (max-width: 1100px) {
-  .assistantImgBg {
-    width: 300px;
-  }
-
-  .assistantImg {
-    width: 220px;
-    height: 300px;
-    margin-right: 8px;
-  }
-
-  .circle1 {
-    width: 200px;
-    height: 200px;
-  }
-
-  .circle2 {
-    width: 140px;
-    height: 140px;
-    left: 30px;
-    top: 30px;
-  }
-
-  .circle3 {
-    width: 80px;
-    height: 80px;
-    left: 60px;
-    top: 60px;
-  }
-}
-
 @media (max-width: 900px) {
   .authShell {
     grid-template-columns: 1fr;
@@ -665,9 +576,15 @@ body {
     padding: 26px 14px 14px;
   }
 
-  .chatTopBar {
+  .assistantHeaderRow {
     align-items: flex-start;
     flex-direction: column;
+    gap: 8px;
+  }
+
+  .assistantHeaderRight {
+    width: 100%;
+    justify-items: start;
     gap: 8px;
   }
 
@@ -677,23 +594,6 @@ body {
 
   .assistantQuestion {
     font-size: 1.06rem;
-  }
-
-  .assistantRight {
-    min-width: 0;
-    justify-content: center;
-    align-items: center;
-  }
-
-  .assistantImgBg {
-    position: static;
-    width: 220px;
-  }
-
-  .assistantImg {
-    width: 180px;
-    height: 220px;
-    margin: 0;
   }
 
   .activityBox {
@@ -739,10 +639,6 @@ body {
   .buildHint {
     margin-bottom: 5px;
     font-size: 0.84rem;
-  }
-
-  .assistantRight {
-    display: none;
   }
 
   .assistantInput {

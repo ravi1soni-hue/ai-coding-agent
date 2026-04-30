@@ -285,25 +285,27 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject }) {
     <div className="mainBg">
       <div className="assistantWrapper">
         <section className="assistantLeft">
-          <div className="chatTopBar">
-            <div className="chatIdentity">
-              <span className="chatUserName">{user.name}</span>
+          <div className="assistantHeaderRow">
+            <div>
+              <h1 className="assistantTitle">
+                Hello <span className="assistantName">{displayName}</span>,
+              </h1>
+              <div className="assistantQuestion">How can I help you?</div>
             </div>
-            <div className="chatTopActions">
-              <button className="topActionBtn" type="button" onClick={onNewProject}>
-                New Project
-              </button>
-              <button className="topActionBtn ghost" type="button" onClick={onLogout}>
-                Logout
-              </button>
+            <div className="assistantHeaderRight">
+              <div className="assistantDate assistantDateCompact">{todayText}</div>
+              <div className="chatTopActions">
+                <button className="topActionBtn" type="button" onClick={onNewProject}>
+                  New Project
+                </button>
+                <button className="topActionBtn ghost" type="button" onClick={onLogout}>
+                  Logout
+                </button>
+              </div>
             </div>
           </div>
 
-          <div className="assistantDate">{todayText}</div>
-          <h1 className="assistantTitle">Hello {displayName},</h1>
-          <div className="assistantQuestion">How can I help you?</div>
-
-          <div className="socketStatus">
+          <div className="socketStatus socketStatusCentered">
             <span className={`socketChip socket-${connection}`}>{connection}</span>
             <span className="socketText" title={statusText}>
               {statusText}
@@ -312,6 +314,17 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject }) {
           </div>
 
           <div className="buildHint">Describe what to build and follow live progress below.</div>
+
+          <div className="activityBox">
+            {messages.slice(-6).map((m, idx) => (
+              <div key={`${m.role}-${idx}`} className={`msg ${m.role}`}>
+                {m.text}
+              </div>
+            ))}
+            <div ref={msgEndRef} />
+          </div>
+
+          <div className="projectMeta">Project session: {projectId}</div>
 
           <form className="assistantInputRow" onSubmit={onSubmit}>
             <input
@@ -325,32 +338,6 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject }) {
               Send
             </button>
           </form>
-
-          <div className="projectMeta">Project session: {projectId}</div>
-
-          <div className="activityBox">
-            {messages.slice(-6).map((m, idx) => (
-              <div key={`${m.role}-${idx}`} className={`msg ${m.role}`}>
-                {m.text}
-              </div>
-            ))}
-            <div ref={msgEndRef} />
-          </div>
-        </section>
-
-        <section className="assistantRight">
-          <div className="assistantImgBg">
-            <img
-              className="assistantImg"
-              src="https://images.unsplash.com/photo-1511367461989-f85a21fda167?auto=format&fit=facearea&w=400&h=400&q=80"
-              alt="Assistant"
-            />
-            <div className="assistantCircles">
-              <div className="circle circle1"></div>
-              <div className="circle circle2"></div>
-              <div className="circle circle3"></div>
-            </div>
-          </div>
         </section>
       </div>
     </div>
