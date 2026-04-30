@@ -390,8 +390,9 @@ export function createSocketServer(server: http.Server) {
             ws.send(JSON.stringify({ type: 'stream', token: 'Your project is deployed! 🎉' }));
             session.step = 'done';
           } catch (err) {
-            console.error('[Deployment Error]', err);
-            ws.send(JSON.stringify({ type: 'error', message: 'Oops, something went wrong during deployment. Please try again later.' }));
+            const message = (err as any)?.message || 'Oops, something went wrong during deployment. Please try again later.';
+            console.error('[Deployment Error]', message);
+            ws.send(JSON.stringify({ type: 'error', message }));
             return;
           }
         }
@@ -587,7 +588,7 @@ export function createSocketServer(server: http.Server) {
           ws.send(JSON.stringify({ type: 'stream', token: `Deployment complete!` }));
           session.step = 'done_modification';
         } catch (err) {
-          ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Deployment for modification failed.', error: { name: (err as any)?.name, stack: (err as any)?.stack, details: err } }));
+          ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Deployment for modification failed.', error: { name: (err as any)?.name, stack: (err as any)?.stack } }));
           return;
         }
       }

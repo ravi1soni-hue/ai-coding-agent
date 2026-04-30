@@ -50,7 +50,8 @@ export async function deploymentAgent(input: {
     }
     return result;
   } catch (err) {
-    console.error('[deploymentAgent] error:', err);
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[deploymentAgent] error:', message);
     throw err;
   }
 }

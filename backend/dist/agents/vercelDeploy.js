@@ -7,15 +7,17 @@ exports.deployToVercel = deployToVercel;
 const axios_1 = __importDefault(require("axios"));
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
-const dotenv_1 = __importDefault(require("dotenv"));
-dotenv_1.default.config({ path: path_1.default.resolve(__dirname, '../config/../../.env') });
-// Vercel config from environment variables
-const VERCEL_ACCESS_TOKEN = process.env.VERCEL_ACCESS_TOKEN || '';
-const VERCEL_TEAM_ID = process.env.VERCEL_TEAM_ID || '';
-const VERCEL_PROJECT_ID = process.env.VERCEL_PROJECT_ID || '';
-const CUSTOM_DOMAIN = process.env.VERCEL_CUSTOM_DOMAIN || '';
-// Deploys the frontend build output to Vercel using the REST API
-async function deployToVercel({ buildDir = '../../frontend', projectName = 'ai-coding-agent-iota-ochre' } = {}) {
+const env_1 = require("../config/env");
+// Vercel config from central env — never hardcode project IDs here
+const VERCEL_ACCESS_TOKEN = env_1.config.VERCEL_ACCESS_TOKEN;
+const VERCEL_TEAM_ID = env_1.config.VERCEL_TEAM_ID;
+// Deploys the frontend build output to Vercel using the REST API.
+// projectName is always dynamic (per-user-project); Vercel creates or reuses the project by name.
+async function deployToVercel({ buildDir = '../../frontend/dist', projectName, meta } = {}) {
+    if (!projectName)
+        throw new Error('projectName is required for Vercel deployment — must be derived from projectId');
+    if (!VERCEL_ACCESS_TOKEN)
+        throw new Error('VERCEL_ACCESS_TOKEN is not set. Configure it in Railway environment variables.');
     // Read all files in the build directory recursively
     function getFiles(dir, base = dir) {
         let files = [];
@@ -33,23 +35,39 @@ async function deployToVercel({ buildDir = '../../frontend', projectName = 'ai-c
         }
         return files;
     }
-    const files = getFiles(path_1.default.resolve(__dirname, buildDir));
+    const resolvedBuildDir = path_1.default.isAbsolute(buildDir) ? buildDir : path_1.default.resolve(__dirname, buildDir);
+    const files = getFiles(resolvedBuildDir);
     const fileList = files.map((f) => ({ file: f.file, data: f.data.toString('base64') }));
-    // Prepare the deployment payload
+    // Prepare the deployment payload.
+    // Do NOT pass a fixed projectId — let Vercel find or create a project by name.
+    // This ensures each user project gets its own isolated Vercel project.
     const payload = {
         name: projectName,
-        projectId: VERCEL_PROJECT_ID,
         files: fileList.map((f) => ({ file: f.file, data: f.data })),
         target: 'production',
-        teamId: VERCEL_TEAM_ID
+        meta: meta || undefined
     };
     // Call Vercel Deployments API
-    const response = await axios_1.default.post('https://api.vercel.com/v13/deployments', payload, {
-        headers: {
-            Authorization: `Bearer ${VERCEL_ACCESS_TOKEN}`,
-            'Content-Type': 'application/json'
+    let response;
+    try {
+        response = await axios_1.default.post('https://api.vercel.com/v13/deployments', payload, {
+            params: VERCEL_TEAM_ID ? { teamId: VERCEL_TEAM_ID } : undefined,
+            headers: {
+                Authorization: `Bearer ${VERCEL_ACCESS_TOKEN}`,
+                'Content-Type': 'application/json'
+            }
+        });
+    }
+    catch (err) {
+        if (axios_1.default.isAxiosError(err)) {
+            const status = err.response?.status || 500;
+            const details = typeof err.response?.data === 'string'
+                ? err.response.data
+                : JSON.stringify(err.response?.data || {});
+            throw new Error(`Vercel deployment failed: ${status} ${details}`);
         }
-    });
+        throw err;
+    }
     if (response.status !== 200 && response.status !== 201) {
         throw new Error(`Vercel deployment failed: ${response.status} ${JSON.stringify(response.data)}`);
     }
@@ -57,6 +75,8 @@ async function deployToVercel({ buildDir = '../../frontend', projectName = 'ai-c
     return {
         url: response.data.url,
         inspectUrl: response.data.inspectorUrl || null,
-        deploymentId: response.data.id
+        deploymentId: response.data.id,
+        status: response.data.readyState || 'READY',
+        logUrl: response.data.inspectorUrl || null,
     };
 }

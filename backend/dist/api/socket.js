@@ -10,29 +10,135 @@ const systemDesignAgent_1 = require("../agents/systemDesignAgent");
 const codeGenerationAgent_1 = require("../agents/codeGenerationAgent");
 const testFixAgent_1 = require("../agents/testFixAgent");
 const deploymentAgent_1 = require("../agents/deploymentAgent");
+const buildWorker_1 = require("../workers/buildWorker");
+const authService_1 = require("../auth/authService");
+const projectStore_1 = require("../db/projectStore");
+const projectFactory_1 = require("../factory/projectFactory");
 function createSocketServer(server) {
     const wss = new ws_1.Server({ server });
-    wss.on('connection', (ws) => {
+    wss.on('connection', async (ws, request) => {
+        const cookies = (0, authService_1.parseCookie)(request.headers.cookie);
+        const token = cookies.sid;
+        if (!token) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Authentication required. Please login again.' }));
+            ws.close();
+            return;
+        }
+        const user = await (0, authService_1.getUserFromSessionToken)(token);
+        if (!user) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Session expired. Please login again.' }));
+            ws.close();
+            return;
+        }
+        const authedUser = user;
+        const url = new URL(request.url || '/', 'http://localhost');
+        const requestedProjectId = url.searchParams.get('projectId');
+        let projectId = await (0, authService_1.getOrCreateActiveProjectSession)(authedUser.id);
+        if (requestedProjectId) {
+            const owned = await (0, authService_1.isProjectOwnedByUser)(authedUser.id, requestedProjectId);
+            projectId = owned ? requestedProjectId : await (0, authService_1.createProjectSession)(authedUser.id);
+        }
+        await (0, authService_1.touchProjectSession)(authedUser.id, projectId);
+        const wsAny = ws;
+        const sendRaw = ws.send.bind(ws);
+        wsAny.send = (data) => {
+            sendRaw(data);
+            try {
+                const payload = typeof data === 'string' ? JSON.parse(data) : null;
+                if (!payload || typeof payload !== 'object')
+                    return;
+                const roleMap = {
+                    info: 'system',
+                    progress: 'system',
+                    stream: 'assistant',
+                    clarification: 'assistant',
+                    confirmation: 'assistant',
+                    error: 'error',
+                    done: 'system',
+                };
+                const text = payload.message ?? payload.token ?? payload.question ?? payload.status ?? (payload.type ? String(payload.type) : null);
+                void (0, projectStore_1.appendProjectEvent)({
+                    projectId,
+                    userId: authedUser.id,
+                    eventType: payload.type || 'outbound',
+                    role: roleMap[payload.type] ?? 'system',
+                    message: text,
+                    payload,
+                });
+                if (payload.type === 'progress') {
+                    void (0, projectStore_1.updateProjectSnapshot)({
+                        projectId,
+                        userId: authedUser.id,
+                        status: 'active',
+                        currentStep: session.step,
+                        progress: Number(payload.progress) || 0,
+                    });
+                }
+                if (payload.type === 'error') {
+                    void (0, projectStore_1.updateProjectSnapshot)({
+                        projectId,
+                        userId: authedUser.id,
+                        status: 'failed',
+                        currentStep: session.step,
+                    });
+                }
+                if (payload.type === 'done') {
+                    void (0, projectStore_1.updateProjectSnapshot)({
+                        projectId,
+                        userId: authedUser.id,
+                        status: 'completed',
+                        currentStep: 'done',
+                        progress: 1,
+                        requirements: session.requirements,
+                        clarifications: session.clarifications,
+                        confirmation: session.confirmation,
+                        systemDesign: session.systemDesign,
+                        codeGen: session.codeGen,
+                        testResult: session.testResult,
+                        deployment: session.deployment,
+                    });
+                }
+            }
+            catch (err) {
+                if (process.env.NODE_ENV !== 'production') {
+                    console.warn('Skipping outbound project event persistence for non-JSON payload', err);
+                }
+            }
+        };
         ws.send(JSON.stringify({ type: 'info', message: 'WebSocket connection established!' }));
+        const snapshot = await (0, projectStore_1.getProjectSnapshot)({ userId: authedUser.id, projectId });
         const session = {
-            progress: 0,
-            step: 'init',
-            requirements: undefined,
-            clarifications: undefined,
-            confirmation: undefined,
-            systemDesign: undefined,
-            codeGen: undefined,
-            testResult: undefined,
-            deployment: undefined,
-            pendingQuestions: [],
+            progress: Number(snapshot?.progress) || 0,
+            step: snapshot?.current_step || 'init',
+            requirements: snapshot?.requirements,
+            clarifications: snapshot?.clarifications,
+            confirmation: snapshot?.confirmation,
+            systemDesign: snapshot?.system_design,
+            codeGen: snapshot?.code_gen,
+            testResult: snapshot?.test_result,
+            deployment: snapshot?.deployment,
             context: {},
             modification: undefined,
             modificationContext: undefined,
             lastClarificationQuestion: undefined,
+            activeRevisionId: undefined,
+            workspaceDir: undefined,
+            sourceArchivePath: undefined,
+            sourceHash: undefined,
+            buildDir: undefined,
+            codeRevisionDbId: undefined,
         };
+        if (session.step === 'done' || session.step === 'done_modification') {
+            session.step = 'init';
+            session.progress = 0;
+        }
         // Track answers for step-by-step clarification
-        let clarificationAnswers = {};
-        let clarificationIndex = 0;
+        let clarificationAnswers = session.clarifications?.context?.clarificationAnswers && typeof session.clarifications.context.clarificationAnswers === 'object'
+            ? { ...session.clarifications.context.clarificationAnswers }
+            : {};
+        let askedClarificationQuestions = Array.isArray(session.clarifications?.context?.askedQuestions)
+            ? [...session.clarifications.context.askedQuestions]
+            : [];
         async function runFlow(userMsg, userClarificationAnswers = null) {
             try {
                 // Step 1: Requirement Analysis
@@ -63,6 +169,7 @@ function createSocketServer(server) {
                         let clarInput = {
                             requirements: session.requirements || {},
                             clarificationAnswers,
+                            askedQuestions: askedClarificationQuestions,
                             modification: session.modification,
                             lastQuestion: session.lastClarificationQuestion,
                             lastAnswer: undefined // You can set this if you track last answer
@@ -85,13 +192,20 @@ function createSocketServer(server) {
                                 }
                                 catch { }
                             }
+                            const normalizedQuestion = questionMsg.trim().toLowerCase();
+                            if (askedClarificationQuestions.some((q) => q.trim().toLowerCase() === normalizedQuestion)) {
+                                ws.send(JSON.stringify({ type: 'stream', token: 'Using your previous clarification. Moving to confirmation.' }));
+                                session.step = 'confirmation';
+                                continue;
+                            }
+                            askedClarificationQuestions.push(questionMsg);
+                            session.lastClarificationQuestion = questionMsg;
                             ws.send(JSON.stringify({ type: 'clarification', question: questionMsg })); // Only send plain question string
                             session.step = 'clarification_wait';
                             return;
                         }
                         else if (session.clarifications && !session.clarifications.confirmed) {
                             ws.send(JSON.stringify({ type: 'confirmation', message: 'Could you please confirm the above details before we proceed?' })); // Only send plain confirmation message
-                            session.pendingQuestions = [];
                             session.step = 'clarification_wait';
                             return;
                         }
@@ -144,6 +258,25 @@ function createSocketServer(server) {
                     ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Generating code...' }));
                     try {
                         session.codeGen = await (0, codeGenerationAgent_1.codeGenerationAgent)(session.systemDesign);
+                        const materialized = await (0, projectFactory_1.materializeProjectWorkspace)({
+                            projectId,
+                            codeGen: session.codeGen,
+                        });
+                        session.activeRevisionId = materialized.revisionId;
+                        session.workspaceDir = materialized.workspaceDir;
+                        session.sourceArchivePath = materialized.archivePath;
+                        session.sourceHash = materialized.sourceHash;
+                        session.codeRevisionDbId = await (0, projectStore_1.createProjectCodeRevision)({
+                            projectId,
+                            userId: authedUser.id,
+                            workspacePath: materialized.workspaceDir,
+                            sourceArchivePath: materialized.archivePath,
+                            sourceHash: materialized.sourceHash,
+                            patchPath: materialized.patchPath,
+                            patchApplied: materialized.patchApplied,
+                            patchApplyLog: materialized.patchApplyLog,
+                            generationPayload: session.codeGen,
+                        });
                         console.log('[CODE GEN]', session.codeGen);
                         ws.send(JSON.stringify({ type: 'stream', token: 'Code generated! Running tests and fixes...' }));
                         session.step = 'testFix';
@@ -158,7 +291,15 @@ function createSocketServer(server) {
                     session.progress += 0.12;
                     ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Testing and fixing...' }));
                     try {
-                        session.testResult = await (0, testFixAgent_1.testFixAgent)({ buildFn: async () => ({ success: true, logs: 'Build successful.' }) });
+                        session.testResult = await (0, testFixAgent_1.testFixAgent)({
+                            buildFn: async () => {
+                                const result = await (0, buildWorker_1.runBuildWorker)({ workspaceDir: session.workspaceDir });
+                                if (result.success) {
+                                    session.buildDir = result.buildDir;
+                                }
+                                return { success: result.success, logs: result.logs };
+                            },
+                        });
                         console.log('[TEST RESULT]', session.testResult);
                         ws.send(JSON.stringify({ type: 'stream', token: 'Tests complete! Deploying your project...' }));
                         session.step = 'deploy';
@@ -172,20 +313,50 @@ function createSocketServer(server) {
                 if (session.step === 'deploy') {
                     ws.send(JSON.stringify({ type: 'progress', progress: 1, status: 'Deploying...' }));
                     try {
-                        session.deployment = await (0, deploymentAgent_1.deploymentAgent)({ frontend: 'frontend', backend: 'backend' });
+                        if (!session.buildDir || !session.activeRevisionId) {
+                            throw new Error('Build artifact missing for deployment.');
+                        }
+                        session.deployment = await (0, deploymentAgent_1.deploymentAgent)({
+                            projectId,
+                            revisionId: session.activeRevisionId,
+                            buildDir: session.buildDir,
+                            frontendProjectName: `proj-${projectId.slice(0, 10)}`,
+                            backendService: 'backend',
+                        });
+                        await (0, projectStore_1.saveProjectDeployment)({
+                            projectId,
+                            userId: authedUser.id,
+                            frontendUrl: session.deployment?.frontend_url,
+                            backendUrl: session.deployment?.backend_url,
+                            vercelDeploymentId: session.deployment?.vercel_deployment_id,
+                            vercelInspectUrl: session.deployment?.vercel_inspect_url,
+                            vercelStatus: session.deployment?.vercel_status,
+                            vercelLogUrl: session.deployment?.vercel_log_url,
+                            railwayDeploymentId: session.deployment?.railway_deployment_id,
+                            railwayStatus: session.deployment?.railway_status,
+                            railwayLogUrl: session.deployment?.railway_log_url,
+                            railwayDashboardUrl: session.deployment?.railway_dashboard_url,
+                            codeRevisionId: session.codeRevisionDbId,
+                            sourceArchivePath: session.sourceArchivePath,
+                            sourceHash: session.sourceHash,
+                            raw: session.deployment,
+                        });
                         console.log('[DEPLOYMENT]', session.deployment);
                         ws.send(JSON.stringify({ type: 'stream', token: 'Your project is deployed! 🎉' }));
                         session.step = 'done';
                     }
                     catch (err) {
-                        console.error('[Deployment Error]', err);
-                        ws.send(JSON.stringify({ type: 'error', message: 'Oops, something went wrong during deployment. Please try again later.' }));
+                        const message = err?.message || 'Oops, something went wrong during deployment. Please try again later.';
+                        console.error('[Deployment Error]', message);
+                        ws.send(JSON.stringify({ type: 'error', message }));
                         return;
                     }
                 }
                 if (session.step === 'done') {
                     // Save project/session state for project management (simple example: log to file/db)
                     console.log('[PROJECT SAVED]', {
+                        userId: authedUser.id,
+                        projectId,
                         requirements: session.requirements,
                         clarifications: session.clarifications,
                         confirmation: session.confirmation,
@@ -195,7 +366,12 @@ function createSocketServer(server) {
                         deployment: session.deployment,
                         timestamp: new Date().toISOString()
                     });
-                    ws.send(JSON.stringify({ type: 'done', message: 'Project complete and saved. Start a new session for a new project!' }));
+                    await (0, authService_1.touchProjectSession)(authedUser.id, projectId);
+                    ws.send(JSON.stringify({
+                        type: 'done',
+                        projectId,
+                        message: 'Project complete and saved. Start a new session for a new project!',
+                    }));
                 }
             }
             catch (err) {
@@ -210,6 +386,17 @@ function createSocketServer(server) {
             }
             catch {
                 msg = message.toString();
+            }
+            const userText = typeof msg === 'object' ? msg.user_message || msg.answer || msg.modification : msg;
+            if (typeof userText === 'string' && userText.trim()) {
+                await (0, projectStore_1.appendProjectEvent)({
+                    projectId,
+                    userId: authedUser.id,
+                    eventType: 'user_message',
+                    role: 'user',
+                    message: userText.trim(),
+                    payload: msg,
+                });
             }
             // Modification request (can come at any time)
             if (typeof msg === 'object' && msg.type === 'modification' && msg.modification) {
@@ -270,6 +457,25 @@ function createSocketServer(server) {
                         context: session.modificationContext
                     };
                     session.codeGen = await (0, codeGenerationAgent_1.codeGenerationAgent)(codeGenInput);
+                    const materialized = await (0, projectFactory_1.materializeProjectWorkspace)({
+                        projectId,
+                        codeGen: session.codeGen,
+                    });
+                    session.activeRevisionId = materialized.revisionId;
+                    session.workspaceDir = materialized.workspaceDir;
+                    session.sourceArchivePath = materialized.archivePath;
+                    session.sourceHash = materialized.sourceHash;
+                    session.codeRevisionDbId = await (0, projectStore_1.createProjectCodeRevision)({
+                        projectId,
+                        userId: authedUser.id,
+                        workspacePath: materialized.workspaceDir,
+                        sourceArchivePath: materialized.archivePath,
+                        sourceHash: materialized.sourceHash,
+                        patchPath: materialized.patchPath,
+                        patchApplied: materialized.patchApplied,
+                        patchApplyLog: materialized.patchApplyLog,
+                        generationPayload: session.codeGen,
+                    });
                     ws.send(JSON.stringify({ type: 'stream', token: `Code patch generated. Proceeding to tests...` }));
                     session.step = 'testFix_modification';
                 }
@@ -282,7 +488,15 @@ function createSocketServer(server) {
             if (session.step === 'testFix_modification') {
                 ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Testing and fixing modification...' }));
                 try {
-                    session.testResult = await (0, testFixAgent_1.testFixAgent)({ buildFn: async () => ({ success: true, logs: 'Build successful.' }) });
+                    session.testResult = await (0, testFixAgent_1.testFixAgent)({
+                        buildFn: async () => {
+                            const result = await (0, buildWorker_1.runBuildWorker)({ workspaceDir: session.workspaceDir });
+                            if (result.success) {
+                                session.buildDir = result.buildDir;
+                            }
+                            return { success: result.success, logs: result.logs };
+                        },
+                    });
                     ws.send(JSON.stringify({ type: 'stream', token: `Tests complete. Deploying your project...` }));
                     session.step = 'deploy_modification';
                 }
@@ -295,12 +509,39 @@ function createSocketServer(server) {
             if (session.step === 'deploy_modification') {
                 ws.send(JSON.stringify({ type: 'progress', progress: 1, status: 'Deploying modification...' }));
                 try {
-                    session.deployment = await (0, deploymentAgent_1.deploymentAgent)({ frontend: 'frontend', backend: 'backend' });
+                    if (!session.buildDir || !session.activeRevisionId) {
+                        throw new Error('Build artifact missing for deployment.');
+                    }
+                    session.deployment = await (0, deploymentAgent_1.deploymentAgent)({
+                        projectId,
+                        revisionId: session.activeRevisionId,
+                        buildDir: session.buildDir,
+                        frontendProjectName: `proj-${projectId.slice(0, 10)}`,
+                        backendService: 'backend',
+                    });
+                    await (0, projectStore_1.saveProjectDeployment)({
+                        projectId,
+                        userId: authedUser.id,
+                        frontendUrl: session.deployment?.frontend_url,
+                        backendUrl: session.deployment?.backend_url,
+                        vercelDeploymentId: session.deployment?.vercel_deployment_id,
+                        vercelInspectUrl: session.deployment?.vercel_inspect_url,
+                        vercelStatus: session.deployment?.vercel_status,
+                        vercelLogUrl: session.deployment?.vercel_log_url,
+                        railwayDeploymentId: session.deployment?.railway_deployment_id,
+                        railwayStatus: session.deployment?.railway_status,
+                        railwayLogUrl: session.deployment?.railway_log_url,
+                        railwayDashboardUrl: session.deployment?.railway_dashboard_url,
+                        codeRevisionId: session.codeRevisionDbId,
+                        sourceArchivePath: session.sourceArchivePath,
+                        sourceHash: session.sourceHash,
+                        raw: session.deployment,
+                    });
                     ws.send(JSON.stringify({ type: 'stream', token: `Deployment complete!` }));
                     session.step = 'done_modification';
                 }
                 catch (err) {
-                    ws.send(JSON.stringify({ type: 'error', message: err?.message || 'Deployment for modification failed.', error: { name: err?.name, stack: err?.stack, details: err } }));
+                    ws.send(JSON.stringify({ type: 'error', message: err?.message || 'Deployment for modification failed.', error: { name: err?.name, stack: err?.stack } }));
                     return;
                 }
             }
@@ -311,26 +552,19 @@ function createSocketServer(server) {
                 session.modification = undefined;
                 session.modificationContext = undefined;
                 clarificationAnswers = {};
-                clarificationIndex = 0;
+                askedClarificationQuestions = [];
                 return;
             }
             // --- Original flow ---
             if (session.step === 'clarification_wait') {
-                let answer = typeof msg === 'object' ? msg.answer : msg;
-                if (session.pendingQuestions && clarificationIndex < session.pendingQuestions.length) {
-                    clarificationAnswers[session.pendingQuestions[clarificationIndex]] = answer;
-                    clarificationIndex++;
+                const answer = typeof msg === 'object' ? msg.answer : msg;
+                if (session.lastClarificationQuestion && typeof answer === 'string' && answer.trim()) {
+                    clarificationAnswers[session.lastClarificationQuestion] = answer.trim();
                 }
-                // Always pass updated clarificationAnswers to runFlow
-                if (clarificationIndex < session.pendingQuestions.length) {
-                    ws.send(JSON.stringify({ type: 'clarification', question: session.pendingQuestions[clarificationIndex], index: clarificationIndex + 1, total: session.pendingQuestions.length, context: session.requirements }));
-                    return;
-                }
-                else {
-                    session.step = 'clarification';
-                    await runFlow(null, { ...clarificationAnswers });
-                    return;
-                }
+                session.lastClarificationQuestion = undefined;
+                session.step = 'clarification';
+                await runFlow(null, { ...clarificationAnswers });
+                return;
             }
             else if (session.step === 'confirmation_wait') {
                 if (session.clarifications)
@@ -340,6 +574,28 @@ function createSocketServer(server) {
                 return;
             }
             else if (session.step !== 'init') {
+                // Recover from stale/non-resumable states by treating new user text as a fresh request.
+                // This avoids dead-ends after reconnects where the snapshot step is in-progress
+                // but no actionable clarification/confirmation prompt is actually pending.
+                if (typeof userText === 'string' && userText.trim()) {
+                    session.progress = 0;
+                    session.step = 'init';
+                    session.requirements = undefined;
+                    session.clarifications = undefined;
+                    session.confirmation = undefined;
+                    session.systemDesign = undefined;
+                    session.codeGen = undefined;
+                    session.testResult = undefined;
+                    session.deployment = undefined;
+                    session.modification = undefined;
+                    session.modificationContext = undefined;
+                    session.lastClarificationQuestion = undefined;
+                    clarificationAnswers = {};
+                    askedClarificationQuestions = [];
+                    ws.send(JSON.stringify({ type: 'stream', token: 'Starting a new request from your latest prompt.' }));
+                    await runFlow(userText, null);
+                    return;
+                }
                 ws.send(JSON.stringify({ type: 'info', message: 'Please answer the pending questions or confirm to continue.' }));
                 return;
             }
