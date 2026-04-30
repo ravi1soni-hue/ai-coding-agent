@@ -41,10 +41,20 @@ async function start() {
     });
     // Debug endpoint to list frontend files
     fastify.get('/debug-frontend-files', async (request, reply) => {
-        const dir = path_1.default.join(__dirname, '../frontend');
         try {
+            const dir = path_1.default.join(__dirname, '../frontend');
             const files = fs_1.default.readdirSync(dir);
             return reply.send({ files });
+        }
+        catch (e) {
+            return reply.status(500).send({ error: e.message });
+        }
+    });
+    // Debug endpoint to show contents of index.html
+    fastify.get('/debug-index-html', async (request, reply) => {
+        try {
+            const file = fs_1.default.readFileSync(path_1.default.join(__dirname, '../frontend/index.html'), 'utf8');
+            return reply.type('text/html').send(file);
         }
         catch (e) {
             return reply.status(500).send({ error: e.message });
