@@ -12,11 +12,8 @@ COPY frontend/ ./frontend
 # Remove old dist and build backend
 RUN rm -rf dist && npm run build
 
-# Install a simple static server for frontend
-RUN npm install -g http-server
+# Expose only backend port (serves both API and frontend)
+EXPOSE 3000
 
-# Expose backend and frontend ports
-EXPOSE 3000 8080
-
-# Start both backend and frontend servers
-CMD ["sh", "-c", "node dist/index.js & http-server ./frontend -p 8080"]
+# Start backend (serves API and static frontend)
+CMD ["node", "dist/index.js"]
