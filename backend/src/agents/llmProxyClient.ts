@@ -2,6 +2,7 @@
 // Use fetch instead of axios for LLM proxy calls
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const util = require('util');
+import { config } from '../config/env';
 
 export interface LLMProxyOptions {
   apiKey: string;
@@ -16,8 +17,8 @@ export class LLMProxyClient {
 
   constructor(options: LLMProxyOptions) {
     this.apiKey = options.apiKey;
-    this.chatUrl = options.chatUrl || 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/chat/completions';
-    this.embeddingUrl = options.embeddingUrl || 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings';
+    this.chatUrl = options.chatUrl || config.LLM_PROXY_CHAT_URL || 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/chat/completions';
+    this.embeddingUrl = options.embeddingUrl || config.LLM_PROXY_EMBEDDING_URL || 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings';
     this.log('LLMProxyClient initialized', { apiKey: !!this.apiKey, chatUrl: this.chatUrl, embeddingUrl: this.embeddingUrl });
   }
 
@@ -26,10 +27,9 @@ export class LLMProxyClient {
     console.log(`[LLMProxyClient] ${message}${data ? ': ' + util.inspect(data, { depth: 5 }) : ''}`);
   }
 
-  async chatCompletion(messages: any[], _model: string, temperature = 0.8, top_p = 0.9, max_tokens = 1000): Promise<any> {
-    // Force model to 'gpt-5-chat' for compatibility with working project
-    const model = 'gpt-5-chat';
-    this.log('chatCompletion called', { model, messages, temperature, top_p, max_tokens });
+  async chatCompletion(messages: any[], model: string, temperature = 0.8, top_p = 0.9, max_tokens = 1000): Promise<any> {
+    const selectedModel = model || config.GPT4O_MINI_MODEL_ID || 'gpt-4o-mini';
+    this.log('chatCompletion called', { model: selectedModel, messages, temperature, top_p, max_tokens });
     try {
       const response = await fetch(this.chatUrl, {
         method: 'POST',
@@ -37,7 +37,7 @@ export class LLMProxyClient {
           'Content-Type': 'application/json',
           'X-API-KEY': this.apiKey,
         },
-        body: JSON.stringify({ model, messages, temperature, top_p, max_tokens }),
+        body: JSON.stringify({ model: selectedModel, messages, temperature, top_p, max_tokens }),
       });
       const data = await response.json();
       this.log('chatCompletion response', { status: response.status, data });

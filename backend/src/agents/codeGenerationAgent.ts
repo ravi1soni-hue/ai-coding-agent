@@ -24,19 +24,31 @@ export async function codeGenerationAgent(input: any) {
   try {
     if (!input) throw new Error('Input required');
     const { model, apiKey } = getModelConfigForTask('code_generation');
-    const llmProxy = new LLMProxyClient({
-      apiKey,
-      chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/chat/completions',
-      embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
-    });
+    const llmProxy = new LLMProxyClient({ apiKey });
     let retrievedPatches = [];
+    let embedding = input.embedding;
+    if (!Array.isArray(embedding)) {
+      try {
+        const basis = JSON.stringify({
+          systemDesign: input.systemDesign,
+          requirements: input.requirements,
+          modification: input.modification,
+        });
+        const embedded = await embeddingAgent(basis);
+        if (Array.isArray(embedded) && embedded.length > 0) {
+          embedding = embedded;
+        }
+      } catch {
+        embedding = undefined;
+      }
+    }
     // If embedding is available in input, retrieve similar code patches for RAG
-    if (input.embedding && Array.isArray(input.embedding)) {
+    if (embedding && Array.isArray(embedding)) {
       try {
         const similar = await searchVectors({
           user_id: input.user_id || 'unknown',
           task: 'code_patch',
-          embedding: input.embedding,
+          embedding,
           topK: 3
         });
         retrievedPatches = similar.map(row => row.metadata?.patch).filter(Boolean);
@@ -61,7 +73,7 @@ If modification is present, generate a patch to apply the change to the existing
     const completion = await llmProxy.chatCompletion([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: JSON.stringify(userPrompt) }
-    ], 'gpt-5-chat', 0.8, 0.9, 1000);
+    ], model, 0.8, 0.9, 1000);
     if (process.env.NODE_ENV !== 'production') {
       console.log('[codeGenerationAgent] LLM completion:', completion);
     }
@@ -91,7 +103,10 @@ If modification is present, generate a patch to apply the change to the existing
     if (process.env.NODE_ENV !== 'production') {
       console.log('[codeGenerationAgent] result:', result);
     }
-    return result;
+    return {
+      ...result,
+      embedding: embedding || result.embedding,
+    };
   } catch (err) {
     console.error('[codeGenerationAgent] error:', err);
     throw err;

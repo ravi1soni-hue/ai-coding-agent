@@ -1,4 +1,4 @@
-// Test & Fix Agent: simulates build/test/fix loop
+// Test & Fix Agent
 export async function testFixAgent(input: { buildFn: () => Promise<{ success: boolean; logs: string }> }) {
   if (process.env.NODE_ENV !== 'production') {
     console.log('[testFixAgent] called with:', input);

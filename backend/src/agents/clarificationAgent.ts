@@ -1,4 +1,4 @@
-// Clarification Agent (stub)
+// Clarification Agent
 
 import { getModelConfigForTask } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
@@ -42,16 +42,12 @@ If all clarifications are resolved, set confirmed=true and question=null.
 If user requests a modification, ask for only the next blocking clarification needed for that modification.
 Respond ONLY in JSON: { question: string | null, confirmed: boolean }.`;
 
-    const llmProxy = new LLMProxyClient({
-      apiKey,
-      chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/chat/completions',
-      embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
-    });
+    const llmProxy = new LLMProxyClient({ apiKey });
 
     const completion = await llmProxy.chatCompletion([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: JSON.stringify(userPrompt) }
-    ], 'gpt-5-chat', 0.8, 0.9, 1000);
+    ], model, 0.8, 0.9, 1000);
 
     if (process.env.NODE_ENV !== 'production') {
       console.log('[clarificationAgent] LLM completion:', completion);

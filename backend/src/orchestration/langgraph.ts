@@ -10,9 +10,12 @@ import { deploymentAgent } from '../agents/deploymentAgent';
 import { runBuildWorker } from '../workers/buildWorker';
 import { logOrchestrationStep } from '../db/auditLog';
 import path from 'path';
+import { materializeProjectWorkspace } from '../factory/projectFactory';
 
 export type OrchestrationContext = {
 	user_message: string;
+	projectId?: string;
+	revisionId?: string;
 	requirements?: any;
 	clarifications?: any;
 	confirmation?: any;
@@ -20,6 +23,7 @@ export type OrchestrationContext = {
 	codeGen?: any;
 	testResult?: any;
 	deployment?: any;
+	materializedRevision?: any;
 	history?: Array<{
 	  step: string;
 	  input: any;
@@ -30,6 +34,7 @@ export type OrchestrationContext = {
 
 export async function runOrchestration(ctx: OrchestrationContext) {
 	const user_id = ctx.user_message?.slice(0, 32) || 'unknown';
+	const projectId = ctx.projectId || `orchestration-${Date.now().toString(36)}`;
 	ctx.history = ctx.history || [];
 
 	// Step 1: Requirement Analysis
@@ -77,7 +82,15 @@ export async function runOrchestration(ctx: OrchestrationContext) {
 	await logOrchestrationStep({ user_id, step: 'systemDesign', input: ctx.requirements, output: ctx.systemDesign });
 
 	// Step 5: Code Generation
-	ctx.codeGen = await codeGenerationAgent(ctx.systemDesign);
+	ctx.codeGen = await codeGenerationAgent({
+	  systemDesign: ctx.systemDesign,
+	  requirements: ctx.requirements,
+	  user_id,
+	});
+	ctx.materializedRevision = await materializeProjectWorkspace({
+	  projectId,
+	  codeGen: ctx.codeGen,
+	});
 	ctx.history.push({
 	  step: 'codeGeneration',
 	  input: ctx.systemDesign,
@@ -96,7 +109,9 @@ export async function runOrchestration(ctx: OrchestrationContext) {
 	}
 
 	// Step 6: Test & Fix
-	ctx.testResult = await testFixAgent({ buildFn: () => runBuildWorker(ctx.codeGen) });
+	ctx.testResult = await testFixAgent({
+	  buildFn: () => runBuildWorker({ workspaceDir: ctx.materializedRevision?.workspaceDir }),
+	});
 	ctx.history.push({
 	  step: 'testFix',
 	  input: ctx.codeGen,
@@ -106,11 +121,12 @@ export async function runOrchestration(ctx: OrchestrationContext) {
 	await logOrchestrationStep({ user_id, step: 'testFix', input: ctx.codeGen, output: ctx.testResult });
 
 	// Step 7: Deployment
+	const revisionId = ctx.revisionId || ctx.materializedRevision?.revisionId || `rev-${Date.now().toString(36)}`;
 	ctx.deployment = await deploymentAgent({
-	  projectId: 'orchestration-preview',
-	  revisionId: `rev-${Date.now().toString(36)}`,
-	  buildDir: path.resolve(__dirname, '../../../frontend/dist'),
-	  frontendProjectName: 'orchestration-preview',
+	  projectId,
+	  revisionId,
+	  buildDir: ctx.testResult?.buildDir || path.resolve(__dirname, '../../../frontend/dist'),
+	  frontendProjectName: `proj-${projectId.slice(0, 10)}`,
 	  backendService: 'backend',
 	});
 	ctx.history.push({

@@ -16,7 +16,9 @@ import {
 } from '../auth/authService';
 import { getProjectEvents, listUserProjects } from '../db/projectStore';
 
-const jobQueue = new JobQueue();
+const jobQueue = new JobQueue(async (job) => {
+  console.log('[jobQueue] processed', job.id, job.payload);
+});
 
 export async function registerRoutes(fastify: FastifyInstance) {
   async function requireUser(req: any, reply: any) {

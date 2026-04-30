@@ -118,8 +118,10 @@ export function createSocketServer(server: http.Server) {
             deployment: session.deployment,
           });
         }
-      } catch {
-        // no-op for non-JSON socket payloads
+      } catch (err) {
+        if (process.env.NODE_ENV !== 'production') {
+          console.warn('Skipping outbound project event persistence for non-JSON payload', err);
+        }
       }
     };
 
