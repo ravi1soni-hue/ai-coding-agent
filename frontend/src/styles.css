@@ -232,17 +232,12 @@ body {
 
 .chatIdentity {
   display: grid;
-  gap: 2px;
+  gap: 0;
 }
 
 .chatUserName {
   font-size: 0.95rem;
   font-weight: 700;
-}
-
-.chatUserEmail {
-  font-size: 0.8rem;
-  color: var(--muted);
 }
 
 .chatTopActions {
@@ -269,14 +264,15 @@ body {
 .historyFab {
   position: fixed;
   right: 20px;
-  bottom: 20px;
+  bottom: 24px;
   z-index: 30;
   border: none;
   border-radius: 999px;
-  padding: 12px 16px;
+  padding: 11px 16px;
   background: #1f2437;
   color: #fff;
   font-weight: 700;
+  font-size: 0.95rem;
   cursor: pointer;
   box-shadow: 0 8px 22px rgba(15, 15, 24, 0.24);
 }
@@ -377,12 +373,12 @@ body {
 }
 
 .assistantDate {
-  font-size: 0.98rem;
-  margin-bottom: 14px;
+  font-size: 0.95rem;
+  margin-bottom: 10px;
 }
 
 .assistantTitle {
-  font-size: 2.1rem;
+  font-size: 2rem;
   font-weight: 800;
   color: var(--text);
   margin: 0;
@@ -396,16 +392,12 @@ body {
   font-weight: 700;
 }
 
-.assistantDesc {
-  font-size: 0.98rem;
-  margin: 18px 0 0;
-}
-
 .assistantQuestion {
-  font-size: 1.45rem;
+  font-size: 1.22rem;
   color: var(--accent);
-  font-style: italic;
-  margin: 8px 0 12px;
+  font-style: normal;
+  font-weight: 600;
+  margin: 8px 0 10px;
   font-family: 'Montserrat', Arial, sans-serif;
 }
 
@@ -468,7 +460,7 @@ body {
 }
 
 .assistantInputRow {
-  margin-top: 10px;
+  margin-top: 8px;
   display: flex;
   align-items: center;
   width: 100%;
@@ -506,13 +498,13 @@ body {
 }
 
 .activityBox {
-  margin-top: 12px;
+  margin-top: 10px;
   max-width: 500px;
   border-radius: 12px;
   background: #fff;
   border: 1px solid var(--border);
   min-height: 112px;
-  max-height: 240px;
+  max-height: 320px;
   overflow: auto;
   padding: 10px;
 }
@@ -684,7 +676,7 @@ body {
   }
 
   .assistantQuestion {
-    font-size: 1.2rem;
+    font-size: 1.06rem;
   }
 
   .assistantRight {
@@ -724,18 +716,13 @@ body {
   }
 
   .assistantTitle {
-    font-size: 1.55rem;
+    font-size: 1.35rem;
     line-height: 1.08;
   }
 
   .assistantQuestion {
-    font-size: 1.03rem;
-    margin-bottom: 10px;
-  }
-
-  .assistantDesc {
-    margin-top: 14px;
-    font-size: 0.95rem;
+    font-size: 0.98rem;
+    margin-bottom: 8px;
   }
 
   .socketStatus {
@@ -756,6 +743,64 @@ body {
 
   .assistantRight {
     display: none;
+  }
+
+  .assistantInput {
+    font-size: 0.98rem;
+    padding: 13px 0;
+  }
+
+  .assistantSend {
+    padding: 10px 12px;
+    font-size: 0.92rem;
+  }
+
+  .activityBox {
+    max-height: 42vh;
+  }
+
+  .historyFab {
+    right: 12px;
+    bottom: max(12px, env(safe-area-inset-bottom));
+    padding: 10px 14px;
+  }
+
+  .historyOverlay {
+    align-items: flex-end;
+    padding: 8px;
+  }
+
+  .historyPanel {
+    width: 100%;
+    max-height: 82vh;
+    border-radius: 16px 16px 0 0;
+  }
+
+  .historyHeader {
+    padding: 12px;
+    gap: 10px;
+    align-items: flex-start;
+  }
+
+  .historyBody {
+    padding: 10px;
+    max-height: calc(82vh - 72px);
+  }
+
+  .historyItem {
+    padding: 10px;
+  }
+
+  .historyId {
+    font-size: 0.71rem;
+    max-width: 64vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .historyMeta {
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .assistantInput {

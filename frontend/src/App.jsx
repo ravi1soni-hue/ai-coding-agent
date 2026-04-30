@@ -141,6 +141,7 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject }) {
 
   const wsRef = useRef(null);
   const msgEndRef = useRef(null);
+  const displayName = (user.name || 'there').trim();
 
   useEffect(() => {
     let active = true;
@@ -287,7 +288,6 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject }) {
           <div className="chatTopBar">
             <div className="chatIdentity">
               <span className="chatUserName">{user.name}</span>
-              <span className="chatUserEmail">{user.email}</span>
             </div>
             <div className="chatTopActions">
               <button className="topActionBtn" type="button" onClick={onNewProject}>
@@ -300,13 +300,8 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject }) {
           </div>
 
           <div className="assistantDate">{todayText}</div>
-          <h1 className="assistantTitle">
-            Hello, I am <span className="highlight">Courtney</span>
-            <br />
-            your personal assistant
-          </h1>
-          <p className="assistantDesc">I hope you have a cosy afternoon,</p>
-          <div className="assistantQuestion">How can I help you today?</div>
+          <h1 className="assistantTitle">Hello {displayName},</h1>
+          <div className="assistantQuestion">How can I help you?</div>
 
           <div className="socketStatus">
             <span className={`socketChip socket-${connection}`}>{connection}</span>
