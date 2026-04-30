@@ -9,7 +9,11 @@ export async function systemDesignAgent(input: any) {
     if (!input) throw new Error('Input required');
     const { model, apiKey } = getModelConfigForTask('core_reasoning');
     const llmProxy = new LLMProxyClient({ apiKey });
-    const systemPrompt = `Given the requirements, decide the full technical architecture. Respond ONLY in JSON: { frontend, backend, database, auth, hosting: { frontend, backend } }`;
+    const systemPrompt = `Given the requirements, decide the full technical architecture.
+  Respond ONLY in JSON with this shape: { frontend, backend, database, auth, hosting: { frontend, backend } }.
+  If requirements.backend_required is false, set backend and database to null.
+  If requirements.auth_required is false, set auth to null.
+  Always include frontend and hosting fields.`;
     const completion = await llmProxy.chatCompletion([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: JSON.stringify(input) }
@@ -37,8 +41,34 @@ export async function systemDesignAgent(input: any) {
       console.error('[systemDesignAgent] JSON parse error:', e, { content: jsonMatch[0] });
       throw new Error('Malformed LLM output: ' + jsonMatch[0]);
     }
-    if (!result.frontend || !result.backend) {
+    if (!result || typeof result !== 'object' || !result.frontend) {
       throw new Error('Malformed systemDesignAgent output');
+    }
+
+    const backendRequired = Boolean(input?.backend_required);
+    const authRequired = Boolean(input?.auth_required);
+
+    // Normalize optional sections for frontend-only projects.
+    if (!backendRequired) {
+      if (typeof result.backend === 'undefined') result.backend = null;
+      if (typeof result.database === 'undefined') result.database = null;
+    }
+    if (!authRequired && typeof result.auth === 'undefined') {
+      result.auth = null;
+    }
+
+    if (backendRequired && !result.backend) {
+      throw new Error('Malformed systemDesignAgent output');
+    }
+    if (authRequired && !result.auth) {
+      throw new Error('Malformed systemDesignAgent output');
+    }
+
+    if (!result.hosting || typeof result.hosting !== 'object') {
+      result.hosting = {
+        frontend: input?.deployment_pref || 'vercel',
+        backend: backendRequired ? (input?.deployment_pref || 'railway') : null,
+      };
     }
     if (process.env.NODE_ENV !== 'production') {
       console.log('[systemDesignAgent] result:', result);
