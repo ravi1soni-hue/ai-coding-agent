@@ -8,6 +8,7 @@ import { LLMProxyClient } from './llmProxyClient';
  * input: {
  *   requirements: object, // structured requirements
  *   clarificationAnswers?: Record<string, string>, // previous answers
+ *   askedQuestions?: string[], // previously asked clarification questions
  *   lastQuestion?: string, // last question asked
  *   lastAnswer?: string, // last answer given
  *   modification?: string // if user is requesting a modification
@@ -23,6 +24,7 @@ export async function clarificationAgent(input: any) {
     const { model, apiKey } = getModelConfigForTask('clarification');
 
     const clarificationAnswers = input.clarificationAnswers || {};
+    const askedQuestions = Array.isArray(input.askedQuestions) ? input.askedQuestions : [];
     const modification = input.modification;
     const lastQuestion = input.lastQuestion;
     const lastAnswer = input.lastAnswer;
@@ -31,6 +33,7 @@ export async function clarificationAgent(input: any) {
     let userPrompt = {
       requirements: input.requirements,
       clarificationAnswers,
+      askedQuestions,
       modification,
       lastQuestion,
       lastAnswer
@@ -38,6 +41,7 @@ export async function clarificationAgent(input: any) {
 
     const systemPrompt = `You are a requirements clarification agent.
 Ask ONLY one blocking clarification question at a time (no scope expansion, no lists).
+Never repeat a question that is already present in askedQuestions or already answered in clarificationAnswers.
 If all clarifications are resolved, set confirmed=true and question=null.
 If user requests a modification, ask for only the next blocking clarification needed for that modification.
 Respond ONLY in JSON: { question: string | null, confirmed: boolean }.`;
@@ -83,6 +87,7 @@ Respond ONLY in JSON: { question: string | null, confirmed: boolean }.`;
       done: !!result.confirmed && !result.question,
       context: {
         clarificationAnswers,
+        askedQuestions,
         modification,
         lastQuestion,
         lastAnswer

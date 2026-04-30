@@ -184,6 +184,10 @@ export function createSocketServer(server: http.Server) {
       session.clarifications?.context?.clarificationAnswers && typeof session.clarifications.context.clarificationAnswers === 'object'
         ? { ...session.clarifications.context.clarificationAnswers }
         : {};
+    let askedClarificationQuestions: string[] =
+      Array.isArray(session.clarifications?.context?.askedQuestions)
+        ? [...session.clarifications.context.askedQuestions]
+        : [];
 
     async function runFlow(userMsg: string | null, userClarificationAnswers: Record<string, any> | null = null) {
       try {
@@ -214,6 +218,7 @@ export function createSocketServer(server: http.Server) {
             let clarInput = {
               requirements: session.requirements || {},
               clarificationAnswers,
+              askedQuestions: askedClarificationQuestions,
               modification: session.modification,
               lastQuestion: session.lastClarificationQuestion,
               lastAnswer: undefined // You can set this if you track last answer
@@ -234,7 +239,15 @@ export function createSocketServer(server: http.Server) {
                   if (parsed && typeof parsed.question === 'string') questionMsg = parsed.question;
                 } catch {}
               }
-                session.lastClarificationQuestion = questionMsg;
+              const normalizedQuestion = questionMsg.trim().toLowerCase();
+              if (askedClarificationQuestions.some((q) => q.trim().toLowerCase() === normalizedQuestion)) {
+                ws.send(JSON.stringify({ type: 'stream', token: 'Using your previous clarification. Moving to confirmation.' }));
+                session.step = 'confirmation';
+                continue;
+              }
+
+              askedClarificationQuestions.push(questionMsg);
+              session.lastClarificationQuestion = questionMsg;
               ws.send(JSON.stringify({ type: 'clarification', question: questionMsg })); // Only send plain question string
               session.step = 'clarification_wait';
               return;
@@ -586,6 +599,7 @@ export function createSocketServer(server: http.Server) {
         session.modification = undefined;
         session.modificationContext = undefined;
         clarificationAnswers = {};
+        askedClarificationQuestions = [];
         return;
       }
 
