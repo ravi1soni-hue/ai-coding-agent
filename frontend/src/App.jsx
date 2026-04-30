@@ -135,39 +135,14 @@ export default function App() {
           <div className="assistantQuestion">How can I help you today?</div>
 
           <div className="socketStatus">
-            Socket: {connection} | {statusText} | {Math.round(progress * 100)}%
+            <span className={`socketChip socket-${connection}`}>{connection}</span>
+            <span className="socketText" title={statusText}>
+              {statusText}
+            </span>
+            <span className="socketPct">{Math.round(progress * 100)}%</span>
           </div>
 
-          <div className="promptCards">
-            <div className="promptCard">
-              <div className="promptTitle">Prompt: Business Case in 20 Minutes</div>
-              <div className="promptMetaRow">
-                <span className="promptBadge">USED 3 DAYS BEFORE</span>
-                <span className="promptTasks">5 tasks</span>
-                <button
-                  className="promptRun"
-                  type="button"
-                  onClick={() => sendText('Build business case app in 20 minutes')}
-                >
-                  RUN
-                </button>
-              </div>
-            </div>
-
-            <div className="promptCard">
-              <div className="promptTitle">Prompt: Personal Fitness Planner</div>
-              <div className="promptMetaRow">
-                <span className="promptBadge alt">PERSONAL SUGGESTION FOR YOU</span>
-                <button
-                  className="promptRun"
-                  type="button"
-                  onClick={() => sendText('Create a personal fitness planner website')}
-                >
-                  RUN
-                </button>
-              </div>
-            </div>
-          </div>
+          <div className="buildHint">Describe what to build and follow live progress below.</div>
 
           <form className="assistantInputRow" onSubmit={onSubmit}>
             <input
