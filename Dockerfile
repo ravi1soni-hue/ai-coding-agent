@@ -9,11 +9,8 @@ RUN npm install
 COPY backend/ ./
 COPY frontend/ ./frontend
 
-# Remove old dist and build backend
+# Always force a fresh dist build
 RUN rm -rf dist && npm run build
 
-# Expose only backend port (serves both API and frontend)
 EXPOSE 3000
-
-# Start backend (serves API and static frontend)
 CMD ["node", "dist/index.js"]
