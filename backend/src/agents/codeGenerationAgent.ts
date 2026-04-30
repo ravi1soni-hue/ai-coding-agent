@@ -15,7 +15,7 @@ import { embeddingAgent } from './embeddingAgent';
  *   context?: any, // additional context (e.g., previous patches)
  *   embedding?: any // for RAG
  * }
- * returns: { patch: string, frontendRepo?: string, backendRepo?: string }
+ * returns: { patch: string, files?: Array<{ path: string; content: string }>, frontendRepo?: string, backendRepo?: string }
  */
 export async function codeGenerationAgent(input: any) {
   if (process.env.NODE_ENV !== 'production') {
@@ -55,7 +55,8 @@ export async function codeGenerationAgent(input: any) {
     const systemPrompt = `You are a code generation agent for a continuous-evolution system.
 Given the current system design, requirements, and (if present) a user modification request, generate ONLY the minimal patch-based code updates needed (never full repo).
 If modification is present, generate a patch to apply the change to the existing codebase.
-Respond ONLY in JSON: { patch: string, frontendRepo?: string, backendRepo?: string }.`;
+  If you can provide fully materialized files safely, include files as [{ path, content }].
+  Respond ONLY in JSON: { patch: string, files?: Array<{ path: string; content: string }>, frontendRepo?: string, backendRepo?: string }.`;
 
     const completion = await llmProxy.chatCompletion([
       { role: 'system', content: systemPrompt },

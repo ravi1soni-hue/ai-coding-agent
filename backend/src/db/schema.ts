@@ -92,6 +92,25 @@ export async function ensureCoreTables() {
   await pgQuery(`ALTER TABLE project_deployments ADD COLUMN IF NOT EXISTS railway_status TEXT`);
   await pgQuery(`ALTER TABLE project_deployments ADD COLUMN IF NOT EXISTS railway_log_url TEXT`);
   await pgQuery(`ALTER TABLE project_deployments ADD COLUMN IF NOT EXISTS railway_dashboard_url TEXT`);
+  await pgQuery(`ALTER TABLE project_deployments ADD COLUMN IF NOT EXISTS code_revision_id TEXT`);
+  await pgQuery(`ALTER TABLE project_deployments ADD COLUMN IF NOT EXISTS source_archive_path TEXT`);
+  await pgQuery(`ALTER TABLE project_deployments ADD COLUMN IF NOT EXISTS source_hash TEXT`);
+
+  await pgQuery(`
+    CREATE TABLE IF NOT EXISTS project_code_revisions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES project_sessions(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      workspace_path TEXT NOT NULL,
+      source_archive_path TEXT,
+      source_hash TEXT,
+      patch_path TEXT,
+      patch_applied BOOLEAN NOT NULL DEFAULT FALSE,
+      patch_apply_log TEXT,
+      generation_payload JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
 
   await pgQuery(`
     CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id)
@@ -107,5 +126,9 @@ export async function ensureCoreTables() {
 
   await pgQuery(`
     CREATE INDEX IF NOT EXISTS idx_project_deployments_project_created ON project_deployments(project_id, created_at)
+  `);
+
+  await pgQuery(`
+    CREATE INDEX IF NOT EXISTS idx_project_code_revisions_project_created ON project_code_revisions(project_id, created_at)
   `);
 }

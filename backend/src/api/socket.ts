@@ -9,6 +9,7 @@ import { systemDesignAgent } from '../agents/systemDesignAgent';
 import { codeGenerationAgent } from '../agents/codeGenerationAgent';
 import { testFixAgent } from '../agents/testFixAgent';
 import { deploymentAgent } from '../agents/deploymentAgent';
+import { runBuildWorker } from '../workers/buildWorker';
 import {
   createProjectSession,
   getOrCreateActiveProjectSession,
@@ -17,7 +18,8 @@ import {
   parseCookie,
   touchProjectSession,
 } from '../auth/authService';
-import { appendProjectEvent, getProjectSnapshot, saveProjectDeployment, updateProjectSnapshot } from '../db/projectStore';
+import { appendProjectEvent, createProjectCodeRevision, getProjectSnapshot, saveProjectDeployment, updateProjectSnapshot } from '../db/projectStore';
+import { materializeProjectWorkspace } from '../factory/projectFactory';
 
 
 export function createSocketServer(server: http.Server) {
@@ -142,6 +144,12 @@ export function createSocketServer(server: http.Server) {
       modification?: string;
       modificationContext?: any;
       lastClarificationQuestion?: string;
+      activeRevisionId?: string;
+      workspaceDir?: string;
+      sourceArchivePath?: string;
+      sourceHash?: string;
+      buildDir?: string;
+      codeRevisionDbId?: string;
     };
     const session: Session = {
       progress: Number(snapshot?.progress) || 0,
@@ -158,6 +166,12 @@ export function createSocketServer(server: http.Server) {
       modification: undefined,
       modificationContext: undefined,
       lastClarificationQuestion: undefined,
+      activeRevisionId: undefined,
+      workspaceDir: undefined,
+      sourceArchivePath: undefined,
+      sourceHash: undefined,
+      buildDir: undefined,
+      codeRevisionDbId: undefined,
     };
 
     if (session.step === 'done' || session.step === 'done_modification') {
@@ -274,6 +288,25 @@ export function createSocketServer(server: http.Server) {
           ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Generating code...' }));
           try {
             session.codeGen = await codeGenerationAgent(session.systemDesign);
+            const materialized = await materializeProjectWorkspace({
+              projectId,
+              codeGen: session.codeGen,
+            });
+            session.activeRevisionId = materialized.revisionId;
+            session.workspaceDir = materialized.workspaceDir;
+            session.sourceArchivePath = materialized.archivePath;
+            session.sourceHash = materialized.sourceHash;
+            session.codeRevisionDbId = await createProjectCodeRevision({
+              projectId,
+              userId: authedUser.id,
+              workspacePath: materialized.workspaceDir,
+              sourceArchivePath: materialized.archivePath,
+              sourceHash: materialized.sourceHash,
+              patchPath: materialized.patchPath,
+              patchApplied: materialized.patchApplied,
+              patchApplyLog: materialized.patchApplyLog,
+              generationPayload: session.codeGen,
+            });
             console.log('[CODE GEN]', session.codeGen);
             ws.send(JSON.stringify({ type: 'stream', token: 'Code generated! Running tests and fixes...' }));
             session.step = 'testFix';
@@ -288,7 +321,15 @@ export function createSocketServer(server: http.Server) {
           session.progress += 0.12;
           ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Testing and fixing...' }));
           try {
-            session.testResult = await testFixAgent({ buildFn: async () => ({ success: true, logs: 'Build successful.' }) });
+            session.testResult = await testFixAgent({
+              buildFn: async () => {
+                const result = await runBuildWorker({ workspaceDir: session.workspaceDir });
+                if (result.success) {
+                  session.buildDir = result.buildDir;
+                }
+                return { success: result.success, logs: result.logs };
+              },
+            });
             console.log('[TEST RESULT]', session.testResult);
             ws.send(JSON.stringify({ type: 'stream', token: 'Tests complete! Deploying your project...' }));
             session.step = 'deploy';
@@ -302,7 +343,16 @@ export function createSocketServer(server: http.Server) {
         if (session.step === 'deploy') {
           ws.send(JSON.stringify({ type: 'progress', progress: 1, status: 'Deploying...' }));
           try {
-            session.deployment = await deploymentAgent({ frontend: 'frontend', backend: 'backend' });
+            if (!session.buildDir || !session.activeRevisionId) {
+              throw new Error('Build artifact missing for deployment.');
+            }
+            session.deployment = await deploymentAgent({
+              projectId,
+              revisionId: session.activeRevisionId,
+              buildDir: session.buildDir,
+              frontendProjectName: `proj-${projectId.slice(0, 10)}`,
+              backendService: 'backend',
+            });
             await saveProjectDeployment({
               projectId,
               userId: authedUser.id,
@@ -316,6 +366,9 @@ export function createSocketServer(server: http.Server) {
               railwayStatus: session.deployment?.railway_status,
               railwayLogUrl: session.deployment?.railway_log_url,
               railwayDashboardUrl: session.deployment?.railway_dashboard_url,
+              codeRevisionId: session.codeRevisionDbId,
+              sourceArchivePath: session.sourceArchivePath,
+              sourceHash: session.sourceHash,
               raw: session.deployment,
             });
             console.log('[DEPLOYMENT]', session.deployment);
@@ -436,6 +489,25 @@ export function createSocketServer(server: http.Server) {
             context: session.modificationContext
           };
           session.codeGen = await codeGenerationAgent(codeGenInput);
+          const materialized = await materializeProjectWorkspace({
+            projectId,
+            codeGen: session.codeGen,
+          });
+          session.activeRevisionId = materialized.revisionId;
+          session.workspaceDir = materialized.workspaceDir;
+          session.sourceArchivePath = materialized.archivePath;
+          session.sourceHash = materialized.sourceHash;
+          session.codeRevisionDbId = await createProjectCodeRevision({
+            projectId,
+            userId: authedUser.id,
+            workspacePath: materialized.workspaceDir,
+            sourceArchivePath: materialized.archivePath,
+            sourceHash: materialized.sourceHash,
+            patchPath: materialized.patchPath,
+            patchApplied: materialized.patchApplied,
+            patchApplyLog: materialized.patchApplyLog,
+            generationPayload: session.codeGen,
+          });
           ws.send(JSON.stringify({ type: 'stream', token: `Code patch generated. Proceeding to tests...` }));
           session.step = 'testFix_modification';
         } catch (err) {
@@ -448,7 +520,15 @@ export function createSocketServer(server: http.Server) {
       if (session.step === 'testFix_modification') {
         ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Testing and fixing modification...' }));
         try {
-          session.testResult = await testFixAgent({ buildFn: async () => ({ success: true, logs: 'Build successful.' }) });
+          session.testResult = await testFixAgent({
+            buildFn: async () => {
+              const result = await runBuildWorker({ workspaceDir: session.workspaceDir });
+              if (result.success) {
+                session.buildDir = result.buildDir;
+              }
+              return { success: result.success, logs: result.logs };
+            },
+          });
           ws.send(JSON.stringify({ type: 'stream', token: `Tests complete. Deploying your project...` }));
           session.step = 'deploy_modification';
         } catch (err) {
@@ -461,7 +541,16 @@ export function createSocketServer(server: http.Server) {
       if (session.step === 'deploy_modification') {
         ws.send(JSON.stringify({ type: 'progress', progress: 1, status: 'Deploying modification...' }));
         try {
-          session.deployment = await deploymentAgent({ frontend: 'frontend', backend: 'backend' });
+          if (!session.buildDir || !session.activeRevisionId) {
+            throw new Error('Build artifact missing for deployment.');
+          }
+          session.deployment = await deploymentAgent({
+            projectId,
+            revisionId: session.activeRevisionId,
+            buildDir: session.buildDir,
+            frontendProjectName: `proj-${projectId.slice(0, 10)}`,
+            backendService: 'backend',
+          });
           await saveProjectDeployment({
             projectId,
             userId: authedUser.id,
@@ -475,6 +564,9 @@ export function createSocketServer(server: http.Server) {
             railwayStatus: session.deployment?.railway_status,
             railwayLogUrl: session.deployment?.railway_log_url,
             railwayDashboardUrl: session.deployment?.railway_dashboard_url,
+            codeRevisionId: session.codeRevisionDbId,
+            sourceArchivePath: session.sourceArchivePath,
+            sourceHash: session.sourceHash,
             raw: session.deployment,
           });
           ws.send(JSON.stringify({ type: 'stream', token: `Deployment complete!` }));

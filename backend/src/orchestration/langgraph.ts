@@ -9,6 +9,7 @@ import { testFixAgent } from '../agents/testFixAgent';
 import { deploymentAgent } from '../agents/deploymentAgent';
 import { runBuildWorker } from '../workers/buildWorker';
 import { logOrchestrationStep } from '../db/auditLog';
+import path from 'path';
 
 export type OrchestrationContext = {
 	user_message: string;
@@ -105,7 +106,13 @@ export async function runOrchestration(ctx: OrchestrationContext) {
 	await logOrchestrationStep({ user_id, step: 'testFix', input: ctx.codeGen, output: ctx.testResult });
 
 	// Step 7: Deployment
-	ctx.deployment = await deploymentAgent({ frontend: 'frontend', backend: 'backend' });
+	ctx.deployment = await deploymentAgent({
+	  projectId: 'orchestration-preview',
+	  revisionId: `rev-${Date.now().toString(36)}`,
+	  buildDir: path.resolve(__dirname, '../../../frontend/dist'),
+	  frontendProjectName: 'orchestration-preview',
+	  backendService: 'backend',
+	});
 	ctx.history.push({
 	  step: 'deployment',
 	  input: ctx.testResult,

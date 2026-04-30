@@ -16,6 +16,19 @@ export type ProjectHistoryRow = {
   railway_status: string | null;
   vercel_log_url: string | null;
   railway_log_url: string | null;
+  code_revision_id: string | null;
+  source_hash: string | null;
+};
+
+export type ProjectCodeRevision = {
+  id: string;
+  workspace_path: string;
+  source_archive_path: string | null;
+  source_hash: string | null;
+  patch_path: string | null;
+  patch_applied: boolean;
+  patch_apply_log: string | null;
+  created_at: string;
 };
 
 export async function appendProjectEvent(input: {
@@ -100,6 +113,9 @@ export async function saveProjectDeployment(input: {
   railwayStatus?: string | null;
   railwayLogUrl?: string | null;
   railwayDashboardUrl?: string | null;
+  codeRevisionId?: string | null;
+  sourceArchivePath?: string | null;
+  sourceHash?: string | null;
   raw?: unknown;
 }) {
   await pgQuery(
@@ -107,8 +123,9 @@ export async function saveProjectDeployment(input: {
       id, project_id, user_id, frontend_url, backend_url,
       vercel_deployment_id, vercel_inspect_url, vercel_status, vercel_log_url,
       railway_deployment_id, railway_status, railway_log_url, railway_dashboard_url,
+      code_revision_id, source_archive_path, source_hash,
       raw_payload
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)`,
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb)`,
     [
       crypto.randomUUID(),
       input.projectId,
@@ -123,9 +140,65 @@ export async function saveProjectDeployment(input: {
       input.railwayStatus ?? null,
       input.railwayLogUrl ?? null,
       input.railwayDashboardUrl ?? null,
+      input.codeRevisionId ?? null,
+      input.sourceArchivePath ?? null,
+      input.sourceHash ?? null,
       JSON.stringify(input.raw ?? {}),
     ],
   );
+}
+
+export async function createProjectCodeRevision(input: {
+  projectId: string;
+  userId: string;
+  workspacePath: string;
+  sourceArchivePath?: string | null;
+  sourceHash?: string | null;
+  patchPath?: string | null;
+  patchApplied?: boolean;
+  patchApplyLog?: string | null;
+  generationPayload?: unknown;
+}): Promise<string> {
+  const id = crypto.randomUUID();
+  await pgQuery(
+    `INSERT INTO project_code_revisions (
+      id, project_id, user_id, workspace_path, source_archive_path, source_hash,
+      patch_path, patch_applied, patch_apply_log, generation_payload
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)`,
+    [
+      id,
+      input.projectId,
+      input.userId,
+      input.workspacePath,
+      input.sourceArchivePath ?? null,
+      input.sourceHash ?? null,
+      input.patchPath ?? null,
+      input.patchApplied ?? false,
+      input.patchApplyLog ?? null,
+      JSON.stringify(input.generationPayload ?? {}),
+    ],
+  );
+  return id;
+}
+
+export async function getLatestProjectCodeRevision(input: { projectId: string; userId: string }): Promise<ProjectCodeRevision | null> {
+  const rows = await pgQuery<ProjectCodeRevision>(
+    `SELECT
+      id,
+      workspace_path,
+      source_archive_path,
+      source_hash,
+      patch_path,
+      patch_applied,
+      patch_apply_log,
+      created_at
+     FROM project_code_revisions
+     WHERE project_id = $1 AND user_id = $2
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [input.projectId, input.userId],
+  );
+  return rows[0] ?? null;
 }
 
 export async function listUserProjects(userId: string): Promise<ProjectHistoryRow[]> {
@@ -144,11 +217,14 @@ export async function listUserProjects(userId: string): Promise<ProjectHistoryRo
             d.vercel_status,
             d.railway_status,
             d.vercel_log_url,
-            d.railway_log_url
+            d.railway_log_url,
+            d.code_revision_id,
+            d.source_hash
      FROM project_sessions p
      LEFT JOIN LATERAL (
             SELECT frontend_url, backend_url, vercel_deployment_id, railway_deployment_id,
-              vercel_status, railway_status, vercel_log_url, railway_log_url
+              vercel_status, railway_status, vercel_log_url, railway_log_url,
+              code_revision_id, source_hash
       FROM project_deployments
       WHERE project_id = p.id
       ORDER BY created_at DESC

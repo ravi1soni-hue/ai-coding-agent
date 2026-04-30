@@ -1,16 +1,37 @@
 import { deployToVercel } from './vercelDeploy';
 import { deployToRailway } from '../deploy/railwayDeploy';
 
-export async function deploymentAgent(input: { frontend: string; backend: string }) {
+export async function deploymentAgent(input: {
+  projectId: string;
+  revisionId: string;
+  buildDir: string;
+  frontendProjectName?: string;
+  backendService: string;
+}) {
   if (process.env.NODE_ENV !== 'production') {
     console.log('[deploymentAgent] called with:', input);
   }
   try {
-    if (!input.frontend) throw new Error('frontend required');
-    // Deploy frontend to Vercel
-    const vercelResult = await deployToVercel({ buildDir: '../../frontend', projectName: input.frontend });
-    // Deploy backend to Railway and capture artifact metadata
-    const railwayResult = await deployToRailway(input.backend, { source: 'deploymentAgent' });
+    if (!input.buildDir) throw new Error('buildDir required');
+    if (!input.projectId) throw new Error('projectId required');
+    if (!input.revisionId) throw new Error('revisionId required');
+
+    const defaultProjectName = `proj-${input.projectId.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 18) || 'site'}`;
+
+    const vercelResult = await deployToVercel({
+      buildDir: input.buildDir,
+      projectName: input.frontendProjectName || defaultProjectName,
+      meta: {
+        projectId: input.projectId,
+        revisionId: input.revisionId,
+      },
+    });
+
+    const railwayResult = await deployToRailway(input.backendService, {
+      source: 'deploymentAgent',
+      projectId: input.projectId,
+      revisionId: input.revisionId,
+    });
 
     const result = {
       frontend_url: `https://${vercelResult.url}`,
