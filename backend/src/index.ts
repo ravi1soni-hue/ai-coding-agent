@@ -33,7 +33,7 @@ async function start() {
 
         // Serve static frontend
         fastify.register(fastifyStatic, {
-                root: path.join(__dirname, '../frontend'),
+                root: path.join(__dirname, '../../frontend/dist'),
                 prefix: '/',
                 index: ['index.html'],
         });
@@ -41,7 +41,7 @@ async function start() {
         // Debug endpoint to list frontend files
         fastify.get('/debug-frontend-files', async (request, reply) => {
                 try {
-                        const dir = path.join(__dirname, '../frontend');
+                        const dir = path.join(__dirname, '../../frontend/dist');
                         const files = fs.readdirSync(dir);
                         return reply.send({ files });
                 } catch (e: any) {
@@ -52,7 +52,7 @@ async function start() {
         // Debug endpoint to show contents of index.html
         fastify.get('/debug-index-html', async (request, reply) => {
                 try {
-                        const file = fs.readFileSync(path.join(__dirname, '../frontend/index.html'), 'utf8');
+                        const file = fs.readFileSync(path.join(__dirname, '../../frontend/dist/index.html'), 'utf8');
                         return reply.type('text/html').send(file);
                 } catch (e: any) {
                         return reply.status(500).send({ error: e.message });

@@ -8,6 +8,9 @@ COPY backend/ ./
 
 COPY frontend/ ./frontend
 
+RUN npm --prefix frontend install
+RUN npm --prefix frontend run build
+
 RUN rm -rf dist && npm run build
 
 EXPOSE 3000

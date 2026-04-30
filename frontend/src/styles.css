@@ -1,0 +1,402 @@
+:root {
+  --bg-main: #f7f8fc;
+  --bg-blend: #e7e6f7;
+  --panel: #ffffff;
+  --text: #111111;
+  --muted: #666666;
+  --accent: #b46cff;
+  --border: #eaeaea;
+  --system: #eef6ff;
+  --error: #ffecec;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  min-height: 100%;
+}
+
+body {
+  font-family: 'Inter', Arial, sans-serif;
+  color: var(--text);
+  background: var(--bg-main);
+}
+
+.mainBg {
+  min-height: 100vh;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--bg-main) 80%, var(--bg-blend) 100%);
+  padding: 1rem;
+}
+
+.assistantWrapper {
+  background: var(--panel);
+  border-radius: 32px;
+  box-shadow: 0 4px 32px rgba(0, 0, 0, 0.06);
+  width: 1100px;
+  min-height: 700px;
+  max-width: 98vw;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: row;
+  position: relative;
+  overflow: hidden;
+}
+
+.assistantWrapper::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  background-image: repeating-linear-gradient(to right, var(--border) 0 1px, transparent 1px 55px),
+    repeating-linear-gradient(to bottom, var(--border) 0 1px, transparent 1px 55px);
+  opacity: 0.45;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.assistantLeft {
+  flex: 1 1 0;
+  padding: 56px 48px 32px;
+  display: flex;
+  flex-direction: column;
+  z-index: 2;
+}
+
+.assistantDate {
+  font-size: 1.05rem;
+  margin-bottom: 18px;
+}
+
+.assistantTitle {
+  font-size: 2.8rem;
+  font-weight: 800;
+  color: var(--text);
+  margin: 0;
+  line-height: 1.1;
+  font-family: 'Montserrat', Arial, sans-serif;
+}
+
+.assistantTitle .highlight {
+  color: var(--accent);
+  font-style: italic;
+  font-weight: 700;
+}
+
+.assistantDesc {
+  font-size: 1.1rem;
+  margin: 32px 0 0;
+}
+
+.assistantQuestion {
+  font-size: 2rem;
+  color: var(--accent);
+  font-style: italic;
+  margin: 12px 0 22px;
+  font-family: 'Montserrat', Arial, sans-serif;
+}
+
+.socketStatus {
+  margin-bottom: 14px;
+  width: fit-content;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #ffffff;
+  font-size: 0.8rem;
+  padding: 6px 10px;
+  color: #444;
+}
+
+.promptCards {
+  margin: 10px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  width: 100%;
+  max-width: 500px;
+}
+
+.promptCard {
+  background: #ffffff;
+  border: 1.5px solid var(--border);
+  border-radius: 16px;
+  padding: 18px 24px 14px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.promptTitle {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #222;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.promptMetaRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.promptBadge {
+  background: #f3eaff;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 600;
+  border-radius: 8px;
+  padding: 4px 10px;
+}
+
+.promptBadge.alt {
+  background: #ffeaff;
+  color: #ff6fcf;
+}
+
+.promptTasks {
+  color: #888;
+  font-size: 0.9rem;
+}
+
+.promptRun {
+  margin-left: auto;
+  background: #fff;
+  color: #222;
+  border: 1.5px solid var(--accent);
+  border-radius: 8px;
+  padding: 6px 16px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.promptRun:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.assistantInputRow {
+  margin-top: 24px;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  max-width: 500px;
+  background: #fff;
+  border-radius: 24px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  border: 1.5px solid var(--border);
+  padding: 4px 8px 4px 20px;
+}
+
+.assistantInput {
+  flex: 1;
+  border: none;
+  outline: none;
+  font-size: 1.02rem;
+  background: transparent;
+  color: #222;
+  padding: 16px 0;
+}
+
+.assistantSend {
+  border: none;
+  border-radius: 12px;
+  padding: 11px 14px;
+  background: var(--accent);
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.assistantSend:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.activityBox {
+  margin-top: 14px;
+  max-width: 500px;
+  border-radius: 12px;
+  background: #fff;
+  border: 1px solid var(--border);
+  min-height: 112px;
+  max-height: 160px;
+  overflow: auto;
+  padding: 10px;
+}
+
+.msg {
+  font-size: 0.86rem;
+  line-height: 1.4;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+}
+
+.msg.user {
+  background: #f0e8ff;
+}
+
+.msg.assistant {
+  background: #f8f8fb;
+}
+
+.msg.system {
+  background: var(--system);
+}
+
+.msg.error {
+  background: var(--error);
+  color: #9d2f2f;
+}
+
+.assistantRight {
+  flex: 1 1 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  position: relative;
+  min-width: 340px;
+  z-index: 2;
+}
+
+.assistantImgBg {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  top: 0;
+  width: 420px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.assistantImg {
+  width: 340px;
+  height: 420px;
+  object-fit: cover;
+  border-radius: 24px;
+  margin-right: 32px;
+  box-shadow: 0 4px 32px rgba(0, 0, 0, 0.12);
+}
+
+.assistantCircles {
+  position: absolute;
+  right: 60px;
+  top: 60px;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.circle {
+  position: absolute;
+  border-radius: 50%;
+  border: 2px solid #f3eaff;
+  opacity: 0.7;
+}
+
+.circle1 {
+  width: 320px;
+  height: 320px;
+}
+
+.circle2 {
+  width: 220px;
+  height: 220px;
+  left: 50px;
+  top: 50px;
+  border-color: #ffeaff;
+}
+
+.circle3 {
+  width: 120px;
+  height: 120px;
+  left: 100px;
+  top: 100px;
+  border-color: var(--accent);
+}
+
+@media (max-width: 1100px) {
+  .assistantImgBg {
+    width: 300px;
+  }
+
+  .assistantImg {
+    width: 220px;
+    height: 300px;
+    margin-right: 8px;
+  }
+
+  .circle1 {
+    width: 200px;
+    height: 200px;
+  }
+
+  .circle2 {
+    width: 140px;
+    height: 140px;
+    left: 30px;
+    top: 30px;
+  }
+
+  .circle3 {
+    width: 80px;
+    height: 80px;
+    left: 60px;
+    top: 60px;
+  }
+}
+
+@media (max-width: 900px) {
+  .assistantWrapper {
+    flex-direction: column;
+    width: 98vw;
+    min-height: 90vh;
+  }
+
+  .assistantLeft {
+    padding: 32px 16px 16px;
+  }
+
+  .assistantRight {
+    min-width: 0;
+    justify-content: center;
+    align-items: center;
+  }
+
+  .assistantImgBg {
+    position: static;
+    width: 220px;
+  }
+
+  .assistantImg {
+    width: 180px;
+    height: 220px;
+    margin: 0;
+  }
+}
+
+@media (max-width: 600px) {
+  .assistantTitle {
+    font-size: 2.1rem;
+  }
+
+  .assistantQuestion {
+    font-size: 1.6rem;
+  }
+}
