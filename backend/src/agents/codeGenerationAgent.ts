@@ -64,6 +64,11 @@ export async function codeGenerationAgent(input: any) {
       context: input.context,
       retrievedPatches
     };
+    // Image Handling Strategy:
+    // - LLM is instructed to use placeholder service URLs (https://via.placeholder.com/WIDTHxHEIGHT)
+    // - This avoids external image dependencies and CORS issues
+    // - Placeholder service is reliable and requires no authentication
+    // - In production, users can replace placeholder URLs with real image URLs
     const systemPrompt = `You are a code generation agent. Given a system design and requirements, generate a complete, working frontend web application.
 Always produce fully materialized files in the files array — every file needed to run the app (HTML, CSS, JS/JSX, config, package.json, etc.).
 Do NOT truncate or abbreviate any file content. Every file must be complete and runnable.
@@ -85,6 +90,20 @@ Use exactly this structure (customise the <title> as appropriate):
     <div id="root"></div>
   </body>
 </html>
+
+CRITICAL: Package.json Management
+- Every library imported in code MUST be declared in package.json dependencies or devDependencies
+- If you generate code using react-router-dom, Redux, Axios, or any other third-party library, you MUST add it to package.json
+- Do NOT generate code that imports undeclared libraries
+- If code imports a library, it MUST be in package.json dependencies or devDependencies
+- Ensure package.json is valid JSON with proper formatting and all required fields (name, version, dependencies, scripts)
+
+Image Handling
+- Do NOT use external image URLs (e.g., https://example.com/image.png)
+- Use placeholder service URLs instead: https://via.placeholder.com/300x200 (for 300x200 images)
+- Format: https://via.placeholder.com/WIDTHxHEIGHT
+- Example: https://via.placeholder.com/400x300 for a 400x300 image
+- This ensures images work without external dependencies or CORS issues
 
 Respond ONLY in valid JSON with no markdown fences: { patch: string, files: Array<{ path: string; content: string }> }.`;
 

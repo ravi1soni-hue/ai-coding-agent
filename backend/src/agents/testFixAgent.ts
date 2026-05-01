@@ -2,6 +2,101 @@
 import fs from 'fs/promises';
 import path from 'path';
 
+// Known third-party library versions for auto-remediation
+const KNOWN_LIBRARY_VERSIONS: Record<string, string> = {
+  'react-router-dom': '^6.20.0',
+  'react-router': '^6.20.0',
+  'redux': '^4.2.1',
+  'react-redux': '^8.1.3',
+  '@reduxjs/toolkit': '^1.9.7',
+  'axios': '^1.6.0',
+  'lodash': '^4.17.21',
+  'underscore': '^1.13.6',
+  'moment': '^2.29.4',
+  'date-fns': '^2.30.0',
+  'styled-components': '^6.1.0',
+  '@emotion/react': '^11.11.1',
+  '@emotion/styled': '^11.11.0',
+  'tailwindcss': '^3.3.6',
+};
+
+// Node.js built-in modules — never need to be in package.json
+const NODE_BUILTINS = new Set([
+  'fs', 'path', 'os', 'http', 'https', 'url', 'util', 'events',
+  'stream', 'buffer', 'crypto', 'child_process', 'cluster', 'net',
+  'dns', 'readline', 'zlib', 'assert', 'tty', 'vm', 'module',
+  'process', 'timers', 'string_decoder', 'querystring', 'punycode',
+]);
+
+/**
+ * Scans generated JS/JSX/TS/TSX files for import/require statements,
+ * compares them against the declared dependencies in package.json, and
+ * adds any missing third-party libraries with sensible default versions.
+ * Returns the (possibly updated) package.json content string.
+ */
+function validateAndFixPackageJson(files: GeneratedFile[]): string | null {
+  const packageJsonFile = files.find(
+    (f) => f.path === 'package.json' || f.path === '/package.json'
+  );
+  if (!packageJsonFile) return null;
+
+  let pkg: {
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+    [key: string]: unknown;
+  };
+  try {
+    pkg = JSON.parse(packageJsonFile.content);
+  } catch {
+    console.warn('[testFixAgent] validateAndFixPackageJson: failed to parse package.json');
+    return null;
+  }
+
+  const deps = pkg.dependencies || {};
+  const devDeps = pkg.devDependencies || {};
+  const allDeclared = new Set([...Object.keys(deps), ...Object.keys(devDeps)]);
+
+  // Collect all imports from JS/JSX/TS/TSX source files
+  const importedModules = new Set<string>();
+  const es6ImportRe = /import\s+(?:{[^}]*}|[^from'"]*)\s+from\s+['"]([^'"]+)['"]/g;
+  const requireRe = /require\(['"]([^'"]+)['"]\)/g;
+
+  for (const file of files) {
+    const ext = path.extname(file.path).toLowerCase();
+    if (!['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'].includes(ext)) continue;
+
+    for (const re of [es6ImportRe, requireRe]) {
+      re.lastIndex = 0;
+      let match: RegExpExecArray | null;
+      while ((match = re.exec(file.content)) !== null) {
+        const mod = match[1];
+        // Skip relative imports and absolute paths
+        if (mod.startsWith('.') || mod.startsWith('/')) continue;
+        // Skip Node.js built-ins
+        const rootPkg = mod.startsWith('@') ? mod.split('/').slice(0, 2).join('/') : mod.split('/')[0];
+        if (NODE_BUILTINS.has(rootPkg)) continue;
+        importedModules.add(rootPkg);
+      }
+    }
+  }
+
+  // Identify missing dependencies
+  const missing: Record<string, string> = {};
+  for (const mod of importedModules) {
+    if (!allDeclared.has(mod)) {
+      const version = KNOWN_LIBRARY_VERSIONS[mod] ?? 'latest';
+      missing[mod] = version;
+    }
+  }
+
+  if (Object.keys(missing).length === 0) return null; // Nothing to fix
+
+  console.log('[testFixAgent] validateAndFixPackageJson: adding missing dependencies:', missing);
+
+  pkg.dependencies = { ...deps, ...missing };
+  return JSON.stringify(pkg, null, 2);
+}
+
 const DEFAULT_PUBLIC_INDEX_HTML = `<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -74,6 +169,26 @@ export async function testFixAgent(input: {
       await ensureReactPublicIndexHtml(input.files, input.workspaceDir);
     } catch (err) {
       console.warn('[testFixAgent] Pre-build validation warning:', err);
+    }
+  }
+
+  // Pre-build validation: ensure all imported modules are declared in package.json
+  if (input.files && input.workspaceDir) {
+    try {
+      const updatedPackageJson = validateAndFixPackageJson(input.files);
+      if (updatedPackageJson !== null) {
+        const packageJsonPath = path.join(input.workspaceDir, 'package.json');
+        await fs.writeFile(packageJsonPath, updatedPackageJson, 'utf8');
+        // Keep the in-memory files array in sync so subsequent reads are consistent
+        const packageJsonFile = input.files.find(
+          (f) => f.path === 'package.json' || f.path === '/package.json'
+        );
+        if (packageJsonFile) {
+          packageJsonFile.content = updatedPackageJson;
+        }
+      }
+    } catch (err) {
+      console.warn('[testFixAgent] Package.json validation warning:', err);
     }
   }
 
