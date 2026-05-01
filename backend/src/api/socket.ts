@@ -1,14 +1,14 @@
-// Simple WebSocket server using ws
+// WebSocket server — lightweight message router dispatching to independent handlers
 import { Server } from 'ws';
 import http from 'http';
 
-import { requirementAnalysisAgent } from '../agents/requirementAnalysisAgent';
-import { clarificationAgent } from '../agents/clarificationAgent';
-import { confirmationGate } from '../agents/confirmationGate';
-import { systemDesignAgent } from '../agents/systemDesignAgent';
-import { codeGenerationAgent } from '../agents/codeGenerationAgent';
-import { testFixAgent } from '../agents/testFixAgent';
-import { deploymentAgent } from '../agents/deploymentAgent';
+import { handleRequirementAnalysis } from './handlers/requirementAnalysisHandler';
+import { handleClarification } from './handlers/clarificationHandler';
+import { handleConfirmation } from './handlers/confirmationHandler';
+import { handleSystemDesign } from './handlers/systemDesignHandler';
+import { handleCodeGeneration } from './handlers/codeGenerationHandler';
+import { handleTestFix } from './handlers/testFixHandler';
+import { handleDeployment } from './handlers/deploymentHandler';
 import { runBuildWorker, cleanupWorkspace } from '../workers/buildWorker';
 import {
   createProjectSession,
@@ -18,10 +18,20 @@ import {
   parseCookie,
   touchProjectSession,
 } from '../auth/authService';
-import { appendProjectEvent, createProjectCodeRevision, getProjectSnapshot, saveProjectDeployment, updateProjectSnapshot } from '../db/projectStore';
+import {
+  appendProjectEvent,
+  createProjectCodeRevision,
+  getProjectSnapshot,
+  saveProjectDeployment,
+  updateProjectSnapshot,
+} from '../db/projectStore';
 import { materializeProjectWorkspace } from '../factory/projectFactory';
 import { config } from '../config/env';
+import { debug, error as logError } from '../utils/logger';
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function toClientErrorMessage(err: unknown, fallback: string): string {
   const raw = String((err as any)?.message || '').trim();
@@ -33,10 +43,41 @@ function toClientErrorMessage(err: unknown, fallback: string): string {
   return sanitized;
 }
 
+// ---------------------------------------------------------------------------
+// activePipelines with 5-minute TTL to prevent stale-entry leaks
+// ---------------------------------------------------------------------------
+
+const PIPELINE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+class TTLSet {
+  private entries = new Map<string, number>(); // key → expiry timestamp
+
+  has(key: string): boolean {
+    const expiry = this.entries.get(key);
+    if (expiry === undefined) return false;
+    if (Date.now() > expiry) {
+      this.entries.delete(key);
+      return false;
+    }
+    return true;
+  }
+
+  add(key: string): void {
+    this.entries.set(key, Date.now() + PIPELINE_TTL_MS);
+  }
+
+  delete(key: string): void {
+    this.entries.delete(key);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Socket server
+// ---------------------------------------------------------------------------
+
 export function createSocketServer(server: http.Server) {
   const wss = new Server({ server });
-  // Track projectIds with an active running pipeline to prevent concurrent corruption
-  const activePipelines = new Set<string>();
+  const activePipelines = new TTLSet();
 
   const stageWeights: Record<string, number> = {
     requirementAnalysis: 0.12,
@@ -176,9 +217,7 @@ export function createSocketServer(server: http.Server) {
           });
         }
       } catch (err) {
-        if (process.env.NODE_ENV !== 'production') {
-          console.warn('Skipping outbound project event persistence for non-JSON payload', err);
-        }
+        // Non-JSON payloads (e.g. binary frames) are silently skipped.
       }
     };
 
@@ -186,7 +225,7 @@ export function createSocketServer(server: http.Server) {
 
     const snapshot = await getProjectSnapshot({ userId: authedUser.id, projectId });
 
-    // --- State management per connection ---
+    // --- Session state per connection ---
     type Session = {
       progress: number;
       step: string;
@@ -198,7 +237,6 @@ export function createSocketServer(server: http.Server) {
       testResult: any;
       deployment: any;
       context: Record<string, any>;
-      // For modification flow
       modification?: string;
       modificationContext?: any;
       lastClarificationQuestion?: string;
@@ -210,6 +248,7 @@ export function createSocketServer(server: http.Server) {
       codeRevisionDbId?: string;
       progressStages: Record<string, boolean>;
     };
+
     const session: Session = {
       progress: Number(snapshot?.progress) || 0,
       step: snapshot?.current_step || 'init',
@@ -239,7 +278,6 @@ export function createSocketServer(server: http.Server) {
       session.progressStages = {};
     }
 
-    // Track answers for step-by-step clarification
     let clarificationAnswers: Record<string, string> =
       session.clarifications?.context?.clarificationAnswers && typeof session.clarifications.context.clarificationAnswers === 'object'
         ? { ...session.clarifications.context.clarificationAnswers }
@@ -249,356 +287,151 @@ export function createSocketServer(server: http.Server) {
         ? [...session.clarifications.context.askedQuestions]
         : [];
 
+    // -----------------------------------------------------------------------
+    // Main pipeline — each stage dispatches to its own handler with an
+    // independent error boundary. One stage failing does NOT crash the others.
+    // -----------------------------------------------------------------------
     async function runFlow(userMsg: string | null, userClarificationAnswers: Record<string, any> | null = null) {
-      // Prevent two concurrent pipelines for the same projectId (e.g., two browser tabs)
       if (activePipelines.has(projectId)) {
         ws.send(JSON.stringify({ type: 'error', message: 'Another pipeline is already running for this project. Please wait or open a new project.' }));
         return;
       }
       activePipelines.add(projectId);
       try {
-        // Step 1: Requirement Analysis
+        // ------------------------------------------------------------------
+        // Stage 1: Requirement Analysis
+        // ------------------------------------------------------------------
         if (session.step === 'init' || session.step === 'requirementAnalysis') {
           sendProgress(ws, session, 'requirementAnalysis', 'Analyzing requirements...');
-          try {
-            if (!userMsg) throw new Error('User message required for requirement analysis');
-            session.requirements = await requirementAnalysisAgent({ user_message: userMsg });
-            // Log technical details, but send only conversational message to UI
-            console.log('[REQUIREMENTS] Analyzed');
-            ws.send(JSON.stringify({ type: 'stream', token: 'Got it! Let me clarify a few details about your project.' }));
-            session.step = 'clarification';
-          } catch (err) {
-            console.error('[RequirementAnalysis Error]', err);
-            ws.send(JSON.stringify({ type: 'error', message: 'Oops, something went wrong while analyzing your requirements. Please try again or rephrase your request.' }));
+          if (!userMsg) {
+            ws.send(JSON.stringify({ type: 'error', message: 'User message required for requirement analysis' }));
             return;
           }
+          const raResult = await handleRequirementAnalysis({ userMessage: userMsg, projectId, userId: authedUser.id });
+          if (!raResult.success) {
+            ws.send(JSON.stringify({ type: 'error', message: raResult.error || 'Failed to analyze requirements. Please try again.' }));
+            return;
+          }
+          session.requirements = raResult.data;
+          debug('socket:requirementAnalysis', { projectId });
+          ws.send(JSON.stringify({ type: 'stream', token: 'Got it! Let me clarify a few details about your project.' }));
+          session.step = 'clarification';
         }
 
-        // Step 2: Clarification (multi-turn)
+        // ------------------------------------------------------------------
+        // Stage 2: Clarification (multi-turn)
+        // ------------------------------------------------------------------
         while (session.step === 'clarification') {
           sendProgress(ws, session, 'clarification', 'Clarifying requirements...');
-          try {
-            // Always wrap requirements in an object as expected by clarificationAgent
-            let clarInput = {
-              requirements: session.requirements || {},
-              clarificationAnswers,
-              askedQuestions: askedClarificationQuestions,
-              modification: session.modification,
-              lastQuestion: session.lastClarificationQuestion,
-              lastAnswer: undefined // You can set this if you track last answer
-            };
-            if (userClarificationAnswers && typeof userClarificationAnswers === 'object') {
-              clarInput.clarificationAnswers = { ...clarInput.clarificationAnswers, ...userClarificationAnswers };
-            }
-            session.clarifications = await clarificationAgent(clarInput);
-            // Log technical details
-            console.log('[CLARIFICATION] Complete');
-            // Conversational flow
-            if (session.clarifications && session.clarifications.question && !session.clarifications.confirmed) {
-              let questionMsg = session.clarifications.question;
-              // Defensive: if questionMsg is a JSON string, parse and extract .question
-              if (typeof questionMsg === 'string' && questionMsg.trim().startsWith('{')) {
-                try {
-                  const parsed = JSON.parse(questionMsg);
-                  if (parsed && typeof parsed.question === 'string') questionMsg = parsed.question;
-                } catch {}
-              }
-              const normalizedQuestion = questionMsg.trim().toLowerCase();
-              if (askedClarificationQuestions.some((q) => q.trim().toLowerCase() === normalizedQuestion)) {
-                ws.send(JSON.stringify({ type: 'stream', token: 'Using your previous clarification. Moving to confirmation.' }));
-                session.step = 'confirmation';
-                continue;
-              }
+          const clarInput = {
+            requirements: session.requirements || {},
+            clarificationAnswers: {
+              ...clarificationAnswers,
+              ...(userClarificationAnswers && typeof userClarificationAnswers === 'object' ? userClarificationAnswers : {}),
+            },
+            askedQuestions: askedClarificationQuestions,
+            modification: session.modification,
+            lastQuestion: session.lastClarificationQuestion,
+            lastAnswer: undefined as string | undefined,
+            projectId,
+          };
 
-              askedClarificationQuestions.push(questionMsg);
-              session.lastClarificationQuestion = questionMsg;
-              ws.send(JSON.stringify({ type: 'clarification', question: questionMsg })); // Only send plain question string
-              session.step = 'clarification_wait';
-              return;
-            } else if (session.clarifications && !session.clarifications.confirmed) {
-              ws.send(JSON.stringify({ type: 'confirmation', message: 'Could you please confirm the above details before we proceed?' })); // Only send plain confirmation message
-              session.step = 'clarification_wait';
-              return;
-            } else {
-              ws.send(JSON.stringify({ type: 'stream', token: 'Thanks for clarifying! Moving to confirmation.' }));
-              session.step = 'confirmation';
+          const clarResult = await handleClarification(clarInput);
+
+          if (!clarResult.success) {
+            // Graceful fallback: skip clarification and proceed
+            debug('socket:clarification-fallback', { projectId, error: clarResult.error });
+            ws.send(JSON.stringify({ type: 'stream', token: 'Skipping clarification due to an error. Moving to confirmation.' }));
+            session.step = 'confirmation';
+            break;
+          }
+
+          session.clarifications = clarResult.data;
+          debug('socket:clarification', { projectId });
+
+          if (session.clarifications?.question && !session.clarifications.confirmed) {
+            let questionMsg = session.clarifications.question;
+            if (typeof questionMsg === 'string' && questionMsg.trim().startsWith('{')) {
+              try {
+                const parsed = JSON.parse(questionMsg);
+                if (parsed && typeof parsed.question === 'string') questionMsg = parsed.question;
+              } catch {}
             }
-          } catch (err) {
-            ws.send(JSON.stringify({ type: 'error', message: toClientErrorMessage(err, 'Clarification failed. Please try again.') }));
+            const normalizedQuestion = questionMsg.trim().toLowerCase();
+            if (askedClarificationQuestions.some((q) => q.trim().toLowerCase() === normalizedQuestion)) {
+              ws.send(JSON.stringify({ type: 'stream', token: 'Using your previous clarification. Moving to confirmation.' }));
+              session.step = 'confirmation';
+              continue;
+            }
+            askedClarificationQuestions.push(questionMsg);
+            session.lastClarificationQuestion = questionMsg;
+            ws.send(JSON.stringify({ type: 'clarification', question: questionMsg }));
+            session.step = 'clarification_wait';
             return;
+          } else if (session.clarifications && !session.clarifications.confirmed) {
+            ws.send(JSON.stringify({ type: 'confirmation', message: 'Could you please confirm the above details before we proceed?' }));
+            session.step = 'clarification_wait';
+            return;
+          } else {
+            ws.send(JSON.stringify({ type: 'stream', token: 'Thanks for clarifying! Moving to confirmation.' }));
+            session.step = 'confirmation';
           }
         }
 
-        // Step 3: Confirmation Gate (multi-turn)
+        // ------------------------------------------------------------------
+        // Stage 3: Confirmation Gate (multi-turn)
+        // ------------------------------------------------------------------
         while (session.step === 'confirmation') {
           sendProgress(ws, session, 'confirmation', 'Confirming requirements...');
-          try {
-            if (!session.clarifications) throw new Error('Clarifications required for confirmation');
-            session.confirmation = await confirmationGate(session.clarifications);
-            console.log('[CONFIRMATION] Confirmed');
-            ws.send(JSON.stringify({ type: 'stream', token: 'All requirements confirmed! I will now design the system.' }));
-            session.step = 'systemDesign';
-          } catch (err) {
-            ws.send(JSON.stringify({ type: 'confirmation', message: (err as any)?.message, context: session.clarifications }));
+          if (!session.clarifications) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Clarifications required for confirmation' }));
+            return;
+          }
+          const confResult = await handleConfirmation({ clarifications: session.clarifications, projectId });
+          if (!confResult.success) {
+            ws.send(JSON.stringify({ type: 'confirmation', message: confResult.error, context: session.clarifications }));
             session.step = 'confirmation_wait';
             return;
           }
+          session.confirmation = confResult.data;
+          debug('socket:confirmation', { projectId });
+          ws.send(JSON.stringify({ type: 'stream', token: 'All requirements confirmed! I will now design the system.' }));
+          session.step = 'systemDesign';
         }
 
-        // Step 4: System Design
+        // ------------------------------------------------------------------
+        // Stage 4: System Design
+        // ------------------------------------------------------------------
         if (session.step === 'systemDesign') {
           sendProgress(ws, session, 'systemDesign', 'Designing system...');
-          try {
-            session.systemDesign = await systemDesignAgent(session.requirements);
-            console.log('[SYSTEM DESIGN] Generated');
-            ws.send(JSON.stringify({ type: 'stream', token: 'System design is ready. Generating code...' }));
-            session.step = 'codeGen';
-          } catch (err) {
-            ws.send(JSON.stringify({ type: 'error', message: toClientErrorMessage(err, 'System design failed. Please try again.') }));
+          const sdResult = await handleSystemDesign({ requirements: session.requirements, projectId });
+          if (!sdResult.success) {
+            ws.send(JSON.stringify({ type: 'error', message: sdResult.error || 'System design failed. Please try again.' }));
             return;
           }
+          session.systemDesign = sdResult.data;
+          debug('socket:systemDesign', { projectId });
+          ws.send(JSON.stringify({ type: 'stream', token: 'System design is ready. Generating code...' }));
+          session.step = 'codeGen';
         }
 
-        // Step 5: Code Generation
+        // ------------------------------------------------------------------
+        // Stage 5: Code Generation
+        // ------------------------------------------------------------------
         if (session.step === 'codeGen') {
           sendProgress(ws, session, 'codeGen', 'Generating code...', 0);
-          try {
-            session.codeGen = await codeGenerationAgent({ systemDesign: session.systemDesign, requirements: session.requirements });
-            const materialized = await materializeProjectWorkspace({
-              projectId,
-              codeGen: session.codeGen,
-            });
-            session.activeRevisionId = materialized.revisionId;
-            session.workspaceDir = materialized.workspaceDir;
-            session.sourceArchivePath = materialized.archivePath;
-            session.sourceHash = materialized.sourceHash;
-            session.codeRevisionDbId = await createProjectCodeRevision({
-              projectId,
-              userId: authedUser.id,
-              workspacePath: materialized.workspaceDir,
-              sourceArchivePath: materialized.archivePath,
-              sourceHash: materialized.sourceHash,
-              patchPath: materialized.patchPath,
-              patchApplied: materialized.patchApplied,
-              patchApplyLog: materialized.patchApplyLog,
-              generationPayload: session.codeGen,
-            });
-            console.log('[CODE GEN] Complete');
-            sendProgress(ws, session, 'codeGen', 'Code generation complete.', 1);
-            ws.send(JSON.stringify({ type: 'stream', token: 'Code generated! Running tests and fixes...' }));
-            session.step = 'testFix';
-          } catch (err) {
-            ws.send(JSON.stringify({ type: 'error', message: toClientErrorMessage(err, 'Code generation failed. Please try again.') }));
-            return;
-          }
-        }
-
-        // Step 6: Test & Fix
-        if (session.step === 'testFix') {
-          sendProgress(ws, session, 'testFix', 'Testing and fixing...', 0);
-          try {
-            session.testResult = await testFixAgent({
-              buildFn: async () => {
-                const result = await runBuildWorker({ workspaceDir: session.workspaceDir });
-                if (result.success) {
-                  session.buildDir = result.buildDir;
-                }
-                return { success: result.success, logs: result.logs };
-              },
-              fixFn: async (logs: string) => {
-                ws.send(JSON.stringify({ type: 'stream', token: 'Build failed — asking AI to fix errors...' }));
-                const fixedCodeGen = await codeGenerationAgent({
-                  systemDesign: session.systemDesign,
-                  requirements: session.requirements,
-                  modification: `Fix these build errors and produce corrected files:\n${logs.slice(-1500)}`,
-                });
-                const reMaterialized = await materializeProjectWorkspace({ projectId, codeGen: fixedCodeGen });
-                session.activeRevisionId = reMaterialized.revisionId;
-                session.workspaceDir = reMaterialized.workspaceDir;
-                session.sourceArchivePath = reMaterialized.archivePath;
-                session.sourceHash = reMaterialized.sourceHash;
-                session.codeGen = fixedCodeGen;
-                session.codeRevisionDbId = await createProjectCodeRevision({
-                  projectId,
-                  userId: authedUser.id,
-                  workspacePath: reMaterialized.workspaceDir,
-                  sourceArchivePath: reMaterialized.archivePath,
-                  sourceHash: reMaterialized.sourceHash,
-                  patchPath: reMaterialized.patchPath,
-                  patchApplied: reMaterialized.patchApplied,
-                  patchApplyLog: reMaterialized.patchApplyLog,
-                  generationPayload: fixedCodeGen,
-                });
-              },
-            });
-            console.log('[TEST RESULT]', { success: session.testResult?.success });
-            sendProgress(ws, session, 'testFix', 'Testing complete.', 1);
-            ws.send(JSON.stringify({ type: 'stream', token: 'Tests complete! Deploying your project...' }));
-            session.step = 'deploy';
-          } catch (err) {
-            ws.send(JSON.stringify({ type: 'error', message: toClientErrorMessage(err, 'Test/fix failed. Please try again.') }));
-            return;
-          }
-        }
-
-        // Step 7: Deployment
-        if (session.step === 'deploy') {
-          sendProgress(ws, session, 'deploy', 'Deploying...', 0);
-          try {
-            if (!session.buildDir || !session.activeRevisionId) {
-              throw new Error('Build artifact missing for deployment.');
-            }
-            session.deployment = await deploymentAgent({
-              projectId,
-              revisionId: session.activeRevisionId,
-              buildDir: session.buildDir,
-              frontendProjectName: `proj-${projectId.slice(0, 10)}`,
-              backendService: 'backend',
-              hasBackend: Boolean(session.systemDesign?.backend),
-            });
-            await saveProjectDeployment({
-              projectId,
-              userId: authedUser.id,
-              frontendUrl: session.deployment?.frontend_url,
-              backendUrl: session.deployment?.backend_url,
-              vercelDeploymentId: session.deployment?.vercel_deployment_id,
-              vercelInspectUrl: session.deployment?.vercel_inspect_url,
-              vercelStatus: session.deployment?.vercel_status,
-              vercelLogUrl: session.deployment?.vercel_log_url,
-              railwayDeploymentId: session.deployment?.railway_deployment_id,
-              railwayStatus: session.deployment?.railway_status,
-              railwayLogUrl: session.deployment?.railway_log_url,
-              railwayDashboardUrl: session.deployment?.railway_dashboard_url,
-              codeRevisionId: session.codeRevisionDbId,
-              sourceArchivePath: session.sourceArchivePath,
-              sourceHash: session.sourceHash,
-              raw: session.deployment,
-            });
-            console.log('[DEPLOYMENT]', { frontend_url: session.deployment?.frontend_url, status: session.deployment?.vercel_status });
-            const deployedUrl = session.deployment?.frontend_url || '';
-            ws.send(JSON.stringify({ type: 'stream', token: `Your project is deployed! 🎉${deployedUrl ? `\n\n🔗 Live URL: ${deployedUrl}` : ''}` }));
-            if (session.deployment?.frontend_access_warning) {
-              ws.send(JSON.stringify({ type: 'stream', token: `⚠️ ${session.deployment.frontend_access_warning}` }));
-            }
-            // Free disk: remove node_modules from workspace (dist/ already uploaded to Vercel)
-            if (session.workspaceDir) void cleanupWorkspace(session.workspaceDir);
-            sendProgress(ws, session, 'deploy', 'Deployment queued.', 1);
-            session.step = 'done';
-          } catch (err) {
-            const message = (err as any)?.message || 'Oops, something went wrong during deployment. Please try again later.';
-            console.error('[Deployment Error]', message);
-            ws.send(JSON.stringify({ type: 'error', message }));
-            return;
-          }
-        }
-
-        if (session.step === 'done') {
-          // Save project/session state for project management (simple example: log to file/db)
-          console.log('[PROJECT SAVED] Complete');
-          await touchProjectSession(authedUser.id, projectId);
-          ws.send(
-            JSON.stringify({
-              type: 'done',
-              projectId,
-              message: 'Project complete and saved. Start a new session for a new project!',
-              frontend_url: session.deployment?.frontend_url || null,
-              backend_url: session.deployment?.backend_url || null,
-              vercel_inspect_url: session.deployment?.vercel_inspect_url || null,
-              frontend_access_warning: session.deployment?.frontend_access_warning || null,
-            }),
-          );
-        }
-      } catch (err) {
-        console.error('[General Error]', err);
-        ws.send(JSON.stringify({ type: 'error', message: 'Oh no, something went wrong. Please try again or start a new session.' }));
-        } finally {
-          activePipelines.delete(projectId);
-        }
-      }
-
-    ws.on('message', async (message) => {
-      let msg;
-      try {
-        msg = JSON.parse(message.toString());
-      } catch {
-        msg = message.toString();
-      }
-
-      const userText = typeof msg === 'object' ? msg.user_message || msg.answer || msg.modification : msg;
-      if (typeof userText === 'string' && userText.trim()) {
-        await appendProjectEvent({
-          projectId,
-          userId: authedUser.id,
-          eventType: 'user_message',
-          role: 'user',
-          message: userText.trim(),
-          payload: msg,
-        });
-      }
-
-      // Modification request (can come at any time)
-      if (typeof msg === 'object' && msg.type === 'modification' && msg.modification) {
-        // Accept modification request, update requirements/context
-        session.step = 'modification';
-        session.modification = msg.modification;
-        session.modificationContext = msg.context || {};
-        // Route through clarification if needed
-        let clarInput = {
-          requirements: session.requirements,
-          clarificationAnswers,
-          modification: session.modification
-        };
-        let clarResult = await clarificationAgent(clarInput);
-        if (clarResult.question) {
-          ws.send(JSON.stringify({ type: 'clarification', question: clarResult.question })); // Only send plain question string
-          session.step = 'clarification_wait_modification';
-          session.lastClarificationQuestion = clarResult.question;
-          return;
-        } else {
-          // No clarification needed, go to codegen
-          session.step = 'codeGen_modification';
-        }
-      }
-
-      // Handle clarification answer for modification
-      if (session.step === 'clarification_wait_modification') {
-        let answer = typeof msg === 'object' ? msg.answer : msg;
-        if (session.lastClarificationQuestion) {
-          clarificationAnswers[session.lastClarificationQuestion] = answer;
-        }
-        // Re-run clarification with new answer
-        let clarInput = {
-          requirements: session.requirements,
-          clarificationAnswers,
-          modification: session.modification,
-          lastQuestion: session.lastClarificationQuestion,
-          lastAnswer: answer
-        };
-        let clarResult = await clarificationAgent(clarInput);
-        if (clarResult.question) {
-          ws.send(JSON.stringify({ type: 'clarification', question: clarResult.question })); // Only send plain question string
-          session.lastClarificationQuestion = clarResult.question;
-          return;
-        } else {
-          session.step = 'codeGen_modification';
-        }
-      }
-
-      // Handle code generation for modification
-      if (session.step === 'codeGen_modification') {
-        sendProgress(ws, session, 'codeGen_modification', 'Generating code patch for modification...', 0);
-        try {
-          let codeGenInput = {
+          const cgResult = await handleCodeGeneration({
             systemDesign: session.systemDesign,
             requirements: session.requirements,
-            modification: session.modification,
-            context: session.modificationContext
-          };
-          session.codeGen = await codeGenerationAgent(codeGenInput);
-          const materialized = await materializeProjectWorkspace({
             projectId,
-            codeGen: session.codeGen,
+            userId: authedUser.id,
           });
+          if (!cgResult.success) {
+            ws.send(JSON.stringify({ type: 'error', message: cgResult.error || 'Code generation failed. Please try again.' }));
+            return;
+          }
+          session.codeGen = cgResult.data;
+          const materialized = await materializeProjectWorkspace({ projectId, codeGen: session.codeGen });
           session.activeRevisionId = materialized.revisionId;
           session.workspaceDir = materialized.workspaceDir;
           session.sourceArchivePath = materialized.archivePath;
@@ -614,20 +447,18 @@ export function createSocketServer(server: http.Server) {
             patchApplyLog: materialized.patchApplyLog,
             generationPayload: session.codeGen,
           });
-          sendProgress(ws, session, 'codeGen_modification', 'Code patch generation complete.', 1);
-          ws.send(JSON.stringify({ type: 'stream', token: `Code patch generated. Proceeding to tests...` }));
-          session.step = 'testFix_modification';
-        } catch (err) {
-          ws.send(JSON.stringify({ type: 'error', message: toClientErrorMessage(err, 'Code generation for modification failed. Please try again.') }));
-          return;
+          debug('socket:codeGen', { projectId });
+          sendProgress(ws, session, 'codeGen', 'Code generation complete.', 1);
+          ws.send(JSON.stringify({ type: 'stream', token: 'Code generated! Running tests and fixes...' }));
+          session.step = 'testFix';
         }
-      }
 
-      // Test & Fix for modification
-      if (session.step === 'testFix_modification') {
-        sendProgress(ws, session, 'testFix_modification', 'Testing and fixing modification...', 0);
-        try {
-          session.testResult = await testFixAgent({
+        // ------------------------------------------------------------------
+        // Stage 6: Test & Fix
+        // ------------------------------------------------------------------
+        if (session.step === 'testFix') {
+          sendProgress(ws, session, 'testFix', 'Testing and fixing...', 0);
+          const tfResult = await handleTestFix({
             buildFn: async () => {
               const result = await runBuildWorker({ workspaceDir: session.workspaceDir });
               if (result.success) {
@@ -637,11 +468,19 @@ export function createSocketServer(server: http.Server) {
             },
             fixFn: async (logs: string) => {
               ws.send(JSON.stringify({ type: 'stream', token: 'Build failed — asking AI to fix errors...' }));
-              const fixedCodeGen = await codeGenerationAgent({
+              const fixResult = await handleCodeGeneration({
                 systemDesign: session.systemDesign,
                 requirements: session.requirements,
                 modification: `Fix these build errors and produce corrected files:\n${logs.slice(-1500)}`,
+                projectId,
+                userId: authedUser.id,
               });
+              if (!fixResult.success) {
+                // Log but don't throw — testFixAgent will retry with the same code
+                debug('socket:testFix-fixFn-failed', { projectId, error: fixResult.error });
+                return;
+              }
+              const fixedCodeGen = fixResult.data;
               const reMaterialized = await materializeProjectWorkspace({ projectId, codeGen: fixedCodeGen });
               session.activeRevisionId = reMaterialized.revisionId;
               session.workspaceDir = reMaterialized.workspaceDir;
@@ -660,23 +499,35 @@ export function createSocketServer(server: http.Server) {
                 generationPayload: fixedCodeGen,
               });
             },
+            files: session.codeGen?.files,
+            workspaceDir: session.workspaceDir,
+            projectId,
           });
-          ws.send(JSON.stringify({ type: 'stream', token: `Tests complete. Deploying your project...` }));
-          session.step = 'deploy_modification';
-        } catch (err) {
-          ws.send(JSON.stringify({ type: 'error', message: toClientErrorMessage(err, 'Test/fix for modification failed. Please try again.') }));
-          return;
-        }
-      }
 
-      // Deploy modification
-      if (session.step === 'deploy_modification') {
-        sendProgress(ws, session, 'deploy_modification', 'Deploying modification...', 1);
-        try {
-          if (!session.buildDir || !session.activeRevisionId) {
-            throw new Error('Build artifact missing for deployment.');
+          if (!tfResult.success) {
+            // Non-fatal: warn but continue to deployment with whatever build output exists
+            debug('socket:testFix-failed', { projectId, error: tfResult.error });
+            ws.send(JSON.stringify({ type: 'stream', token: 'Tests encountered issues. Attempting deployment with current build...' }));
+          } else {
+            session.testResult = tfResult.data;
           }
-          session.deployment = await deploymentAgent({
+
+          debug('socket:testFix', { projectId, success: tfResult.success });
+          sendProgress(ws, session, 'testFix', 'Testing complete.', 1);
+          ws.send(JSON.stringify({ type: 'stream', token: 'Tests complete! Deploying your project...' }));
+          session.step = 'deploy';
+        }
+
+        // ------------------------------------------------------------------
+        // Stage 7: Deployment
+        // ------------------------------------------------------------------
+        if (session.step === 'deploy') {
+          sendProgress(ws, session, 'deploy', 'Deploying...', 0);
+          if (!session.buildDir || !session.activeRevisionId) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Build artifact missing for deployment. Please try again.' }));
+            return;
+          }
+          const deployResult = await handleDeployment({
             projectId,
             revisionId: session.activeRevisionId,
             buildDir: session.buildDir,
@@ -684,6 +535,13 @@ export function createSocketServer(server: http.Server) {
             backendService: 'backend',
             hasBackend: Boolean(session.systemDesign?.backend),
           });
+
+          if (!deployResult.success) {
+            ws.send(JSON.stringify({ type: 'error', message: deployResult.error || 'Deployment failed. Please try again later.' }));
+            return;
+          }
+
+          session.deployment = deployResult.data;
           await saveProjectDeployment({
             projectId,
             userId: authedUser.id,
@@ -702,22 +560,259 @@ export function createSocketServer(server: http.Server) {
             sourceHash: session.sourceHash,
             raw: session.deployment,
           });
-          ws.send(JSON.stringify({ type: 'stream', token: `Deployment complete!` }));
+
+          debug('socket:deploy', { projectId, frontend_url: session.deployment?.frontend_url });
+          const deployedUrl = session.deployment?.frontend_url || '';
+          ws.send(JSON.stringify({ type: 'stream', token: `Your project is deployed! 🎉${deployedUrl ? `\n\n🔗 Live URL: ${deployedUrl}` : ''}` }));
           if (session.deployment?.frontend_access_warning) {
             ws.send(JSON.stringify({ type: 'stream', token: `⚠️ ${session.deployment.frontend_access_warning}` }));
           }
-          // Free disk: remove node_modules from workspace
           if (session.workspaceDir) void cleanupWorkspace(session.workspaceDir);
-          session.step = 'done_modification';
-        } catch (err) {
-          ws.send(JSON.stringify({ type: 'error', message: toClientErrorMessage(err, 'Deployment for modification failed. Please try again.') }));
+          sendProgress(ws, session, 'deploy', 'Deployment queued.', 1);
+          session.step = 'done';
+        }
+
+        if (session.step === 'done') {
+          debug('socket:done', { projectId });
+          await touchProjectSession(authedUser.id, projectId);
+          ws.send(
+            JSON.stringify({
+              type: 'done',
+              projectId,
+              message: 'Project complete and saved. Start a new session for a new project!',
+              frontend_url: session.deployment?.frontend_url || null,
+              backend_url: session.deployment?.backend_url || null,
+              vercel_inspect_url: session.deployment?.vercel_inspect_url || null,
+              frontend_access_warning: session.deployment?.frontend_access_warning || null,
+            }),
+          );
+        }
+      } catch (err) {
+        logError('socket:runFlow', err);
+        ws.send(JSON.stringify({ type: 'error', message: 'Oh no, something went wrong. Please try again or start a new session.' }));
+      } finally {
+        activePipelines.delete(projectId);
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Message router
+    // -----------------------------------------------------------------------
+    ws.on('message', async (message) => {
+      let msg: any;
+      try {
+        msg = JSON.parse(message.toString());
+      } catch {
+        msg = message.toString();
+      }
+
+      const userText = typeof msg === 'object' ? msg.user_message || msg.answer || msg.modification : msg;
+      if (typeof userText === 'string' && userText.trim()) {
+        await appendProjectEvent({
+          projectId,
+          userId: authedUser.id,
+          eventType: 'user_message',
+          role: 'user',
+          message: userText.trim(),
+          payload: msg,
+        });
+      }
+
+      // Modification request (can come at any time after initial flow)
+      if (typeof msg === 'object' && msg.type === 'modification' && msg.modification) {
+        session.step = 'modification';
+        session.modification = msg.modification;
+        session.modificationContext = msg.context || {};
+
+        const clarResult = await handleClarification({
+          requirements: session.requirements,
+          clarificationAnswers,
+          askedQuestions: [],
+          modification: session.modification,
+          projectId,
+        });
+
+        if (!clarResult.success || !clarResult.data?.question) {
+          session.step = 'codeGen_modification';
+        } else {
+          ws.send(JSON.stringify({ type: 'clarification', question: clarResult.data.question }));
+          session.step = 'clarification_wait_modification';
+          session.lastClarificationQuestion = clarResult.data.question;
           return;
         }
       }
 
+      // Handle clarification answer for modification
+      if (session.step === 'clarification_wait_modification') {
+        const answer = typeof msg === 'object' ? msg.answer : msg;
+        if (session.lastClarificationQuestion) {
+          clarificationAnswers[session.lastClarificationQuestion] = answer;
+        }
+        const clarResult = await handleClarification({
+          requirements: session.requirements,
+          clarificationAnswers,
+          askedQuestions: [],
+          modification: session.modification,
+          lastQuestion: session.lastClarificationQuestion,
+          lastAnswer: answer,
+          projectId,
+        });
+        if (!clarResult.success || !clarResult.data?.question) {
+          session.step = 'codeGen_modification';
+        } else {
+          ws.send(JSON.stringify({ type: 'clarification', question: clarResult.data.question }));
+          session.lastClarificationQuestion = clarResult.data.question;
+          return;
+        }
+      }
+
+      // Code generation for modification
+      if (session.step === 'codeGen_modification') {
+        sendProgress(ws, session, 'codeGen_modification', 'Generating code patch for modification...', 0);
+        const cgResult = await handleCodeGeneration({
+          systemDesign: session.systemDesign,
+          requirements: session.requirements,
+          modification: session.modification,
+          context: session.modificationContext,
+          projectId,
+          userId: authedUser.id,
+        });
+        if (!cgResult.success) {
+          ws.send(JSON.stringify({ type: 'error', message: cgResult.error || 'Code generation for modification failed. Please try again.' }));
+          return;
+        }
+        session.codeGen = cgResult.data;
+        const materialized = await materializeProjectWorkspace({ projectId, codeGen: session.codeGen });
+        session.activeRevisionId = materialized.revisionId;
+        session.workspaceDir = materialized.workspaceDir;
+        session.sourceArchivePath = materialized.archivePath;
+        session.sourceHash = materialized.sourceHash;
+        session.codeRevisionDbId = await createProjectCodeRevision({
+          projectId,
+          userId: authedUser.id,
+          workspacePath: materialized.workspaceDir,
+          sourceArchivePath: materialized.archivePath,
+          sourceHash: materialized.sourceHash,
+          patchPath: materialized.patchPath,
+          patchApplied: materialized.patchApplied,
+          patchApplyLog: materialized.patchApplyLog,
+          generationPayload: session.codeGen,
+        });
+        sendProgress(ws, session, 'codeGen_modification', 'Code patch generation complete.', 1);
+        ws.send(JSON.stringify({ type: 'stream', token: 'Code patch generated. Proceeding to tests...' }));
+        session.step = 'testFix_modification';
+      }
+
+      // Test & Fix for modification
+      if (session.step === 'testFix_modification') {
+        sendProgress(ws, session, 'testFix_modification', 'Testing and fixing modification...', 0);
+        const tfResult = await handleTestFix({
+          buildFn: async () => {
+            const result = await runBuildWorker({ workspaceDir: session.workspaceDir });
+            if (result.success) {
+              session.buildDir = result.buildDir;
+            }
+            return { success: result.success, logs: result.logs };
+          },
+          fixFn: async (logs: string) => {
+            ws.send(JSON.stringify({ type: 'stream', token: 'Build failed — asking AI to fix errors...' }));
+            const fixResult = await handleCodeGeneration({
+              systemDesign: session.systemDesign,
+              requirements: session.requirements,
+              modification: `Fix these build errors and produce corrected files:\n${logs.slice(-1500)}`,
+              projectId,
+              userId: authedUser.id,
+            });
+            if (!fixResult.success) {
+              debug('socket:testFix_modification-fixFn-failed', { projectId, error: fixResult.error });
+              return;
+            }
+            const fixedCodeGen = fixResult.data;
+            const reMaterialized = await materializeProjectWorkspace({ projectId, codeGen: fixedCodeGen });
+            session.activeRevisionId = reMaterialized.revisionId;
+            session.workspaceDir = reMaterialized.workspaceDir;
+            session.sourceArchivePath = reMaterialized.archivePath;
+            session.sourceHash = reMaterialized.sourceHash;
+            session.codeGen = fixedCodeGen;
+            session.codeRevisionDbId = await createProjectCodeRevision({
+              projectId,
+              userId: authedUser.id,
+              workspacePath: reMaterialized.workspaceDir,
+              sourceArchivePath: reMaterialized.archivePath,
+              sourceHash: reMaterialized.sourceHash,
+              patchPath: reMaterialized.patchPath,
+              patchApplied: reMaterialized.patchApplied,
+              patchApplyLog: reMaterialized.patchApplyLog,
+              generationPayload: fixedCodeGen,
+            });
+          },
+          files: session.codeGen?.files,
+          workspaceDir: session.workspaceDir,
+          projectId,
+        });
+
+        if (!tfResult.success) {
+          debug('socket:testFix_modification-failed', { projectId, error: tfResult.error });
+          ws.send(JSON.stringify({ type: 'stream', token: 'Tests encountered issues. Attempting deployment with current build...' }));
+        } else {
+          session.testResult = tfResult.data;
+        }
+
+        ws.send(JSON.stringify({ type: 'stream', token: 'Tests complete. Deploying your project...' }));
+        session.step = 'deploy_modification';
+      }
+
+      // Deploy modification
+      if (session.step === 'deploy_modification') {
+        sendProgress(ws, session, 'deploy_modification', 'Deploying modification...', 1);
+        if (!session.buildDir || !session.activeRevisionId) {
+          ws.send(JSON.stringify({ type: 'error', message: 'Build artifact missing for deployment.' }));
+          return;
+        }
+        const deployResult = await handleDeployment({
+          projectId,
+          revisionId: session.activeRevisionId,
+          buildDir: session.buildDir,
+          frontendProjectName: `proj-${projectId.slice(0, 10)}`,
+          backendService: 'backend',
+          hasBackend: Boolean(session.systemDesign?.backend),
+        });
+
+        if (!deployResult.success) {
+          ws.send(JSON.stringify({ type: 'error', message: deployResult.error || 'Deployment for modification failed. Please try again.' }));
+          return;
+        }
+
+        session.deployment = deployResult.data;
+        await saveProjectDeployment({
+          projectId,
+          userId: authedUser.id,
+          frontendUrl: session.deployment?.frontend_url,
+          backendUrl: session.deployment?.backend_url,
+          vercelDeploymentId: session.deployment?.vercel_deployment_id,
+          vercelInspectUrl: session.deployment?.vercel_inspect_url,
+          vercelStatus: session.deployment?.vercel_status,
+          vercelLogUrl: session.deployment?.vercel_log_url,
+          railwayDeploymentId: session.deployment?.railway_deployment_id,
+          railwayStatus: session.deployment?.railway_status,
+          railwayLogUrl: session.deployment?.railway_log_url,
+          railwayDashboardUrl: session.deployment?.railway_dashboard_url,
+          codeRevisionId: session.codeRevisionDbId,
+          sourceArchivePath: session.sourceArchivePath,
+          sourceHash: session.sourceHash,
+          raw: session.deployment,
+        });
+
+        ws.send(JSON.stringify({ type: 'stream', token: 'Deployment complete!' }));
+        if (session.deployment?.frontend_access_warning) {
+          ws.send(JSON.stringify({ type: 'stream', token: `⚠️ ${session.deployment.frontend_access_warning}` }));
+        }
+        if (session.workspaceDir) void cleanupWorkspace(session.workspaceDir);
+        session.step = 'done_modification';
+      }
+
       if (session.step === 'done_modification') {
         ws.send(JSON.stringify({ type: 'done', modification: true }));
-        // Reset modification state for further evolvement
         session.step = 'done';
         session.modification = undefined;
         session.modificationContext = undefined;
@@ -726,7 +821,7 @@ export function createSocketServer(server: http.Server) {
         return;
       }
 
-      // --- Original flow ---
+      // --- Original flow routing ---
       if (session.step === 'clarification_wait') {
         const answer = typeof msg === 'object' ? msg.answer : msg;
         if (session.lastClarificationQuestion && typeof answer === 'string' && answer.trim()) {
@@ -743,8 +838,6 @@ export function createSocketServer(server: http.Server) {
         return;
       } else if (session.step !== 'init') {
         // Recover from stale/non-resumable states by treating new user text as a fresh request.
-        // This avoids dead-ends after reconnects where the snapshot step is in-progress
-        // but no actionable clarification/confirmation prompt is actually pending.
         if (typeof userText === 'string' && userText.trim()) {
           session.progress = 0;
           session.step = 'init';
@@ -775,13 +868,4 @@ export function createSocketServer(server: http.Server) {
   });
 
   return wss;
-}
-
-async function runStep(fn: () => Promise<any>, ws: any, status: string) {
-  try {
-    return await fn();
-  } catch (err) {
-    ws.send(JSON.stringify({ type: 'error', message: status + ' failed: ' + ((err as any)?.message || err) }));
-    throw err;
-  }
 }

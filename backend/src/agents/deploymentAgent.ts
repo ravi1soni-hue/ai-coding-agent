@@ -2,6 +2,10 @@ import axios from 'axios';
 import fs from 'fs';
 import { deployToVercel } from './vercelDeploy';
 import { deployToRailway } from '../deploy/railwayDeploy';
+import { debug, error as logError } from '../utils/logger';
+
+
+
 
 export async function deploymentAgent(input: {
   projectId: string;
@@ -12,9 +16,7 @@ export async function deploymentAgent(input: {
   backendService?: string;
   hasBackend?: boolean;
 }) {
-  if (process.env.NODE_ENV !== 'production') {
-    console.log('[deploymentAgent] called with:', input);
-  }
+  debug('deploymentAgent', { input });
   try {
     if (!input.buildDir) throw new Error('buildDir required');
     if (!input.projectId) throw new Error('projectId required');
@@ -76,13 +78,11 @@ export async function deploymentAgent(input: {
     } catch {
       // Ignore probe errors and keep deployment result as-is.
     }
-    if (process.env.NODE_ENV !== 'production') {
-      console.log('[deploymentAgent] result:', result);
-    }
+    debug('deploymentAgent:result', { result });
     return result;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error('[deploymentAgent] error:', message);
+    logError('deploymentAgent', message);
     throw err;
   }
 }

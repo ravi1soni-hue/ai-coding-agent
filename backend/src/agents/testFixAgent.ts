@@ -1,6 +1,8 @@
 // Test & Fix Agent
 import fs from 'fs/promises';
 import path from 'path';
+import { debug, warn as logWarn, error as logError } from '../utils/logger';
+
 
 // Known third-party library versions for auto-remediation
 const KNOWN_LIBRARY_VERSIONS: Record<string, string> = {
@@ -48,7 +50,7 @@ function validateAndFixPackageJson(files: GeneratedFile[]): string | null {
   try {
     pkg = JSON.parse(packageJsonFile.content);
   } catch {
-    console.warn('[testFixAgent] validateAndFixPackageJson: failed to parse package.json');
+    logWarn('testFixAgent:validateAndFixPackageJson', 'failed to parse package.json');
     return null;
   }
 
@@ -91,7 +93,7 @@ function validateAndFixPackageJson(files: GeneratedFile[]): string | null {
 
   if (Object.keys(missing).length === 0) return null; // Nothing to fix
 
-  console.log('[testFixAgent] validateAndFixPackageJson: adding missing dependencies:', missing);
+  debug('testFixAgent:validateAndFixPackageJson', { missing });
 
   pkg.dependencies = { ...deps, ...missing };
   return JSON.stringify(pkg, null, 2);
@@ -144,9 +146,7 @@ async function ensureReactPublicIndexHtml(
   );
 
   if (!hasPublicIndexHtml) {
-    console.log(
-      '[testFixAgent] React project is missing public/index.html — injecting default file.'
-    );
+    debug('testFixAgent:ensureReactPublicIndexHtml', 'React project is missing public/index.html — injecting default file.');
     const targetPath = path.join(workspaceDir, 'public', 'index.html');
     await fs.mkdir(path.dirname(targetPath), { recursive: true });
     await fs.writeFile(targetPath, DEFAULT_PUBLIC_INDEX_HTML, 'utf8');
@@ -159,16 +159,14 @@ export async function testFixAgent(input: {
   files?: GeneratedFile[];
   workspaceDir?: string;
 }) {
-  if (process.env.NODE_ENV !== 'production') {
-    console.log('[testFixAgent] called with:', input);
-  }
+  debug('testFixAgent', { workspaceDir: input.workspaceDir });
 
   // Pre-build validation: ensure React projects have public/index.html
   if (input.files && input.workspaceDir) {
     try {
       await ensureReactPublicIndexHtml(input.files, input.workspaceDir);
     } catch (err) {
-      console.warn('[testFixAgent] Pre-build validation warning:', err);
+      logWarn('testFixAgent:pre-build-react-validation', err);
     }
   }
 
@@ -188,7 +186,7 @@ export async function testFixAgent(input: {
         }
       }
     } catch (err) {
-      console.warn('[testFixAgent] Package.json validation warning:', err);
+      logWarn('testFixAgent:package-json-validation', err);
     }
   }
 
@@ -196,26 +194,20 @@ export async function testFixAgent(input: {
   let result: { success: boolean; logs: string } | undefined;
   try {
     do {
-      if (process.env.NODE_ENV !== 'production') {
-        console.log(`[testFixAgent] Attempt ${retries + 1}`);
-      }
+      debug('testFixAgent:attempt', { attempt: retries + 1 });
       result = await input.buildFn();
-      if (process.env.NODE_ENV !== 'production') {
-        console.log('[testFixAgent] buildFn result:', result);
-      }
+      debug('testFixAgent:buildFn-result', { result });
       if (result.success) {
-        if (process.env.NODE_ENV !== 'production') {
-          console.log('[testFixAgent] Success:', { ...result, fixed: retries > 0 });
-        }
+        debug('testFixAgent:success', { fixed: retries > 0 });
         return { ...result, fixed: retries > 0 };
       }
       // Attempt LLM-based fix before retrying
       if (input.fixFn && retries < 2) {
-        console.log(`[testFixAgent] Build failed, attempting fix (retry ${retries + 1})...`);
+        debug('testFixAgent:fix-attempt', { retry: retries + 1 });
         try {
           await input.fixFn(result.logs);
         } catch (fixErr) {
-          console.error('[testFixAgent] fixFn error:', fixErr);
+          logError('testFixAgent:fixFn', fixErr);
         }
       }
       retries++;
@@ -223,7 +215,7 @@ export async function testFixAgent(input: {
     const lastLogs = result?.logs || 'No build output captured.';
     throw new Error(`Build failed after 3 attempts. Last error:\n${lastLogs.slice(-2000)}`);
   } catch (err) {
-    console.error('[testFixAgent] error:', err);
+    logError('testFixAgent', err);
     throw err;
   }
 }
