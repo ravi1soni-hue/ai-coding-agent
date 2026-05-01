@@ -12,6 +12,7 @@ interface VercelFile {
 interface VercelFilePayload {
   file: string;
   data: string;
+  encoding: 'base64';
 }
 interface DeployToVercelOptions {
   buildDir?: string;
@@ -55,17 +56,32 @@ export async function deployToVercel({ buildDir = '../../frontend/dist', project
 
   const resolvedBuildDir = path.isAbsolute(buildDir) ? buildDir : path.resolve(__dirname, buildDir);
   const files = getFiles(resolvedBuildDir);
-  const fileList: VercelFilePayload[] = files.map((f: VercelFile): VercelFilePayload => ({ file: f.file, data: f.data.toString('base64') }));
+  const fileList: VercelFilePayload[] = files.map((f: VercelFile): VercelFilePayload => ({ file: f.file, data: f.data.toString('base64'), encoding: 'base64' }));
+
+  // Vercel requires lowercase project names (alphanumeric + hyphens only)
+  const sanitizedProjectName = projectName.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 100);
 
   // Prepare the deployment payload.
   // Do NOT pass a fixed projectId — let Vercel find or create a project by name.
   // This ensures each user project gets its own isolated Vercel project.
   const payload: Record<string, unknown> = {
-    name: projectName,
-    files: fileList.map((f: VercelFilePayload): VercelFilePayload => ({ file: f.file, data: f.data })),
+    name: sanitizedProjectName,
+    files: fileList,
     target: 'production',
-    meta: meta || undefined
+    meta: (meta && Object.keys(meta).length > 0) ? meta : undefined,
+    // Required by Vercel v13 API for new projects
+    projectSettings: {
+      framework: null,
+      buildCommand: null,
+      devCommand: null,
+      installCommand: null,
+      outputDirectory: null
+    }
   };
+
+  // Build query params — skipAutoDetectionConfirmation avoids the missing_project_settings error
+  const queryParams: Record<string, string> = { skipAutoDetectionConfirmation: '1' };
+  if (VERCEL_TEAM_ID) queryParams.teamId = VERCEL_TEAM_ID;
 
   // Call Vercel Deployments API
   let response;
@@ -74,7 +90,7 @@ export async function deployToVercel({ buildDir = '../../frontend/dist', project
       'https://api.vercel.com/v13/deployments',
       payload,
       {
-        params: VERCEL_TEAM_ID ? { teamId: VERCEL_TEAM_ID } : undefined,
+        params: queryParams,
         headers: {
           Authorization: `Bearer ${VERCEL_ACCESS_TOKEN}`,
           'Content-Type': 'application/json'
@@ -101,7 +117,7 @@ export async function deployToVercel({ buildDir = '../../frontend/dist', project
     url: response.data.url,
     inspectUrl: response.data.inspectorUrl || null,
     deploymentId: response.data.id,
-    status: response.data.readyState || 'READY',
+    status: response.data.readyState || response.data.status || 'READY',
     logUrl: response.data.inspectorUrl || null,
   };
 }
