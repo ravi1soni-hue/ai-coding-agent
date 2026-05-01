@@ -57,8 +57,18 @@ async function hasTestScript(workspaceDir) {
 }
 async function installDependencies(workspaceDir) {
     const lockPath = path_1.default.join(workspaceDir, 'package-lock.json');
-    const installCommand = await fileExists(lockPath) ? ['ci', '--no-audit', '--no-fund'] : ['install', '--no-audit', '--no-fund'];
-    return runCommand('npm', installCommand, workspaceDir, 5 * 60000);
+    if (await fileExists(lockPath)) {
+        const ciResult = await runCommand('npm', ['ci', '--no-audit', '--no-fund'], workspaceDir, 5 * 60000);
+        if (ciResult.code === 0) {
+            return ciResult;
+        }
+        const fallbackResult = await runCommand('npm', ['install', '--no-audit', '--no-fund'], workspaceDir, 5 * 60000);
+        return {
+            code: fallbackResult.code,
+            output: `${ciResult.output.trim()}\n\n--- npm ci failed, falling back to npm install ---\n\n${fallbackResult.output.trim()}`,
+        };
+    }
+    return runCommand('npm', ['install', '--no-audit', '--no-fund'], workspaceDir, 5 * 60000);
 }
 async function buildWorkspace(workspaceDir) {
     return runCommand('npm', ['run', 'build'], workspaceDir, 5 * 60000);
@@ -86,6 +96,15 @@ async function runBuildWorker(payload) {
         logs.push(buildResult.output.trim());
         if (buildResult.code !== 0) {
             return { success: false, logs: logs.join('\n\n') };
+        }
+        const hasFrontendTest = await hasTestScript(frontendDir);
+        if (hasFrontendTest) {
+            const testResult = await runCommand('npm', ['test', '--', '--watch=false'], frontendDir, 5 * 60000);
+            logs.push('$ npm test -- --watch=false (frontend)');
+            logs.push(testResult.output.trim());
+            if (testResult.code !== 0) {
+                return { success: false, logs: logs.join('\n\n') };
+            }
         }
         frontendBuildDir = path_1.default.join(frontendDir, 'dist');
         // Verify the build output directory actually exists

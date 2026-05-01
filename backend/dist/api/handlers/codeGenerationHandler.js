@@ -4,7 +4,7 @@ exports.handleCodeGeneration = handleCodeGeneration;
 const codeGenerationAgent_1 = require("../../agents/codeGenerationAgent");
 const timeout_1 = require("../../utils/timeout");
 const logger_1 = require("../../utils/logger");
-const TIMEOUT_MS = 15000;
+const TIMEOUT_MS = 300000;
 async function handleCodeGeneration(input) {
     (0, logger_1.debug)('handleCodeGeneration', { projectId: input.projectId });
     try {

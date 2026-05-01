@@ -65,8 +65,19 @@ async function hasTestScript(workspaceDir: string): Promise<boolean> {
 
 async function installDependencies(workspaceDir: string): Promise<{ code: number; output: string }> {
   const lockPath = path.join(workspaceDir, 'package-lock.json');
-  const installCommand = await fileExists(lockPath) ? ['ci', '--no-audit', '--no-fund'] : ['install', '--no-audit', '--no-fund'];
-  return runCommand('npm', installCommand, workspaceDir, 5 * 60_000);
+  if (await fileExists(lockPath)) {
+    const ciResult = await runCommand('npm', ['ci', '--no-audit', '--no-fund'], workspaceDir, 5 * 60_000);
+    if (ciResult.code === 0) {
+      return ciResult;
+    }
+    const fallbackResult = await runCommand('npm', ['install', '--no-audit', '--no-fund'], workspaceDir, 5 * 60_000);
+    return {
+      code: fallbackResult.code,
+      output: `${ciResult.output.trim()}\n\n--- npm ci failed, falling back to npm install ---\n\n${fallbackResult.output.trim()}`,
+    };
+  }
+
+  return runCommand('npm', ['install', '--no-audit', '--no-fund'], workspaceDir, 5 * 60_000);
 }
 
 async function buildWorkspace(workspaceDir: string): Promise<{ code: number; output: string }> {
@@ -99,6 +110,16 @@ export async function runBuildWorker(payload: BuildWorkerPayload): Promise<Build
     logs.push(buildResult.output.trim());
     if (buildResult.code !== 0) {
       return { success: false, logs: logs.join('\n\n') };
+    }
+
+    const hasFrontendTest = await hasTestScript(frontendDir);
+    if (hasFrontendTest) {
+      const testResult = await runCommand('npm', ['test', '--', '--watch=false'], frontendDir, 5 * 60_000);
+      logs.push('$ npm test -- --watch=false (frontend)');
+      logs.push(testResult.output.trim());
+      if (testResult.code !== 0) {
+        return { success: false, logs: logs.join('\n\n') };
+      }
     }
 
     frontendBuildDir = path.join(frontendDir, 'dist');

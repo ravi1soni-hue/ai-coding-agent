@@ -49,6 +49,10 @@ export async function deploymentAgent(input: {
         })
       : null;
 
+    if (!vercelResult.url) {
+      throw new Error('Vercel deployment succeeded but did not return a frontend deployment URL.');
+    }
+
     const result = {
       frontend_url: `https://${vercelResult.url}`,
       backend_url: railwayResult?.serviceUrl || null,

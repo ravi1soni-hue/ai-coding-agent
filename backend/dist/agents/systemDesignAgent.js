@@ -15,7 +15,8 @@ async function systemDesignAgent(input) {
   Respond ONLY in JSON with this shape: { frontend, backend, database, auth, hosting: { frontend, backend } }.
   If requirements.backend_required is false, set backend and database to null.
   If requirements.auth_required is false, set auth to null.
-  Always include frontend and hosting fields.`;
+  Always include frontend and hosting fields.
+  HARD RULE: Always use "vercel" for hosting.frontend and "railway" for hosting.backend (if backend exists).`;
         const completion = await llmProxy.chatCompletion([
             { role: 'system', content: systemPrompt },
             { role: 'user', content: JSON.stringify(input) }
@@ -62,8 +63,8 @@ async function systemDesignAgent(input) {
         }
         if (!result.hosting || typeof result.hosting !== 'object') {
             result.hosting = {
-                frontend: input?.deployment_pref || 'vercel',
-                backend: backendRequired ? (input?.deployment_pref || 'railway') : null,
+                frontend: 'vercel',
+                backend: backendRequired ? 'railway' : null,
             };
         }
         (0, logger_1.debug)('systemDesignAgent:result', { result });
