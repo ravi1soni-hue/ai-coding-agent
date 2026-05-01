@@ -17,6 +17,12 @@ class LLMProxyClient {
         // Use util.inspect for deep objects
         console.log(`[LLMProxyClient] ${message}${data ? ': ' + util.inspect(data, { depth: 5 }) : ''}`);
     }
+    shouldRetryStatus(status) {
+        return status === 408 || status === 429 || status >= 500;
+    }
+    async sleep(ms) {
+        await new Promise((resolve) => setTimeout(resolve, ms));
+    }
     buildModelCandidates(primaryModel) {
         const candidates = [
             primaryModel,
@@ -24,10 +30,6 @@ class LLMProxyClient {
             env_1.config.GPT4O_MODEL,
             env_1.config.GPT5_MINI_MODEL,
             env_1.config.GPT5_2_MODEL,
-            'gpt-4o-mini',
-            'gpt-4o',
-            'gpt-5-mini',
-            'gpt-5-2',
         ].filter((m) => typeof m === 'string' && m.trim().length > 0);
         const seen = new Set();
         return candidates.filter((m) => {
@@ -41,13 +43,27 @@ class LLMProxyClient {
         const message = String(err?.message || '').toLowerCase();
         return message.includes('404') && message.includes('model not found');
     }
+    formatHttpError(operation, status, statusText, detail) {
+        const cleanDetail = String(detail || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        if (status >= 500) {
+            return `LLM Proxy ${operation} is temporarily unavailable (${status} ${statusText || 'Server Error'}). Please try again.`;
+        }
+        if (!cleanDetail) {
+            return `LLM Proxy ${operation} failed (${status} ${statusText || 'Request Error'}).`;
+        }
+        return `LLM Proxy ${operation} failed (${status}): ${cleanDetail.slice(0, 200)}`;
+    }
     async chatCompletion(messages, model, temperature = 0.8, top_p = 0.9, max_tokens = 1000) {
-        const selectedModel = model || env_1.config.GPT4O_MINI_MODEL || 'gpt-4o-mini';
+        const selectedModel = model || 'gpt-4o-mini';
+        if (!this.apiKey || this.apiKey.trim().length < 3) {
+            this.log('chatCompletion called without valid API key', { model: selectedModel, apiKeyLength: this.apiKey?.length || 0 });
+            throw new Error(`LLM Proxy chatCompletion failed: No valid API key configured for model "${selectedModel}". Check your environment variables for API_KEY settings.`);
+        }
         const modelCandidates = this.buildModelCandidates(selectedModel);
         this.log('chatCompletion called', {
             model: selectedModel,
             modelCandidates,
-            messages,
+            messageCount: messages.length,
             temperature,
             top_p,
             max_tokens,
@@ -55,56 +71,92 @@ class LLMProxyClient {
         let lastError;
         for (let i = 0; i < modelCandidates.length; i += 1) {
             const modelCandidate = modelCandidates[i];
-            try {
-                const response = await fetch(this.chatUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-API-KEY': this.apiKey,
-                    },
-                    body: JSON.stringify({ model: modelCandidate, messages, temperature, top_p, max_tokens }),
-                });
-                const raw = await response.text();
-                let data;
+            for (let attempt = 0; attempt < 3; attempt += 1) {
                 try {
-                    data = JSON.parse(raw);
-                }
-                catch (parseErr) {
-                    const snippet = raw.replace(/\s+/g, ' ').slice(0, 1000);
-                    this.log('chatCompletion invalid JSON response', {
-                        status: response.status,
-                        model: modelCandidate,
-                        contentType: response.headers.get('content-type'),
-                        raw: raw.slice(0, 1200),
-                        snippet,
-                        parseError: String(parseErr),
+                    const controller = new AbortController();
+                    const timeout = setTimeout(() => controller.abort(), 90000);
+                    const requestPayload = { model: modelCandidate, messages, temperature, top_p, max_tokens };
+                    this.log('chatCompletion making request', {
+                        attempt: attempt + 1,
+                        modelCandidate,
+                        chatUrl: this.chatUrl,
+                        messageCount: messages.length,
+                        apiKeyLength: this.apiKey?.length || 0,
                     });
-                    if (!response.ok) {
-                        throw new Error(`LLM Proxy chatCompletion failed: ${response.status} ${snippet}`);
+                    const response = await fetch(this.chatUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-API-KEY': this.apiKey,
+                        },
+                        body: JSON.stringify(requestPayload),
+                        signal: controller.signal,
+                    });
+                    clearTimeout(timeout);
+                    const raw = await response.text();
+                    let data;
+                    try {
+                        data = JSON.parse(raw);
                     }
-                    throw new Error(`LLM Proxy returned invalid JSON response: ${snippet}`);
+                    catch (parseErr) {
+                        const snippet = raw.replace(/\s+/g, ' ').slice(0, 240);
+                        const isHtml = raw.trim().toLowerCase().startsWith('<');
+                        this.log('chatCompletion invalid JSON response', {
+                            status: response.status,
+                            statusText: response.statusText,
+                            model: modelCandidate,
+                            contentType: response.headers.get('content-type'),
+                            isHtmlResponse: isHtml,
+                            raw: raw.slice(0, 800),
+                            snippet,
+                            parseError: String(parseErr),
+                            chatUrl: this.chatUrl,
+                            apiKeyLength: this.apiKey?.length || 0,
+                        });
+                        if (!response.ok || isHtml) {
+                            const urlHint = isHtml ? ` (Check LLM_PROXY_CHAT_URL: ${this.chatUrl})` : '';
+                            const authHint = response.status === 401 || response.status === 403 ? ' (Authentication may have failed)' : '';
+                            if (this.shouldRetryStatus(response.status) && attempt < 2) {
+                                await this.sleep(750 * (attempt + 1));
+                                continue;
+                            }
+                            throw new Error(`LLM Proxy chatCompletion returned HTML (${response.status} ${response.statusText})${authHint}${urlHint}. ${snippet}`);
+                        }
+                        throw new Error(`LLM Proxy returned invalid JSON response: ${snippet}`);
+                    }
+                    this.log('chatCompletion response', { status: response.status, model: modelCandidate, data });
+                    if (!response.ok) {
+                        this.log('chatCompletion error', { status: response.status, model: modelCandidate, data });
+                        if (this.shouldRetryStatus(response.status) && attempt < 2) {
+                            await this.sleep(750 * (attempt + 1));
+                            continue;
+                        }
+                        throw new Error(this.formatHttpError('chatCompletion', response.status, response.statusText, data?.error?.message || data?.message || JSON.stringify(data).slice(0, 240)));
+                    }
+                    if (modelCandidate !== selectedModel) {
+                        this.log('chatCompletion recovered with fallback model', { selectedModel, fallbackModel: modelCandidate });
+                    }
+                    return data;
                 }
-                this.log('chatCompletion response', { status: response.status, model: modelCandidate, data });
-                if (!response.ok) {
-                    this.log('chatCompletion error', { status: response.status, model: modelCandidate, data });
-                    throw new Error(`LLM Proxy chatCompletion failed: ${response.status} ${JSON.stringify(data)}`);
-                }
-                if (modelCandidate !== selectedModel) {
-                    this.log('chatCompletion recovered with fallback model', { selectedModel, fallbackModel: modelCandidate });
-                }
-                return data;
-            }
-            catch (err) {
-                lastError = err;
-                if (!this.isModelNotFoundError(err) || i === modelCandidates.length - 1) {
+                catch (err) {
+                    lastError = err;
+                    const retryableNetworkErr = err?.name === 'AbortError' || /network|timeout|fetch failed/i.test(String(err?.message || ''));
+                    if (retryableNetworkErr && attempt < 2) {
+                        this.log('chatCompletion retrying same model after network error', { modelCandidate, attempt, reason: err?.message });
+                        await this.sleep(750 * (attempt + 1));
+                        continue;
+                    }
+                    if (this.isModelNotFoundError(err) && i < modelCandidates.length - 1) {
+                        this.log('chatCompletion retrying with next model candidate', {
+                            failedModel: modelCandidate,
+                            nextModel: modelCandidates[i + 1],
+                            reason: err?.message,
+                        });
+                        break;
+                    }
                     this.log('chatCompletion FETCH ERROR', err);
                     throw err;
                 }
-                this.log('chatCompletion retrying with next model candidate', {
-                    failedModel: modelCandidate,
-                    nextModel: modelCandidates[i + 1],
-                    reason: err?.message,
-                });
             }
         }
         // Defensive fallback, loop should have already returned or thrown.

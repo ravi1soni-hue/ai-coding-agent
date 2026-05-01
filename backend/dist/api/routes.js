@@ -7,9 +7,13 @@ const authService_1 = require("../auth/authService");
 const projectStore_1 = require("../db/projectStore");
 const buildWorker_1 = require("../workers/buildWorker");
 const deploymentAgent_1 = require("../agents/deploymentAgent");
+const redis_1 = require("../cache/redis");
 const jobQueue = new jobQueue_1.JobQueue(async (job) => {
     console.log('[jobQueue] processed', job.id, job.payload);
 });
+function deploymentStatusKey(sessionId) {
+    return `session:${sessionId}:status`;
+}
 async function registerRoutes(fastify) {
     async function requireUser(req, reply) {
         const cookies = (0, authService_1.parseCookie)(req.headers.cookie);
@@ -135,6 +139,7 @@ async function registerRoutes(fastify) {
                 backendDir: buildResult.backendDir,
                 frontendProjectName: `proj-${projectId.slice(0, 10)}`,
                 backendService: `backend-${projectId.slice(0, 10)}`,
+                hasBackend: Boolean(buildResult.backendDir),
             });
             await (0, projectStore_1.saveProjectDeployment)({
                 projectId,
@@ -199,5 +204,123 @@ async function registerRoutes(fastify) {
         const job = req.body;
         await jobQueue.addJob(job);
         return { status: 'job_queued' };
+    });
+    fastify.post('/confirm-project', async (req, reply) => {
+        const user = await requireUser(req, reply);
+        if (!user)
+            return;
+        const body = (req.body ?? {});
+        const sessionId = (body.sessionId || body.projectId || '').trim();
+        if (!sessionId) {
+            return reply.status(400).send({ error: 'sessionId is required.' });
+        }
+        await (0, redis_1.setCacheJson)(deploymentStatusKey(sessionId), {
+            sessionId,
+            status: 'queued',
+            stage: 'queued',
+            updatedAt: new Date().toISOString(),
+        }, 60 * 60 * 24);
+        await jobQueue.addJob({
+            type: 'confirm-project',
+            userId: user.id,
+            sessionId,
+            run: async () => {
+                await (0, redis_1.setCacheJson)(deploymentStatusKey(sessionId), {
+                    sessionId,
+                    status: 'running',
+                    stage: 'build',
+                    updatedAt: new Date().toISOString(),
+                }, 60 * 60 * 24);
+                const revision = await (0, projectStore_1.getLatestProjectCodeRevision)({ projectId: sessionId, userId: user.id });
+                if (!revision) {
+                    await (0, redis_1.setCacheJson)(deploymentStatusKey(sessionId), {
+                        sessionId,
+                        status: 'failed',
+                        stage: 'build',
+                        error: 'No saved code revision found for this project.',
+                        updatedAt: new Date().toISOString(),
+                    }, 60 * 60 * 24);
+                    return;
+                }
+                const buildResult = await (0, buildWorker_1.runBuildWorker)({ workspaceDir: revision.workspace_path });
+                if (!buildResult.success || !buildResult.buildDir) {
+                    await (0, redis_1.setCacheJson)(deploymentStatusKey(sessionId), {
+                        sessionId,
+                        status: 'failed',
+                        stage: 'build',
+                        error: 'Build failed during confirm-project.',
+                        logs: buildResult.logs,
+                        updatedAt: new Date().toISOString(),
+                    }, 60 * 60 * 24);
+                    return;
+                }
+                await (0, redis_1.setCacheJson)(deploymentStatusKey(sessionId), {
+                    sessionId,
+                    status: 'running',
+                    stage: 'deploy',
+                    updatedAt: new Date().toISOString(),
+                }, 60 * 60 * 24);
+                const deployment = await (0, deploymentAgent_1.deploymentAgent)({
+                    projectId: sessionId,
+                    revisionId: revision.id,
+                    buildDir: buildResult.buildDir,
+                    backendDir: buildResult.backendDir,
+                    frontendProjectName: `proj-${sessionId.slice(0, 10)}`,
+                    backendService: `backend-${sessionId.slice(0, 10)}`,
+                    hasBackend: Boolean(buildResult.backendDir),
+                });
+                await (0, projectStore_1.saveProjectDeployment)({
+                    projectId: sessionId,
+                    userId: user.id,
+                    frontendUrl: deployment.frontend_url,
+                    backendUrl: deployment.backend_url,
+                    vercelDeploymentId: deployment.vercel_deployment_id,
+                    vercelInspectUrl: deployment.vercel_inspect_url,
+                    vercelStatus: deployment.vercel_status,
+                    vercelLogUrl: deployment.vercel_log_url,
+                    railwayDeploymentId: deployment.railway_deployment_id,
+                    railwayStatus: deployment.railway_status,
+                    railwayLogUrl: deployment.railway_log_url,
+                    railwayDashboardUrl: deployment.railway_dashboard_url,
+                    codeRevisionId: revision.id,
+                    sourceArchivePath: revision.source_archive_path,
+                    sourceHash: revision.source_hash,
+                    raw: deployment,
+                });
+                await (0, redis_1.setCacheJson)(deploymentStatusKey(sessionId), {
+                    sessionId,
+                    status: 'completed',
+                    stage: 'done',
+                    deployment,
+                    updatedAt: new Date().toISOString(),
+                }, 60 * 60 * 24);
+            },
+        });
+        // best effort asynchronous execution using in-process queue
+        void jobQueue.processJobs().catch(async (err) => {
+            await (0, redis_1.setCacheJson)(deploymentStatusKey(sessionId), {
+                sessionId,
+                status: 'failed',
+                stage: 'error',
+                error: err instanceof Error ? err.message : String(err),
+                updatedAt: new Date().toISOString(),
+            }, 60 * 60 * 24);
+        });
+        return { sessionId, status: 'queued' };
+    });
+    fastify.get('/deployment-status/:sessionId', async (req, reply) => {
+        const user = await requireUser(req, reply);
+        if (!user)
+            return;
+        const params = req.params;
+        const sessionId = (params.sessionId || '').trim();
+        if (!sessionId)
+            return reply.status(400).send({ error: 'sessionId is required.' });
+        const projects = await (0, projectStore_1.listUserProjects)(user.id);
+        const exists = projects.some((p) => p.id === sessionId);
+        if (!exists)
+            return reply.status(404).send({ error: 'Project not found.' });
+        const status = await (0, redis_1.getCacheJson)(deploymentStatusKey(sessionId));
+        return { sessionId, status: status || { status: 'unknown', stage: 'unknown' } };
     });
 }

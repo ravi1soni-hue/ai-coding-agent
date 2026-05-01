@@ -23,7 +23,12 @@ class JobQueue {
                     if (!this.processor) {
                         throw new Error('JobQueue processor is not configured. Cannot process queued jobs.');
                     }
-                    await this.processor(job);
+                    if (typeof job.payload?.run === 'function') {
+                        await job.payload.run();
+                    }
+                    else {
+                        await this.processor(job);
+                    }
                 }
             }
         }

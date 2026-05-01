@@ -5,6 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.deploymentAgent = deploymentAgent;
 const axios_1 = __importDefault(require("axios"));
+const fs_1 = __importDefault(require("fs"));
 const vercelDeploy_1 = require("./vercelDeploy");
 const railwayDeploy_1 = require("../deploy/railwayDeploy");
 async function deploymentAgent(input) {
@@ -27,23 +28,29 @@ async function deploymentAgent(input) {
                 revisionId: input.revisionId,
             },
         });
-        const railwayResult = await (0, railwayDeploy_1.deployToRailway)(input.backendService, {
-            source: 'deploymentAgent',
-            projectId: input.projectId,
-            revisionId: input.revisionId,
-            sourceDir: input.backendDir,
-        });
+        const backendService = input.backendService || `backend-${input.projectId.slice(0, 10)}`;
+        const backendRequested = input.hasBackend !== false;
+        const backendDirLooksValid = Boolean(input.backendDir && fs_1.default.existsSync(input.backendDir) && fs_1.default.existsSync(`${input.backendDir}/package.json`));
+        const shouldDeployBackend = backendRequested && backendDirLooksValid;
+        const railwayResult = shouldDeployBackend
+            ? await (0, railwayDeploy_1.deployToRailway)(backendService, {
+                source: 'deploymentAgent',
+                projectId: input.projectId,
+                revisionId: input.revisionId,
+                sourceDir: input.backendDir,
+            })
+            : null;
         const result = {
             frontend_url: `https://${vercelResult.url}`,
-            backend_url: railwayResult.serviceUrl,
+            backend_url: railwayResult?.serviceUrl || null,
             vercel_deployment_id: vercelResult.deploymentId,
             vercel_inspect_url: vercelResult.inspectUrl,
             vercel_status: vercelResult.status,
             vercel_log_url: vercelResult.logUrl,
-            railway_deployment_id: railwayResult.deploymentId,
-            railway_status: railwayResult.status,
-            railway_log_url: railwayResult.logUrl,
-            railway_dashboard_url: railwayResult.dashboardUrl,
+            railway_deployment_id: railwayResult?.deploymentId || null,
+            railway_status: railwayResult?.status || (shouldDeployBackend ? 'failed' : 'skipped'),
+            railway_log_url: railwayResult?.logUrl || null,
+            railway_dashboard_url: railwayResult?.dashboardUrl || null,
             frontend_accessible: true,
             frontend_access_warning: null,
         };

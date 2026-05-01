@@ -71,12 +71,17 @@ export class LLMProxyClient {
   }
 
   async chatCompletion(messages: any[], model: string, temperature = 0.8, top_p = 0.9, max_tokens = 1000): Promise<any> {
-    const selectedModel = model || config.GPT4O_MINI_MODEL || 'gpt-4o-mini';
+    const selectedModel = model || 'gpt-4o-mini';
+    if (!this.apiKey || this.apiKey.trim().length < 3) {
+      this.log('chatCompletion called without valid API key', { model: selectedModel, apiKeyLength: this.apiKey?.length || 0 });
+      throw new Error(`LLM Proxy chatCompletion failed: No valid API key configured for model "${selectedModel}". Check your environment variables for API_KEY settings.`);
+    }
+    
     const modelCandidates = this.buildModelCandidates(selectedModel);
     this.log('chatCompletion called', {
       model: selectedModel,
       modelCandidates,
-      messages,
+      messageCount: messages.length,
       temperature,
       top_p,
       max_tokens,
@@ -90,13 +95,23 @@ export class LLMProxyClient {
         try {
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), 90_000);
+          
+          const requestPayload = { model: modelCandidate, messages, temperature, top_p, max_tokens };
+          this.log('chatCompletion making request', {
+            attempt: attempt + 1,
+            modelCandidate,
+            chatUrl: this.chatUrl,
+            messageCount: messages.length,
+            apiKeyLength: this.apiKey?.length || 0,
+          });
+          
           const response = await fetch(this.chatUrl, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
               'X-API-KEY': this.apiKey,
             },
-            body: JSON.stringify({ model: modelCandidate, messages, temperature, top_p, max_tokens }),
+            body: JSON.stringify(requestPayload),
             signal: controller.signal,
           });
           clearTimeout(timeout);
@@ -106,20 +121,27 @@ export class LLMProxyClient {
             data = JSON.parse(raw);
           } catch (parseErr) {
             const snippet = raw.replace(/\s+/g, ' ').slice(0, 240);
+            const isHtml = raw.trim().toLowerCase().startsWith('<');
             this.log('chatCompletion invalid JSON response', {
               status: response.status,
+              statusText: response.statusText,
               model: modelCandidate,
               contentType: response.headers.get('content-type'),
-              raw: raw.slice(0, 1200),
+              isHtmlResponse: isHtml,
+              raw: raw.slice(0, 800),
               snippet,
               parseError: String(parseErr),
+              chatUrl: this.chatUrl,
+              apiKeyLength: this.apiKey?.length || 0,
             });
-            if (!response.ok) {
+            if (!response.ok || isHtml) {
+              const urlHint = isHtml ? ` (Check LLM_PROXY_CHAT_URL: ${this.chatUrl})` : '';
+              const authHint = response.status === 401 || response.status === 403 ? ' (Authentication may have failed)' : '';
               if (this.shouldRetryStatus(response.status) && attempt < 2) {
                 await this.sleep(750 * (attempt + 1));
                 continue;
               }
-              throw new Error(this.formatHttpError('chatCompletion', response.status, response.statusText, snippet));
+              throw new Error(`LLM Proxy chatCompletion returned HTML (${response.status} ${response.statusText})${authHint}${urlHint}. ${snippet}`);
             }
             throw new Error(`LLM Proxy returned invalid JSON response: ${snippet}`);
           }

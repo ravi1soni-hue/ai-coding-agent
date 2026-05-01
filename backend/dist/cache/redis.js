@@ -8,6 +8,8 @@ exports.getRedis = getRedis;
 exports.setCache = setCache;
 exports.getCache = getCache;
 exports.closeRedis = closeRedis;
+exports.setCacheJson = setCacheJson;
+exports.getCacheJson = getCacheJson;
 const env_1 = require("../config/env");
 const ioredis_1 = __importDefault(require("ioredis"));
 let redis = null;
@@ -46,4 +48,18 @@ async function closeRedis() {
     if (redis)
         await redis.quit();
     redis = null;
+}
+async function setCacheJson(key, value, ttlSeconds) {
+    await setCache(key, JSON.stringify(value), ttlSeconds);
+}
+async function getCacheJson(key) {
+    const raw = await getCache(key);
+    if (!raw)
+        return null;
+    try {
+        return JSON.parse(raw);
+    }
+    catch {
+        return null;
+    }
 }

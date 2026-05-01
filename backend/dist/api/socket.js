@@ -14,6 +14,17 @@ const buildWorker_1 = require("../workers/buildWorker");
 const authService_1 = require("../auth/authService");
 const projectStore_1 = require("../db/projectStore");
 const projectFactory_1 = require("../factory/projectFactory");
+const env_1 = require("../config/env");
+function toClientErrorMessage(err, fallback) {
+    const raw = String(err?.message || '').trim();
+    if (!raw)
+        return fallback;
+    const sanitized = raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (/<!doctype|<html|<head|<body/i.test(raw) || sanitized.length > 280) {
+        return fallback;
+    }
+    return sanitized;
+}
 function createSocketServer(server) {
     const wss = new ws_1.Server({ server });
     // Track projectIds with an active running pipeline to prevent concurrent corruption
@@ -50,6 +61,16 @@ function createSocketServer(server) {
         ws.send(JSON.stringify(payload));
     }
     wss.on('connection', async (ws, request) => {
+        const allowedOrigins = env_1.config.WS_ALLOWED_ORIGINS
+            .split(',')
+            .map((o) => o.trim())
+            .filter(Boolean);
+        const origin = request.headers.origin || '';
+        if (allowedOrigins.length > 0 && (!origin || !allowedOrigins.includes(origin))) {
+            ws.send(JSON.stringify({ type: 'error', message: 'WebSocket origin is not allowed.' }));
+            ws.close();
+            return;
+        }
         const cookies = (0, authService_1.parseCookie)(request.headers.cookie);
         const token = cookies.sid;
         if (!token) {
@@ -254,7 +275,7 @@ function createSocketServer(server) {
                         }
                     }
                     catch (err) {
-                        ws.send(JSON.stringify({ type: 'error', message: err?.message || 'Clarification failed.', error: { name: err?.name, stack: err?.stack, details: err } }));
+                        ws.send(JSON.stringify({ type: 'error', message: toClientErrorMessage(err, 'Clarification failed. Please try again.') }));
                         return;
                     }
                 }
@@ -285,7 +306,7 @@ function createSocketServer(server) {
                         session.step = 'codeGen';
                     }
                     catch (err) {
-                        ws.send(JSON.stringify({ type: 'error', message: err?.message || 'System design failed.', error: { name: err?.name, stack: err?.stack, details: err } }));
+                        ws.send(JSON.stringify({ type: 'error', message: toClientErrorMessage(err, 'System design failed. Please try again.') }));
                         return;
                     }
                 }
@@ -319,7 +340,7 @@ function createSocketServer(server) {
                         session.step = 'testFix';
                     }
                     catch (err) {
-                        ws.send(JSON.stringify({ type: 'error', message: err?.message || 'Code generation failed.', error: { name: err?.name, stack: err?.stack, details: err } }));
+                        ws.send(JSON.stringify({ type: 'error', message: toClientErrorMessage(err, 'Code generation failed. Please try again.') }));
                         return;
                     }
                 }
@@ -367,7 +388,7 @@ function createSocketServer(server) {
                         session.step = 'deploy';
                     }
                     catch (err) {
-                        ws.send(JSON.stringify({ type: 'error', message: err?.message || 'Test/fix failed.', error: { name: err?.name, stack: err?.stack, details: err } }));
+                        ws.send(JSON.stringify({ type: 'error', message: toClientErrorMessage(err, 'Test/fix failed. Please try again.') }));
                         return;
                     }
                 }
@@ -384,6 +405,7 @@ function createSocketServer(server) {
                             buildDir: session.buildDir,
                             frontendProjectName: `proj-${projectId.slice(0, 10)}`,
                             backendService: 'backend',
+                            hasBackend: Boolean(session.systemDesign?.backend),
                         });
                         await (0, projectStore_1.saveProjectDeployment)({
                             projectId,
@@ -558,7 +580,7 @@ function createSocketServer(server) {
                     session.step = 'testFix_modification';
                 }
                 catch (err) {
-                    ws.send(JSON.stringify({ type: 'error', message: err?.message || 'Code generation for modification failed.', error: { name: err?.name, stack: err?.stack, details: err } }));
+                    ws.send(JSON.stringify({ type: 'error', message: toClientErrorMessage(err, 'Code generation for modification failed. Please try again.') }));
                     return;
                 }
             }
@@ -604,7 +626,7 @@ function createSocketServer(server) {
                     session.step = 'deploy_modification';
                 }
                 catch (err) {
-                    ws.send(JSON.stringify({ type: 'error', message: err?.message || 'Test/fix for modification failed.', error: { name: err?.name, stack: err?.stack, details: err } }));
+                    ws.send(JSON.stringify({ type: 'error', message: toClientErrorMessage(err, 'Test/fix for modification failed. Please try again.') }));
                     return;
                 }
             }
@@ -621,6 +643,7 @@ function createSocketServer(server) {
                         buildDir: session.buildDir,
                         frontendProjectName: `proj-${projectId.slice(0, 10)}`,
                         backendService: 'backend',
+                        hasBackend: Boolean(session.systemDesign?.backend),
                     });
                     await (0, projectStore_1.saveProjectDeployment)({
                         projectId,
@@ -650,7 +673,7 @@ function createSocketServer(server) {
                     session.step = 'done_modification';
                 }
                 catch (err) {
-                    ws.send(JSON.stringify({ type: 'error', message: err?.message || 'Deployment for modification failed.', error: { name: err?.name, stack: err?.stack } }));
+                    ws.send(JSON.stringify({ type: 'error', message: toClientErrorMessage(err, 'Deployment for modification failed. Please try again.') }));
                     return;
                 }
             }
