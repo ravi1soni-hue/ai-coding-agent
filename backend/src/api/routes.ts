@@ -164,6 +164,7 @@ export async function registerRoutes(fastify: FastifyInstance) {
         backendDir: buildResult.backendDir,
         frontendProjectName: `proj-${projectId.slice(0, 10)}`,
         backendService: `backend-${projectId.slice(0, 10)}`,
+        hasBackend: Boolean(buildResult.backendDir),
       });
 
       await saveProjectDeployment({
