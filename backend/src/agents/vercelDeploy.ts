@@ -39,6 +39,9 @@ export async function deployToVercel({ buildDir = '../../frontend/dist', project
   if (!VERCEL_ACCESS_TOKEN) throw new Error('VERCEL_ACCESS_TOKEN is not set. Configure it in Railway environment variables.');
   // Read all files in the build directory recursively
   function getFiles(dir: string, base: string = dir): VercelFile[] {
+    if (!fs.existsSync(dir)) {
+      throw new Error(`Directory does not exist: ${dir}`);
+    }
     let files: VercelFile[] = [];
     for (const file of fs.readdirSync(dir)) {
       const fullPath: string = path.join(dir, file);
@@ -55,6 +58,9 @@ export async function deployToVercel({ buildDir = '../../frontend/dist', project
   }
 
   const resolvedBuildDir = path.isAbsolute(buildDir) ? buildDir : path.resolve(__dirname, buildDir);
+  if (!fs.existsSync(resolvedBuildDir)) {
+    throw new Error(`Build directory does not exist: ${resolvedBuildDir}. Frontend build may have failed or output directory is incorrect.`);
+  }
   const files = getFiles(resolvedBuildDir);
   const fileList: VercelFilePayload[] = files.map((f: VercelFile): VercelFilePayload => ({ file: f.file, data: f.data.toString('base64'), encoding: 'base64' }));
 
@@ -103,7 +109,7 @@ export async function deployToVercel({ buildDir = '../../frontend/dist', project
       const details = typeof err.response?.data === 'string'
         ? err.response.data
         : JSON.stringify(err.response?.data || {});
-      throw new Error(`Vercel deployment failed: ${status} ${details}`);
+      throw new Error(`Vercel API request failed for project "${sanitizedProjectName}": HTTP ${status} — ${details}`);
     }
     throw err;
   }
