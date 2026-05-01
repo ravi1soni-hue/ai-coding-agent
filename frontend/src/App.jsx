@@ -352,8 +352,6 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
                   </svg>
                 </button>
               </div>
-              {redeployStatus ? <div className="historyNotice success">{redeployStatus}</div> : null}
-              {redeployError ? <div className="historyNotice error">{redeployError}</div> : null}
             </div>
           </div>
 
