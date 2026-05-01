@@ -130,6 +130,7 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
   const [connection, setConnection] = useState('connecting');
   const [statusText, setStatusText] = useState('Initializing');
   const [progress, setProgress] = useState(0);
+  const [stageStatus, setStageStatus] = useState('');
   const [input, setInput] = useState('');
   const [todayText, setTodayText] = useState('');
   const [messages, setMessages] = useState([]);
@@ -144,6 +145,7 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
     // Reset visible chat state when project context changes so messages never leak across projects.
     setMessages([]);
     setProgress(0);
+    setStageStatus('');
     setStatusText('Initializing');
     setInput('');
 
@@ -226,6 +228,11 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
         case 'progress':
           setProgress(Math.max(0, Math.min(1, Number(payload.progress) || 0)));
           setStatusText(payload.status || 'Working');
+          if (typeof payload.stageProgress === 'number') {
+            setStageStatus(`${payload.stage || 'Stage'} ${Math.round(payload.stageProgress * 100)}%`);
+          } else {
+            setStageStatus('');
+          }
           break;
         case 'stream':
           pushMessage('assistant', payload.token || '');
@@ -362,6 +369,11 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
             </span>
             <span className="socketPct">{Math.round(progress * 100)}%</span>
           </div>
+          {stageStatus ? (
+            <div className="socketSubStatus" title={stageStatus}>
+              {stageStatus}
+            </div>
+          ) : null}
 
           <div className="buildHint">Describe what to build and follow live progress below.</div>
 

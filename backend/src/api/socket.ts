@@ -27,6 +27,39 @@ export function createSocketServer(server: http.Server) {
   // Track projectIds with an active running pipeline to prevent concurrent corruption
   const activePipelines = new Set<string>();
 
+  const stageWeights: Record<string, number> = {
+    requirementAnalysis: 0.12,
+    clarification: 0.15,
+    confirmation: 0.08,
+    systemDesign: 0.12,
+    codeGen: 0.25,
+    testFix: 0.15,
+    deploy: 0.13,
+    codeGen_modification: 0.25,
+    testFix_modification: 0.15,
+    deploy_modification: 0.13,
+  };
+
+  function applyStageProgress(session: any, stage: string) {
+    if (session.progressStages[stage]) return;
+    session.progressStages[stage] = true;
+    session.progress = Math.min(1, session.progress + (stageWeights[stage] || 0));
+  }
+
+  function sendProgress(ws: any, session: any, stage: string, status: string, stageProgress?: number) {
+    applyStageProgress(session, stage);
+    const payload: any = {
+      type: 'progress',
+      progress: Number(session.progress.toFixed(4)),
+      status,
+      stage,
+    };
+    if (typeof stageProgress === 'number') {
+      payload.stageProgress = Math.max(0, Math.min(1, stageProgress));
+    }
+    ws.send(JSON.stringify(payload));
+  }
+
   wss.on('connection', async (ws, request) => {
     const cookies = parseCookie(request.headers.cookie);
     const token = cookies.sid;
@@ -153,6 +186,7 @@ export function createSocketServer(server: http.Server) {
       sourceHash?: string;
       buildDir?: string;
       codeRevisionDbId?: string;
+      progressStages: Record<string, boolean>;
     };
     const session: Session = {
       progress: Number(snapshot?.progress) || 0,
@@ -174,11 +208,13 @@ export function createSocketServer(server: http.Server) {
       sourceHash: undefined,
       buildDir: undefined,
       codeRevisionDbId: undefined,
+      progressStages: {},
     };
 
     if (session.step === 'done' || session.step === 'done_modification') {
       session.step = 'init';
       session.progress = 0;
+      session.progressStages = {};
     }
 
     // Track answers for step-by-step clarification
@@ -201,8 +237,7 @@ export function createSocketServer(server: http.Server) {
       try {
         // Step 1: Requirement Analysis
         if (session.step === 'init' || session.step === 'requirementAnalysis') {
-          session.progress += 0.12;
-          ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Analyzing requirements...' }));
+          sendProgress(ws, session, 'requirementAnalysis', 'Analyzing requirements...');
           try {
             if (!userMsg) throw new Error('User message required for requirement analysis');
             session.requirements = await requirementAnalysisAgent({ user_message: userMsg });
@@ -219,8 +254,7 @@ export function createSocketServer(server: http.Server) {
 
         // Step 2: Clarification (multi-turn)
         while (session.step === 'clarification') {
-          session.progress += 0.12;
-          ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Clarifying requirements...' }));
+          sendProgress(ws, session, 'clarification', 'Clarifying requirements...');
           try {
             // Always wrap requirements in an object as expected by clarificationAgent
             let clarInput = {
@@ -275,8 +309,7 @@ export function createSocketServer(server: http.Server) {
 
         // Step 3: Confirmation Gate (multi-turn)
         while (session.step === 'confirmation') {
-          session.progress += 0.12;
-          ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Confirming requirements...' }));
+          sendProgress(ws, session, 'confirmation', 'Confirming requirements...');
           try {
             if (!session.clarifications) throw new Error('Clarifications required for confirmation');
             session.confirmation = await confirmationGate(session.clarifications);
@@ -292,8 +325,7 @@ export function createSocketServer(server: http.Server) {
 
         // Step 4: System Design
         if (session.step === 'systemDesign') {
-          session.progress += 0.12;
-          ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Designing system...' }));
+          sendProgress(ws, session, 'systemDesign', 'Designing system...');
           try {
             session.systemDesign = await systemDesignAgent(session.requirements);
             console.log('[SYSTEM DESIGN]', session.systemDesign);
@@ -307,10 +339,9 @@ export function createSocketServer(server: http.Server) {
 
         // Step 5: Code Generation
         if (session.step === 'codeGen') {
-          session.progress += 0.12;
-          ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Generating code...' }));
+          sendProgress(ws, session, 'codeGen', 'Generating code...', 0);
           try {
-            session.codeGen = await codeGenerationAgent(session.systemDesign);
+            session.codeGen = await codeGenerationAgent({ systemDesign: session.systemDesign, requirements: session.requirements });
             const materialized = await materializeProjectWorkspace({
               projectId,
               codeGen: session.codeGen,
@@ -331,6 +362,7 @@ export function createSocketServer(server: http.Server) {
               generationPayload: session.codeGen,
             });
             console.log('[CODE GEN]', session.codeGen);
+            sendProgress(ws, session, 'codeGen', 'Code generation complete.', 1);
             ws.send(JSON.stringify({ type: 'stream', token: 'Code generated! Running tests and fixes...' }));
             session.step = 'testFix';
           } catch (err) {
@@ -341,8 +373,7 @@ export function createSocketServer(server: http.Server) {
 
         // Step 6: Test & Fix
         if (session.step === 'testFix') {
-          session.progress += 0.12;
-          ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Testing and fixing...' }));
+          sendProgress(ws, session, 'testFix', 'Testing and fixing...', 0);
           try {
             session.testResult = await testFixAgent({
               buildFn: async () => {
@@ -379,6 +410,7 @@ export function createSocketServer(server: http.Server) {
               },
             });
             console.log('[TEST RESULT]', session.testResult);
+            sendProgress(ws, session, 'testFix', 'Testing complete.', 1);
             ws.send(JSON.stringify({ type: 'stream', token: 'Tests complete! Deploying your project...' }));
             session.step = 'deploy';
           } catch (err) {
@@ -389,7 +421,7 @@ export function createSocketServer(server: http.Server) {
 
         // Step 7: Deployment
         if (session.step === 'deploy') {
-          ws.send(JSON.stringify({ type: 'progress', progress: 1, status: 'Deploying...' }));
+          sendProgress(ws, session, 'deploy', 'Deploying...', 0);
           try {
             if (!session.buildDir || !session.activeRevisionId) {
               throw new Error('Build artifact missing for deployment.');
@@ -427,6 +459,7 @@ export function createSocketServer(server: http.Server) {
             }
             // Free disk: remove node_modules from workspace (dist/ already uploaded to Vercel)
             if (session.workspaceDir) void cleanupWorkspace(session.workspaceDir);
+            sendProgress(ws, session, 'deploy', 'Deployment queued.', 1);
             session.step = 'done';
           } catch (err) {
             const message = (err as any)?.message || 'Oops, something went wrong during deployment. Please try again later.';
@@ -541,7 +574,7 @@ export function createSocketServer(server: http.Server) {
 
       // Handle code generation for modification
       if (session.step === 'codeGen_modification') {
-        ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Generating code patch for modification...' }));
+        sendProgress(ws, session, 'codeGen_modification', 'Generating code patch for modification...', 0);
         try {
           let codeGenInput = {
             systemDesign: session.systemDesign,
@@ -569,6 +602,7 @@ export function createSocketServer(server: http.Server) {
             patchApplyLog: materialized.patchApplyLog,
             generationPayload: session.codeGen,
           });
+          sendProgress(ws, session, 'codeGen_modification', 'Code patch generation complete.', 1);
           ws.send(JSON.stringify({ type: 'stream', token: `Code patch generated. Proceeding to tests...` }));
           session.step = 'testFix_modification';
         } catch (err) {
@@ -579,7 +613,7 @@ export function createSocketServer(server: http.Server) {
 
       // Test & Fix for modification
       if (session.step === 'testFix_modification') {
-        ws.send(JSON.stringify({ type: 'progress', progress: session.progress, status: 'Testing and fixing modification...' }));
+        sendProgress(ws, session, 'testFix_modification', 'Testing and fixing modification...', 0);
         try {
           session.testResult = await testFixAgent({
             buildFn: async () => {
@@ -625,7 +659,7 @@ export function createSocketServer(server: http.Server) {
 
       // Deploy modification
       if (session.step === 'deploy_modification') {
-        ws.send(JSON.stringify({ type: 'progress', progress: 1, status: 'Deploying modification...' }));
+        sendProgress(ws, session, 'deploy_modification', 'Deploying modification...', 1);
         try {
           if (!session.buildDir || !session.activeRevisionId) {
             throw new Error('Build artifact missing for deployment.');
@@ -711,6 +745,7 @@ export function createSocketServer(server: http.Server) {
           session.modification = undefined;
           session.modificationContext = undefined;
           session.lastClarificationQuestion = undefined;
+          session.progressStages = {};
           clarificationAnswers = {};
           askedClarificationQuestions = [];
 

@@ -78,7 +78,25 @@ export class LLMProxyClient {
           },
           body: JSON.stringify({ model: modelCandidate, messages, temperature, top_p, max_tokens }),
         });
-        const data = await response.json();
+        const raw = await response.text();
+        let data: any;
+        try {
+          data = JSON.parse(raw);
+        } catch (parseErr) {
+          const snippet = raw.replace(/\s+/g, ' ').slice(0, 1000);
+          this.log('chatCompletion invalid JSON response', {
+            status: response.status,
+            model: modelCandidate,
+            contentType: response.headers.get('content-type'),
+            raw: raw.slice(0, 1200),
+            snippet,
+            parseError: String(parseErr),
+          });
+          if (!response.ok) {
+            throw new Error(`LLM Proxy chatCompletion failed: ${response.status} ${snippet}`);
+          }
+          throw new Error(`LLM Proxy returned invalid JSON response: ${snippet}`);
+        }
         this.log('chatCompletion response', { status: response.status, model: modelCandidate, data });
         if (!response.ok) {
           this.log('chatCompletion error', { status: response.status, model: modelCandidate, data });

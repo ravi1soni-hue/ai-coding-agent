@@ -82,6 +82,11 @@ Respond ONLY in valid JSON with no markdown fences: { patch: string, files: Arra
     if (process.env.NODE_ENV !== 'production') {
       console.log('[LLM_RAW_CONTENT_CODEGEN]', content);
     }
+    if (typeof content === 'string' && content.trim().startsWith('<')) {
+      const snippet = content.replace(/\s+/g, ' ').slice(0, 1000);
+      console.error('[codeGenerationAgent] Received HTML instead of JSON from LLM proxy', { snippet });
+      throw new Error(`Code generation proxy failure: received HTML response. ${snippet}`);
+    }
     // Always remove all Markdown code block markers (handles ```json, ``` etc.)
     content = content.replace(/```[a-zA-Z]*\s*|```/g, '').trim();
     // Now extract the first JSON object
