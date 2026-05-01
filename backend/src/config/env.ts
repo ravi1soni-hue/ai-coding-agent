@@ -35,4 +35,5 @@ export const config = {
   EMBEDDING_API_KEY: process.env.EMBEDDING_API_KEY || process.env.EMBEDDING_MODEL_ID || process.env.OPENAI_API_KEY || '',
   VERCEL_ACCESS_TOKEN: process.env.VERCEL_ACCESS_TOKEN || '',
   VERCEL_TEAM_ID: process.env.VERCEL_TEAM_ID || '',
+  WS_ALLOWED_ORIGINS: process.env.WS_ALLOWED_ORIGINS || '',
 };

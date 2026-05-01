@@ -20,6 +20,7 @@ import {
 } from '../auth/authService';
 import { appendProjectEvent, createProjectCodeRevision, getProjectSnapshot, saveProjectDeployment, updateProjectSnapshot } from '../db/projectStore';
 import { materializeProjectWorkspace } from '../factory/projectFactory';
+import { config } from '../config/env';
 
 
 function toClientErrorMessage(err: unknown, fallback: string): string {
@@ -71,6 +72,17 @@ export function createSocketServer(server: http.Server) {
   }
 
   wss.on('connection', async (ws, request) => {
+    const allowedOrigins = config.WS_ALLOWED_ORIGINS
+      .split(',')
+      .map((o) => o.trim())
+      .filter(Boolean);
+    const origin = request.headers.origin || '';
+    if (allowedOrigins.length > 0 && (!origin || !allowedOrigins.includes(origin))) {
+      ws.send(JSON.stringify({ type: 'error', message: 'WebSocket origin is not allowed.' }));
+      ws.close();
+      return;
+    }
+
     const cookies = parseCookie(request.headers.cookie);
     const token = cookies.sid;
     if (!token) {
@@ -442,6 +454,7 @@ export function createSocketServer(server: http.Server) {
               buildDir: session.buildDir,
               frontendProjectName: `proj-${projectId.slice(0, 10)}`,
               backendService: 'backend',
+              hasBackend: Boolean(session.systemDesign?.backend),
             });
             await saveProjectDeployment({
               projectId,
@@ -680,6 +693,7 @@ export function createSocketServer(server: http.Server) {
             buildDir: session.buildDir,
             frontendProjectName: `proj-${projectId.slice(0, 10)}`,
             backendService: 'backend',
+            hasBackend: Boolean(session.systemDesign?.backend),
           });
           await saveProjectDeployment({
             projectId,
