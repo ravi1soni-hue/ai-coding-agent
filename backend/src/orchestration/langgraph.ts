@@ -111,6 +111,8 @@ export async function runOrchestration(ctx: OrchestrationContext) {
 	// Step 6: Test & Fix
 	ctx.testResult = await testFixAgent({
 	  buildFn: () => runBuildWorker({ workspaceDir: ctx.materializedRevision?.workspaceDir }),
+	  files: ctx.codeGen?.files,
+	  workspaceDir: ctx.materializedRevision?.workspaceDir,
 	});
 	ctx.history.push({
 	  step: 'testFix',

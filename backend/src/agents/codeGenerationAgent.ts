@@ -68,6 +68,24 @@ export async function codeGenerationAgent(input: any) {
 Always produce fully materialized files in the files array — every file needed to run the app (HTML, CSS, JS/JSX, config, package.json, etc.).
 Do NOT truncate or abbreviate any file content. Every file must be complete and runnable.
 Also produce a unified diff patch string summarizing the changes.
+
+CRITICAL REQUIREMENT FOR REACT PROJECTS:
+If the project uses React (i.e. package.json includes "react" as a dependency), you MUST include a "public/index.html" file in the files array.
+This file is required by react-scripts (Create React App) to build successfully.
+The public/index.html MUST contain a proper HTML5 structure with a <div id="root"></div> element where React mounts.
+Use exactly this structure (customise the <title> as appropriate):
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>App</title>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
+
 Respond ONLY in valid JSON with no markdown fences: { patch: string, files: Array<{ path: string; content: string }> }.`;
 
     const completion = await llmProxy.chatCompletion([
