@@ -100,3 +100,15 @@ export async function runBuildWorker(payload: BuildWorkerPayload): Promise<Build
     buildDir: path.join(workspaceDir, 'dist'),
   };
 }
+
+// Clean up node_modules from workspace to free disk after a successful build.
+// Called after the built dist/ is no longer needed on disk (post-deploy).
+export async function cleanupWorkspace(workspaceDir: string): Promise<void> {
+  try {
+    const nodeModulesPath = path.join(workspaceDir, 'node_modules');
+    await fs.rm(nodeModulesPath, { recursive: true, force: true });
+    console.log(`[buildWorker] Cleaned up node_modules at ${nodeModulesPath}`);
+  } catch (err) {
+    console.warn(`[buildWorker] Could not clean up node_modules: ${(err as any)?.message}`);
+  }
+}
