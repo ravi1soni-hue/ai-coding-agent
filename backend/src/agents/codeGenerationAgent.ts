@@ -126,18 +126,32 @@ Respond ONLY in valid JSON with no markdown fences: { patch: string, files: Arra
     }
     // Always remove all Markdown code block markers (handles ```json, ``` etc.)
     content = content.replace(/```[a-zA-Z]*\s*|```/g, '').trim();
-    // Now extract the first JSON object
-    const jsonMatch = content.match(/{[\s\S]*}/);
-    if (!jsonMatch) {
-      console.error('[codeGenerationAgent] No JSON object found in LLM output:', { content });
-      throw new Error('Malformed LLM output: No JSON object found');
-    }
+    // Try to parse JSON directly first (most common case), then fall back to
+    // scanning for the first valid JSON object. Using JSON.parse rather than a
+    // greedy regex avoids mismatches when file content contains backticks or
+    // other characters that confuse a simple /{[\s\S]*}/ match.
     let result;
     try {
-      result = JSON.parse(jsonMatch[0]);
-    } catch (e) {
-      console.error('[codeGenerationAgent] JSON parse error:', e, { content: jsonMatch[0] });
-      throw new Error('Malformed LLM output: ' + jsonMatch[0]);
+      result = JSON.parse(content);
+    } catch {
+      // If direct parse fails, try to find the first valid JSON object
+      // by iterating through potential start positions
+      let parsed = false;
+      for (let i = 0; i < content.length; i++) {
+        if (content[i] === '{') {
+          try {
+            result = JSON.parse(content.substring(i));
+            parsed = true;
+            break;
+          } catch {
+            // Continue to next potential start position
+          }
+        }
+      }
+      if (!parsed) {
+        console.error('[codeGenerationAgent] No valid JSON object found in LLM output:', { content });
+        throw new Error('Malformed LLM output: No valid JSON object found');
+      }
     }
     if (!('patch' in result)) {
       throw new Error('Malformed codeGenerationAgent output');
