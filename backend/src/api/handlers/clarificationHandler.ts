@@ -25,30 +25,39 @@ export async function handleClarification(
   input: ClarificationInput
 ): Promise<HandlerResult> {
   debug('handleClarification', { projectId: input.projectId });
-  try {
-    const result = await withTimeout(
-      clarificationAgent({
-        requirements: input.requirements,
-        clarificationAnswers: input.clarificationAnswers,
-        askedQuestions: input.askedQuestions,
-        modification: input.modification,
-        lastQuestion: input.lastQuestion,
-        lastAnswer: input.lastAnswer,
-      }),
-      TIMEOUT_MS,
-      'Clarification'
-    );
-    debug('handleClarification:done', { projectId: input.projectId });
-    return { success: true, data: result };
-  } catch (err) {
-    error('handleClarification', err);
-    // Graceful fallback: treat as confirmed so the pipeline can continue
-    return {
-      success: false,
-      error: toMessage(err, 'Clarification failed'),
-      fallback: { question: null, confirmed: true, done: true, context: {} },
-    };
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const result = await withTimeout(
+        clarificationAgent({
+          requirements: input.requirements,
+          clarificationAnswers: input.clarificationAnswers,
+          askedQuestions: input.askedQuestions,
+          modification: input.modification,
+          lastQuestion: input.lastQuestion,
+          lastAnswer: input.lastAnswer,
+        }),
+        TIMEOUT_MS,
+        'Clarification'
+      );
+      debug('handleClarification:done', { projectId: input.projectId });
+      return { success: true, data: result };
+    } catch (err) {
+      if (attempt < MAX_ATTEMPTS) {
+        debug('handleClarification:retry', { projectId: input.projectId, attempt, error: String((err as any)?.message || err) });
+        continue;
+      }
+      error('handleClarification', err);
+      return {
+        success: false,
+        error: `Clarification failed after ${MAX_ATTEMPTS} attempts. ${toMessage(err, 'Clarification failed')}. Next step: review the prompt or clarification answers and retry.`,
+      };
+    }
   }
+  return {
+    success: false,
+    error: 'Clarification failed after repeated attempts. Please retry.',
+  };
 }
 
 function toMessage(err: unknown, fallback: string): string {

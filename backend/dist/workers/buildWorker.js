@@ -88,6 +88,10 @@ async function runBuildWorker(payload) {
             return { success: false, logs: logs.join('\n\n') };
         }
         frontendBuildDir = path_1.default.join(frontendDir, 'dist');
+        // Verify the build output directory actually exists
+        if (!await fileExists(frontendBuildDir)) {
+            return { success: false, logs: logs.join('\n\n') + '\n\nERROR: Frontend build succeeded but output directory does not exist: ' + frontendBuildDir };
+        }
     }
     else {
         logs.push('No frontend package.json found. Skipping frontend build.');
@@ -137,6 +141,10 @@ async function runBuildWorker(payload) {
     }
     if (!frontendBuildDir) {
         return { success: false, logs: 'Frontend build output not available. Ensure generated frontend code exists and can build.' };
+    }
+    // Verify the build directory actually exists before returning
+    if (!await fileExists(frontendBuildDir)) {
+        return { success: false, logs: logs.join('\n\n') + '\n\nERROR: Build directory does not exist: ' + frontendBuildDir };
     }
     return {
         success: true,

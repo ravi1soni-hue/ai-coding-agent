@@ -3,7 +3,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.confirmationGate = confirmationGate;
 // Confirmation Gate: stops unless confirmed
 // Confirmation Gate: stops unless all confirmations are present and no clarifications are unresolved
+const logger_1 = require("../utils/logger");
 async function confirmationGate(input) {
+    (0, logger_1.debug)('confirmationGate', { input });
     try {
         // Block if not confirmed
         if (!input.confirmed) {
@@ -13,6 +15,7 @@ async function confirmationGate(input) {
         if ((input.clarifications && input.clarifications.length > 0) || (input.questions && input.questions.length > 0)) {
             throw new Error('Unresolved clarifications or questions remain.');
         }
+        (0, logger_1.debug)('confirmationGate:confirmed');
         return { confirmed: true };
     }
     catch (err) {

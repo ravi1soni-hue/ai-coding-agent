@@ -21,22 +21,40 @@ export async function handleRequirementAnalysis(
   input: RequirementAnalysisInput
 ): Promise<HandlerResult> {
   debug('handleRequirementAnalysis', { projectId: input.projectId });
-  try {
-    const result = await withTimeout(
-      requirementAnalysisAgent({ user_message: input.userMessage }),
-      TIMEOUT_MS,
-      'Requirement analysis'
-    );
-    debug('handleRequirementAnalysis:done', { projectId: input.projectId });
-    return { success: true, data: result };
-  } catch (err) {
-    error('handleRequirementAnalysis', err);
-    return {
-      success: false,
-      error: toMessage(err, 'Failed to analyze requirements'),
-      fallback: null,
-    };
+  const MAX_ATTEMPTS = 3;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const result = await withTimeout(
+        requirementAnalysisAgent({ user_message: input.userMessage }),
+        TIMEOUT_MS,
+        'Requirement analysis'
+      );
+      debug('handleRequirementAnalysis:done', { projectId: input.projectId });
+      return { success: true, data: result };
+    } catch (err) {
+      if (attempt < MAX_ATTEMPTS) {
+        debug('handleRequirementAnalysis:retry', {
+          projectId: input.projectId,
+          attempt,
+          error: String((err as any)?.message || err),
+        });
+        continue;
+      }
+      error('handleRequirementAnalysis', err);
+      return {
+        success: false,
+        error: `Requirement analysis failed after ${MAX_ATTEMPTS} attempts. ${toMessage(err, 'Failed to analyze requirements')}. Next step: simplify the request or split it into smaller requirements and retry.`,
+        fallback: null,
+      };
+    }
   }
+
+  return {
+    success: false,
+    error: 'Requirement analysis failed after repeated attempts. Please retry.',
+    fallback: null,
+  };
 }
 
 function toMessage(err: unknown, fallback: string): string {

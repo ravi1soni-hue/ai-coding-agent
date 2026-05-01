@@ -25,29 +25,43 @@ export interface HandlerResult<T = any> {
  */
 export async function handleDeployment(input: DeploymentInput): Promise<HandlerResult> {
   debug('handleDeployment', { projectId: input.projectId });
-  try {
-    if (!input.buildDir) throw new Error('buildDir required for deployment');
-    if (!input.revisionId) throw new Error('revisionId required for deployment');
-
-    const result = await deploymentAgent({
-      projectId: input.projectId,
-      revisionId: input.revisionId,
-      buildDir: input.buildDir,
-      backendDir: input.backendDir,
-      frontendProjectName: input.frontendProjectName,
-      backendService: input.backendService,
-      hasBackend: input.hasBackend,
-    });
-    debug('handleDeployment:done', { projectId: input.projectId, url: result.frontend_url });
-    return { success: true, data: result };
-  } catch (err) {
-    error('handleDeployment', err);
-    return {
-      success: false,
-      error: toMessage(err, 'Deployment failed'),
-      fallback: null,
-    };
+  const MAX_ATTEMPTS = 2;
+  if (!input.buildDir) {
+    return { success: false, error: 'Deployment blocked: buildDir is required for deployment.' };
   }
+  if (!input.revisionId) {
+    return { success: false, error: 'Deployment blocked: revisionId is required for deployment.' };
+  }
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const result = await deploymentAgent({
+        projectId: input.projectId,
+        revisionId: input.revisionId,
+        buildDir: input.buildDir,
+        backendDir: input.backendDir,
+        frontendProjectName: input.frontendProjectName,
+        backendService: input.backendService,
+        hasBackend: input.hasBackend,
+      });
+      debug('handleDeployment:done', { projectId: input.projectId, url: result.frontend_url });
+      return { success: true, data: result };
+    } catch (err) {
+      if (attempt < MAX_ATTEMPTS) {
+        debug('handleDeployment:retry', { projectId: input.projectId, attempt, error: String((err as any)?.message || err) });
+        continue;
+      }
+      error('handleDeployment', err);
+      return {
+        success: false,
+        error: `Deployment failed after ${MAX_ATTEMPTS} attempts. ${toMessage(err, 'Deployment failed')}. Next step: verify deployment credentials, provider availability, and retry.`,
+      };
+    }
+  }
+  return {
+    success: false,
+    error: 'Deployment failed after repeated attempts. Please retry.',
+  };
 }
 
 function toMessage(err: unknown, fallback: string): string {

@@ -10,6 +10,7 @@ export type RequirementAnalysisOutput = {
   backend_required: boolean;
   auth_required: boolean;
   deployment_pref: string;
+  notes?: string;
 };
 
 export async function requirementAnalysisAgent(input: { user_message: string }): Promise<RequirementAnalysisOutput> {
@@ -18,7 +19,12 @@ export async function requirementAnalysisAgent(input: { user_message: string }):
     if (!input?.user_message) throw new Error('user_message required');
     const { model, apiKey } = getModelConfigForTask('core_reasoning');
     const llmProxy = new LLMProxyClient({ apiKey });
-    const systemPrompt = `Extract structured website requirements from the following user message. Respond ONLY with valid JSON with keys: website_type, pages, backend_required, auth_required, deployment_pref. Do NOT include any Markdown code block markers (no triple backticks or 'json'), just return raw JSON.`;
+    const systemPrompt = `You are an expert requirements analyst. The user may ask for any type of website, web application, or related feature. Your job is to convert that request into a robust website requirements object.
+- If the user message is broad or vague, infer a reasonable website_type and pages set.
+- If the user asks for a feature that is better suited to a web application, still map it to a web-based product.
+- If the request is ambiguous, do not fail silently; choose a safe default and add a short note explaining your assumption.
+Respond ONLY with valid JSON with keys: website_type, pages, backend_required, auth_required, deployment_pref, notes.
+Do NOT include any Markdown code block markers (no triple backticks or 'json'), just return raw JSON.`;
     const completion = await llmProxy.chatCompletion([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: input.user_message }

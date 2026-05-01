@@ -8,10 +8,9 @@ const axios_1 = __importDefault(require("axios"));
 const fs_1 = __importDefault(require("fs"));
 const vercelDeploy_1 = require("./vercelDeploy");
 const railwayDeploy_1 = require("../deploy/railwayDeploy");
+const logger_1 = require("../utils/logger");
 async function deploymentAgent(input) {
-    if (process.env.NODE_ENV !== 'production') {
-        console.log('[deploymentAgent] called with:', input);
-    }
+    (0, logger_1.debug)('deploymentAgent', { input });
     try {
         if (!input.buildDir)
             throw new Error('buildDir required');
@@ -69,14 +68,12 @@ async function deploymentAgent(input) {
         catch {
             // Ignore probe errors and keep deployment result as-is.
         }
-        if (process.env.NODE_ENV !== 'production') {
-            console.log('[deploymentAgent] result:', result);
-        }
+        (0, logger_1.debug)('deploymentAgent:result', { result });
         return result;
     }
     catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        console.error('[deploymentAgent] error:', message);
+        (0, logger_1.error)('deploymentAgent', message);
         throw err;
     }
 }
