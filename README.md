@@ -1,4 +1,4 @@
-# AI Autonomous Website Builder – System Skeleton
+# AI Autonomous Website Builder 
 
 This is a **starter skeleton** for:
 - Node.js + TypeScript backend
