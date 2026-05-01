@@ -11,52 +11,59 @@ export type TaskType =
   | 'voice'
   | 'embedding';
 
-function resolveModel(preferred: string, fallbackAlias: string): string {
-  if (preferred && preferred.trim()) return preferred.trim();
-  return fallbackAlias;
+function pickConfiguredModel(...candidates: Array<string | undefined>): string {
+  for (const value of candidates) {
+    if (value && value.trim()) return value.trim();
+  }
+  return 'gpt-4o-mini';
+}
+
+function requireApiKey(task: TaskType, apiKey: string): string {
+  if (apiKey && apiKey.trim().length >= 10) return apiKey.trim();
+  throw new Error(`Missing API key for task "${task}". Check environment model API key variables.`);
 }
 
 export function getModelConfigForTask(task: TaskType): { model: string; apiKey: string } {
   switch (task) {
     case 'core_reasoning':
       return {
-        model: resolveModel(config.GPT4O_MINI_MODEL, 'gpt-4o-mini'),
-        apiKey: config.GPT4O_MINI_API_KEY,
+        model: pickConfiguredModel(config.GPT4O_MINI_MODEL, config.GPT4O_MODEL),
+        apiKey: requireApiKey(task, config.GPT4O_MINI_API_KEY || config.GPT4O_API_KEY || config.OPENAI_API_KEY),
       };
     case 'code_generation':
       return {
-        model: resolveModel(config.GPT5_MINI_MODEL, 'gpt-5-mini'),
-        apiKey: config.GPT5_MINI_API_KEY,
+        model: pickConfiguredModel(config.GPT5_MINI_MODEL, config.GPT4O_MODEL, config.GPT4O_MINI_MODEL),
+        apiKey: requireApiKey(task, config.GPT5_MINI_API_KEY || config.GPT4O_API_KEY || config.GPT4O_MINI_API_KEY || config.OPENAI_API_KEY),
       };
     case 'agent_orchestration':
       return {
-        model: resolveModel(config.GPT5_2_MODEL, 'gpt-5-2'),
-        apiKey: config.GPT5_2_API_KEY,
+        model: pickConfiguredModel(config.GPT5_2_MODEL, config.GPT5_MINI_MODEL, config.GPT4O_MODEL, config.GPT4O_MINI_MODEL),
+        apiKey: requireApiKey(task, config.GPT5_2_API_KEY || config.GPT5_MINI_API_KEY || config.GPT4O_API_KEY || config.GPT4O_MINI_API_KEY || config.OPENAI_API_KEY),
       };
     case 'clarification':
       return {
-        model: resolveModel(config.GPT4O_MODEL, 'gpt-4o'),
-        apiKey: config.GPT4O_API_KEY,
+        model: pickConfiguredModel(config.GPT4O_MODEL, config.GPT4O_MINI_MODEL),
+        apiKey: requireApiKey(task, config.GPT4O_API_KEY || config.GPT4O_MINI_API_KEY || config.OPENAI_API_KEY),
       };
     case 'summary':
       return {
-        model: resolveModel(config.GPT4O_MODEL, 'gpt-4o'),
-        apiKey: config.GPT4O_API_KEY,
+        model: pickConfiguredModel(config.GPT4O_MODEL, config.GPT4O_MINI_MODEL),
+        apiKey: requireApiKey(task, config.GPT4O_API_KEY || config.GPT4O_MINI_API_KEY || config.OPENAI_API_KEY),
       };
     case 'voice':
       return {
-        model: resolveModel(config.GPT4O_MODEL, 'gpt-4o'),
-        apiKey: config.GPT4O_API_KEY,
+        model: pickConfiguredModel(config.GPT4O_MODEL, config.GPT4O_MINI_MODEL),
+        apiKey: requireApiKey(task, config.GPT4O_API_KEY || config.GPT4O_MINI_API_KEY || config.OPENAI_API_KEY),
       };
     case 'embedding':
       return {
-        model: resolveModel(config.EMBEDDING_MODEL, 'embedding-model'),
-        apiKey: config.EMBEDDING_API_KEY,
+        model: pickConfiguredModel(config.EMBEDDING_MODEL),
+        apiKey: requireApiKey(task, config.EMBEDDING_API_KEY || config.OPENAI_API_KEY),
       };
     default:
       return {
-        model: resolveModel(config.GPT4O_MINI_MODEL, 'gpt-4o-mini'),
-        apiKey: config.GPT4O_MINI_API_KEY,
+        model: pickConfiguredModel(config.GPT4O_MINI_MODEL, config.GPT4O_MODEL),
+        apiKey: requireApiKey(task, config.GPT4O_MINI_API_KEY || config.GPT4O_API_KEY || config.OPENAI_API_KEY),
       };
   }
 }
