@@ -9,7 +9,7 @@ import { systemDesignAgent } from '../agents/systemDesignAgent';
 import { codeGenerationAgent } from '../agents/codeGenerationAgent';
 import { testFixAgent } from '../agents/testFixAgent';
 import { deploymentAgent } from '../agents/deploymentAgent';
-import { runBuildWorker } from '../workers/buildWorker';
+import { runBuildWorker, cleanupWorkspace } from '../workers/buildWorker';
 import {
   createProjectSession,
   getOrCreateActiveProjectSession,
@@ -24,6 +24,8 @@ import { materializeProjectWorkspace } from '../factory/projectFactory';
 
 export function createSocketServer(server: http.Server) {
   const wss = new Server({ server });
+  // Track projectIds with an active running pipeline to prevent concurrent corruption
+  const activePipelines = new Set<string>();
 
   wss.on('connection', async (ws, request) => {
     const cookies = parseCookie(request.headers.cookie);
@@ -190,6 +192,12 @@ export function createSocketServer(server: http.Server) {
         : [];
 
     async function runFlow(userMsg: string | null, userClarificationAnswers: Record<string, any> | null = null) {
+      // Prevent two concurrent pipelines for the same projectId (e.g., two browser tabs)
+      if (activePipelines.has(projectId)) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Another pipeline is already running for this project. Please wait or open a new project.' }));
+        return;
+      }
+      activePipelines.add(projectId);
       try {
         // Step 1: Requirement Analysis
         if (session.step === 'init' || session.step === 'requirementAnalysis') {
@@ -344,6 +352,31 @@ export function createSocketServer(server: http.Server) {
                 }
                 return { success: result.success, logs: result.logs };
               },
+              fixFn: async (logs: string) => {
+                ws.send(JSON.stringify({ type: 'stream', token: 'Build failed — asking AI to fix errors...' }));
+                const fixedCodeGen = await codeGenerationAgent({
+                  systemDesign: session.systemDesign,
+                  requirements: session.requirements,
+                  modification: `Fix these build errors and produce corrected files:\n${logs.slice(-1500)}`,
+                });
+                const reMaterialized = await materializeProjectWorkspace({ projectId, codeGen: fixedCodeGen });
+                session.activeRevisionId = reMaterialized.revisionId;
+                session.workspaceDir = reMaterialized.workspaceDir;
+                session.sourceArchivePath = reMaterialized.archivePath;
+                session.sourceHash = reMaterialized.sourceHash;
+                session.codeGen = fixedCodeGen;
+                session.codeRevisionDbId = await createProjectCodeRevision({
+                  projectId,
+                  userId: authedUser.id,
+                  workspacePath: reMaterialized.workspaceDir,
+                  sourceArchivePath: reMaterialized.archivePath,
+                  sourceHash: reMaterialized.sourceHash,
+                  patchPath: reMaterialized.patchPath,
+                  patchApplied: reMaterialized.patchApplied,
+                  patchApplyLog: reMaterialized.patchApplyLog,
+                  generationPayload: fixedCodeGen,
+                });
+              },
             });
             console.log('[TEST RESULT]', session.testResult);
             ws.send(JSON.stringify({ type: 'stream', token: 'Tests complete! Deploying your project...' }));
@@ -389,6 +422,8 @@ export function createSocketServer(server: http.Server) {
             console.log('[DEPLOYMENT]', session.deployment);
             const deployedUrl = session.deployment?.frontend_url || '';
             ws.send(JSON.stringify({ type: 'stream', token: `Your project is deployed! 🎉${deployedUrl ? `\n\n🔗 Live URL: ${deployedUrl}` : ''}` }));
+            // Free disk: remove node_modules from workspace (dist/ already uploaded to Vercel)
+            if (session.workspaceDir) void cleanupWorkspace(session.workspaceDir);
             session.step = 'done';
           } catch (err) {
             const message = (err as any)?.message || 'Oops, something went wrong during deployment. Please try again later.';
@@ -427,8 +462,10 @@ export function createSocketServer(server: http.Server) {
       } catch (err) {
         console.error('[General Error]', err);
         ws.send(JSON.stringify({ type: 'error', message: 'Oh no, something went wrong. Please try again or start a new session.' }));
+        } finally {
+          activePipelines.delete(projectId);
+        }
       }
-    }
 
     ws.on('message', async (message) => {
       let msg;
@@ -548,6 +585,31 @@ export function createSocketServer(server: http.Server) {
               }
               return { success: result.success, logs: result.logs };
             },
+            fixFn: async (logs: string) => {
+              ws.send(JSON.stringify({ type: 'stream', token: 'Build failed — asking AI to fix errors...' }));
+              const fixedCodeGen = await codeGenerationAgent({
+                systemDesign: session.systemDesign,
+                requirements: session.requirements,
+                modification: `Fix these build errors and produce corrected files:\n${logs.slice(-1500)}`,
+              });
+              const reMaterialized = await materializeProjectWorkspace({ projectId, codeGen: fixedCodeGen });
+              session.activeRevisionId = reMaterialized.revisionId;
+              session.workspaceDir = reMaterialized.workspaceDir;
+              session.sourceArchivePath = reMaterialized.archivePath;
+              session.sourceHash = reMaterialized.sourceHash;
+              session.codeGen = fixedCodeGen;
+              session.codeRevisionDbId = await createProjectCodeRevision({
+                projectId,
+                userId: authedUser.id,
+                workspacePath: reMaterialized.workspaceDir,
+                sourceArchivePath: reMaterialized.archivePath,
+                sourceHash: reMaterialized.sourceHash,
+                patchPath: reMaterialized.patchPath,
+                patchApplied: reMaterialized.patchApplied,
+                patchApplyLog: reMaterialized.patchApplyLog,
+                generationPayload: fixedCodeGen,
+              });
+            },
           });
           ws.send(JSON.stringify({ type: 'stream', token: `Tests complete. Deploying your project...` }));
           session.step = 'deploy_modification';
@@ -590,6 +652,8 @@ export function createSocketServer(server: http.Server) {
             raw: session.deployment,
           });
           ws.send(JSON.stringify({ type: 'stream', token: `Deployment complete!` }));
+          // Free disk: remove node_modules from workspace
+          if (session.workspaceDir) void cleanupWorkspace(session.workspaceDir);
           session.step = 'done_modification';
         } catch (err) {
           ws.send(JSON.stringify({ type: 'error', message: (err as any)?.message || 'Deployment for modification failed.', error: { name: (err as any)?.name, stack: (err as any)?.stack } }));

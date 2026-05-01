@@ -11,6 +11,7 @@ export const config = {
   RAILWAY_PROJECT_ID: process.env.RAILWAY_PROJECT_ID || '',
   RAILWAY_SERVICE_ID: process.env.RAILWAY_SERVICE_ID || '',
   RAILWAY_ENVIRONMENT_ID: process.env.RAILWAY_ENVIRONMENT_ID || '',
+  RAILWAY_PUBLIC_URL: process.env.RAILWAY_PUBLIC_URL || process.env.RAILWAY_STATIC_URL || process.env.RAILWAY_SERVICE_URL || '',
   RAILWAY_GRAPHQL_URL: process.env.RAILWAY_GRAPHQL_URL || 'https://backboard.railway.app/graphql/v2',
   LLM_PROXY_CHAT_URL: process.env.LLM_PROXY_CHAT_URL || 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/chat/completions',
   LLM_PROXY_EMBEDDING_URL: process.env.LLM_PROXY_EMBEDDING_URL || 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',

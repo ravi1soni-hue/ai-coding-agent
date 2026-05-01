@@ -243,6 +243,9 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
           if (payload.frontend_url) {
             pushMessage('system', `🔗 Your deployed app: ${payload.frontend_url}`);
           }
+          if (payload.backend_url) {
+            pushMessage('system', `🛠 Backend URL: ${payload.backend_url}`);
+          }
           if (payload.vercel_inspect_url) {
             pushMessage('system', `🔍 Inspect deployment: ${payload.vercel_inspect_url}`);
           }

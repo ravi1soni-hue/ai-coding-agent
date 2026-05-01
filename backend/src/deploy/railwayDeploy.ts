@@ -19,18 +19,30 @@ function normalizeUrl(rawUrl: string): string {
   return `https://${rawUrl}`;
 }
 
-async function resolveRailwayServiceUrl(service: string): Promise<string> {
-  const fallback = normalizeUrl(service ? `${service}.railway.app` : '');
+function isRailwayDashboardUrl(url: string): boolean {
+  return /https?:\/\/railway\.app\/project\//.test(url);
+}
+
+async function resolveRailwayServiceUrl(): Promise<string> {
+  // 1. Prefer explicitly configured railway_url from railway.config.json
   const configPath = path.resolve(__dirname, '../../railway.config.json');
   try {
     const raw = await fs.readFile(configPath, 'utf8');
     const parsed = JSON.parse(raw) as { railway_url?: string };
     const configuredUrl = normalizeUrl(parsed.railway_url ?? '');
-    if (configuredUrl) return configuredUrl;
-    return fallback;
+    if (configuredUrl && !isRailwayDashboardUrl(configuredUrl)) return configuredUrl;
   } catch {
-    return fallback;
+    // config file not readable — fall through
   }
+
+  // 2. Prefer explicit public service URL from env if available.
+  const publicUrl = normalizeUrl(env.RAILWAY_PUBLIC_URL || '');
+  if (publicUrl && !isRailwayDashboardUrl(publicUrl)) {
+    return publicUrl;
+  }
+
+  // 3. No public URL resolvable — return empty so callers know.
+  return '';
 }
 
 async function triggerRailwayDeployment(input: {
@@ -93,7 +105,7 @@ export async function deployToRailway(service: string, deployConfig: any): Promi
     console.log('Deploying to Railway target:', service, deployConfig);
   }
 
-  const serviceUrl = await resolveRailwayServiceUrl(service);
+  const serviceUrl = await resolveRailwayServiceUrl();
   const dashboardUrl = env.RAILWAY_PROJECT_ID
     ? `https://railway.app/project/${env.RAILWAY_PROJECT_ID}`
     : 'https://railway.app';
@@ -133,9 +145,11 @@ export async function deployToRailway(service: string, deployConfig: any): Promi
   }
 
   try {
-    const health = await axios.get(serviceUrl, { timeout: 15_000, validateStatus: () => true });
-    if (status !== 'building' && status !== 'queued') {
-      status = health.status >= 200 && health.status < 500 ? 'deployed' : 'failed';
+    if (serviceUrl) {
+      const health = await axios.get(serviceUrl, { timeout: 15_000, validateStatus: () => true });
+      if (status !== 'building' && status !== 'queued') {
+        status = health.status >= 200 && health.status < 500 ? 'deployed' : 'failed';
+      }
     }
   } catch {
     if (status !== 'building' && status !== 'queued') {
