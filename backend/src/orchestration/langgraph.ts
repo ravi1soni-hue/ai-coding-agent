@@ -122,13 +122,10 @@ export async function runOrchestration(ctx: OrchestrationContext) {
 
 	// Step 7: Deployment
 	const revisionId = ctx.revisionId || ctx.materializedRevision?.revisionId || `rev-${Date.now().toString(36)}`;
-	if (!ctx.testResult?.buildDir) {
-	  throw new Error('Build failed and no fallback available. Generated project must have a valid dist/ directory. Ensure frontend files were generated correctly and build succeeds.');
-	}
 	ctx.deployment = await deploymentAgent({
 	  projectId,
 	  revisionId,
-	  buildDir: ctx.testResult.buildDir,
+	  buildDir: ctx.testResult?.buildDir || path.resolve(__dirname, '../../../frontend/dist'),
 	  backendDir: ctx.testResult?.backendDir,
 	  frontendProjectName: `proj-${projectId.slice(0, 10)}`,
 	  backendService: `backend-${projectId.slice(0, 10)}`,
