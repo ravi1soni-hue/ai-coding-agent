@@ -240,6 +240,12 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
           setProgress(1);
           setStatusText('Complete');
           pushMessage('system', payload.message || 'Flow finished.');
+          if (payload.frontend_url) {
+            pushMessage('system', `🔗 Your deployed app: ${payload.frontend_url}`);
+          }
+          if (payload.vercel_inspect_url) {
+            pushMessage('system', `🔍 Inspect deployment: ${payload.vercel_inspect_url}`);
+          }
           break;
         case 'error':
           pushMessage('error', payload.message || 'Unknown error.');
@@ -356,7 +362,11 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
           <div className="activityBox">
             {messages.slice(-6).map((m, idx) => (
               <div key={`${m.role}-${idx}`} className={`msg ${m.role}`}>
-                {m.text}
+                {m.text.split(/(https?:\/\/[^\s]+)/g).map((part, i) =>
+                  /^https?:\/\//.test(part)
+                    ? <a key={i} href={part} target="_blank" rel="noopener noreferrer" style={{color:'inherit',textDecoration:'underline',wordBreak:'break-all'}}>{part}</a>
+                    : part
+                )}
               </div>
             ))}
             <div ref={msgEndRef} />

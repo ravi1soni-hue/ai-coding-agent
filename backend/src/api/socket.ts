@@ -387,7 +387,8 @@ export function createSocketServer(server: http.Server) {
               raw: session.deployment,
             });
             console.log('[DEPLOYMENT]', session.deployment);
-            ws.send(JSON.stringify({ type: 'stream', token: 'Your project is deployed! 🎉' }));
+            const deployedUrl = session.deployment?.frontend_url || '';
+            ws.send(JSON.stringify({ type: 'stream', token: `Your project is deployed! 🎉${deployedUrl ? `\n\n🔗 Live URL: ${deployedUrl}` : ''}` }));
             session.step = 'done';
           } catch (err) {
             const message = (err as any)?.message || 'Oops, something went wrong during deployment. Please try again later.';
@@ -417,6 +418,9 @@ export function createSocketServer(server: http.Server) {
               type: 'done',
               projectId,
               message: 'Project complete and saved. Start a new session for a new project!',
+              frontend_url: session.deployment?.frontend_url || null,
+              backend_url: session.deployment?.backend_url || null,
+              vercel_inspect_url: session.deployment?.vercel_inspect_url || null,
             }),
           );
         }

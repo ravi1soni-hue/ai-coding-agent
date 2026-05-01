@@ -24,7 +24,8 @@ type MaterializeInput = {
 };
 
 const WORKSPACE_ROOT = path.resolve(__dirname, '../../generated-projects');
-const FRONTEND_TEMPLATE_DIR = path.resolve(__dirname, '../../../frontend');
+// Use the minimal blank template — NOT the builder's own auth frontend
+const FRONTEND_TEMPLATE_DIR = path.resolve(__dirname, '../templates/frontend');
 
 function sanitizeSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48) || 'project';
