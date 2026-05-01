@@ -264,7 +264,7 @@ export function createSocketServer(server: http.Server) {
             if (!userMsg) throw new Error('User message required for requirement analysis');
             session.requirements = await requirementAnalysisAgent({ user_message: userMsg });
             // Log technical details, but send only conversational message to UI
-            console.log('[REQUIREMENTS]', session.requirements);
+            console.log('[REQUIREMENTS] Analyzed');
             ws.send(JSON.stringify({ type: 'stream', token: 'Got it! Let me clarify a few details about your project.' }));
             session.step = 'clarification';
           } catch (err) {
@@ -292,7 +292,7 @@ export function createSocketServer(server: http.Server) {
             }
             session.clarifications = await clarificationAgent(clarInput);
             // Log technical details
-            console.log('[CLARIFICATION]', session.clarifications);
+            console.log('[CLARIFICATION] Complete');
             // Conversational flow
             if (session.clarifications && session.clarifications.question && !session.clarifications.confirmed) {
               let questionMsg = session.clarifications.question;
@@ -335,7 +335,7 @@ export function createSocketServer(server: http.Server) {
           try {
             if (!session.clarifications) throw new Error('Clarifications required for confirmation');
             session.confirmation = await confirmationGate(session.clarifications);
-            console.log('[CONFIRMATION]', session.confirmation);
+            console.log('[CONFIRMATION] Confirmed');
             ws.send(JSON.stringify({ type: 'stream', token: 'All requirements confirmed! I will now design the system.' }));
             session.step = 'systemDesign';
           } catch (err) {
@@ -350,7 +350,7 @@ export function createSocketServer(server: http.Server) {
           sendProgress(ws, session, 'systemDesign', 'Designing system...');
           try {
             session.systemDesign = await systemDesignAgent(session.requirements);
-            console.log('[SYSTEM DESIGN]', session.systemDesign);
+            console.log('[SYSTEM DESIGN] Generated');
             ws.send(JSON.stringify({ type: 'stream', token: 'System design is ready. Generating code...' }));
             session.step = 'codeGen';
           } catch (err) {
@@ -383,7 +383,7 @@ export function createSocketServer(server: http.Server) {
               patchApplyLog: materialized.patchApplyLog,
               generationPayload: session.codeGen,
             });
-            console.log('[CODE GEN]', session.codeGen);
+            console.log('[CODE GEN] Complete');
             sendProgress(ws, session, 'codeGen', 'Code generation complete.', 1);
             ws.send(JSON.stringify({ type: 'stream', token: 'Code generated! Running tests and fixes...' }));
             session.step = 'testFix';
@@ -431,7 +431,7 @@ export function createSocketServer(server: http.Server) {
                 });
               },
             });
-            console.log('[TEST RESULT]', session.testResult);
+            console.log('[TEST RESULT]', { success: session.testResult?.success });
             sendProgress(ws, session, 'testFix', 'Testing complete.', 1);
             ws.send(JSON.stringify({ type: 'stream', token: 'Tests complete! Deploying your project...' }));
             session.step = 'deploy';
@@ -474,7 +474,7 @@ export function createSocketServer(server: http.Server) {
               sourceHash: session.sourceHash,
               raw: session.deployment,
             });
-            console.log('[DEPLOYMENT]', session.deployment);
+            console.log('[DEPLOYMENT]', { frontend_url: session.deployment?.frontend_url, status: session.deployment?.vercel_status });
             const deployedUrl = session.deployment?.frontend_url || '';
             ws.send(JSON.stringify({ type: 'stream', token: `Your project is deployed! 🎉${deployedUrl ? `\n\n🔗 Live URL: ${deployedUrl}` : ''}` }));
             if (session.deployment?.frontend_access_warning) {
@@ -494,18 +494,7 @@ export function createSocketServer(server: http.Server) {
 
         if (session.step === 'done') {
           // Save project/session state for project management (simple example: log to file/db)
-          console.log('[PROJECT SAVED]', {
-            userId: authedUser.id,
-            projectId,
-            requirements: session.requirements,
-            clarifications: session.clarifications,
-            confirmation: session.confirmation,
-            systemDesign: session.systemDesign,
-            codeGen: session.codeGen,
-            testResult: session.testResult,
-            deployment: session.deployment,
-            timestamp: new Date().toISOString()
-          });
+          console.log('[PROJECT SAVED] Complete');
           await touchProjectSession(authedUser.id, projectId);
           ws.send(
             JSON.stringify({
