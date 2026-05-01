@@ -422,6 +422,9 @@ export function createSocketServer(server: http.Server) {
             console.log('[DEPLOYMENT]', session.deployment);
             const deployedUrl = session.deployment?.frontend_url || '';
             ws.send(JSON.stringify({ type: 'stream', token: `Your project is deployed! 🎉${deployedUrl ? `\n\n🔗 Live URL: ${deployedUrl}` : ''}` }));
+            if (session.deployment?.frontend_access_warning) {
+              ws.send(JSON.stringify({ type: 'stream', token: `⚠️ ${session.deployment.frontend_access_warning}` }));
+            }
             // Free disk: remove node_modules from workspace (dist/ already uploaded to Vercel)
             if (session.workspaceDir) void cleanupWorkspace(session.workspaceDir);
             session.step = 'done';
@@ -456,6 +459,7 @@ export function createSocketServer(server: http.Server) {
               frontend_url: session.deployment?.frontend_url || null,
               backend_url: session.deployment?.backend_url || null,
               vercel_inspect_url: session.deployment?.vercel_inspect_url || null,
+              frontend_access_warning: session.deployment?.frontend_access_warning || null,
             }),
           );
         }
@@ -652,6 +656,9 @@ export function createSocketServer(server: http.Server) {
             raw: session.deployment,
           });
           ws.send(JSON.stringify({ type: 'stream', token: `Deployment complete!` }));
+          if (session.deployment?.frontend_access_warning) {
+            ws.send(JSON.stringify({ type: 'stream', token: `⚠️ ${session.deployment.frontend_access_warning}` }));
+          }
           // Free disk: remove node_modules from workspace
           if (session.workspaceDir) void cleanupWorkspace(session.workspaceDir);
           session.step = 'done_modification';

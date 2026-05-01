@@ -249,6 +249,9 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
           if (payload.vercel_inspect_url) {
             pushMessage('system', `🔍 Inspect deployment: ${payload.vercel_inspect_url}`);
           }
+          if (payload.frontend_access_warning) {
+            pushMessage('error', `⚠️ ${payload.frontend_access_warning}`);
+          }
           break;
         case 'error':
           pushMessage('error', payload.message || 'Unknown error.');
