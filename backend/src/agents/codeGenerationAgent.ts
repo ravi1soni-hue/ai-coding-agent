@@ -73,7 +73,7 @@ Respond ONLY in valid JSON with no markdown fences: { patch: string, files: Arra
     const completion = await llmProxy.chatCompletion([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: JSON.stringify(userPrompt) }
-    ], model, 0.7, 0.95, 8000);
+    ], model, 0.7, 0.95, 6000, 180_000); // 6000 tokens, 180s timeout
     if (process.env.NODE_ENV !== 'production') {
       console.log('[codeGenerationAgent] LLM completion:', completion);
     }

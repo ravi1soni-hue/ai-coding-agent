@@ -29,8 +29,10 @@ function getModelConfigForTask(task) {
             };
         case 'code_generation':
             return {
-                model: pickConfiguredModel(env_1.config.GPT5_MINI_MODEL, env_1.config.GPT4O_MODEL, env_1.config.GPT4O_MINI_MODEL),
-                apiKey: pickConfiguredApiKey(env_1.config.GPT5_MINI_API_KEY, env_1.config.GPT4O_API_KEY, env_1.config.GPT4O_MINI_API_KEY, env_1.config.OPENAI_API_KEY),
+                // Prioritize gpt-4o for code generation (more reliable than gpt-5-mini)
+                // Falls back: gpt-4o-mini if gpt-4o unavailable
+                model: pickConfiguredModel(env_1.config.GPT4O_MODEL, env_1.config.GPT4O_MINI_MODEL, env_1.config.GPT5_MINI_MODEL),
+                apiKey: pickConfiguredApiKey(env_1.config.GPT4O_API_KEY, env_1.config.GPT4O_MINI_API_KEY, env_1.config.GPT5_MINI_API_KEY, env_1.config.OPENAI_API_KEY),
             };
         case 'agent_orchestration':
             return {

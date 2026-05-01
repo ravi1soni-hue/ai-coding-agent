@@ -53,12 +53,15 @@ class LLMProxyClient {
         }
         return `LLM Proxy ${operation} failed (${status}): ${cleanDetail.slice(0, 200)}`;
     }
-    async chatCompletion(messages, model, temperature = 0.8, top_p = 0.9, max_tokens = 1000) {
+    async chatCompletion(messages, model, temperature = 0.8, top_p = 0.9, max_tokens = 1000, timeoutMs) {
         const selectedModel = model || 'gpt-4o-mini';
         if (!this.apiKey || this.apiKey.trim().length < 3) {
             this.log('chatCompletion called without valid API key', { model: selectedModel, apiKeyLength: this.apiKey?.length || 0 });
             throw new Error(`LLM Proxy chatCompletion failed: No valid API key configured for model "${selectedModel}". Check your environment variables for API_KEY settings.`);
         }
+        // Use provided timeout or reasonable defaults based on max_tokens
+        const defaultTimeout = Math.max(90000, Math.min(300000, max_tokens * 30));
+        const requestTimeoutMs = timeoutMs || defaultTimeout;
         const modelCandidates = this.buildModelCandidates(selectedModel);
         this.log('chatCompletion called', {
             model: selectedModel,
@@ -67,6 +70,7 @@ class LLMProxyClient {
             temperature,
             top_p,
             max_tokens,
+            timeoutMs: requestTimeoutMs,
         });
         let lastError;
         for (let i = 0; i < modelCandidates.length; i += 1) {
@@ -74,14 +78,16 @@ class LLMProxyClient {
             for (let attempt = 0; attempt < 3; attempt += 1) {
                 try {
                     const controller = new AbortController();
-                    const timeout = setTimeout(() => controller.abort(), 90000);
+                    const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
                     const requestPayload = { model: modelCandidate, messages, temperature, top_p, max_tokens };
                     this.log('chatCompletion making request', {
                         attempt: attempt + 1,
                         modelCandidate,
+                        selectedModel,
                         chatUrl: this.chatUrl,
                         messageCount: messages.length,
                         apiKeyLength: this.apiKey?.length || 0,
+                        timeoutMs: requestTimeoutMs,
                     });
                     const response = await fetch(this.chatUrl, {
                         method: 'POST',
