@@ -38,3 +38,17 @@ export async function closeRedis() {
   if (redis) await redis.quit();
   redis = null;
 }
+
+export async function setCacheJson(key: string, value: unknown, ttlSeconds?: number) {
+  await setCache(key, JSON.stringify(value), ttlSeconds);
+}
+
+export async function getCacheJson<T = unknown>(key: string): Promise<T | null> {
+  const raw = await getCache(key);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
