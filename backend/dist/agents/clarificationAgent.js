@@ -1,5 +1,5 @@
 "use strict";
-// Clarification Agent (stub)
+// Clarification Agent
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.clarificationAgent = clarificationAgent;
 const modelRouter_1 = require("./modelRouter");
@@ -9,6 +9,7 @@ const llmProxyClient_1 = require("./llmProxyClient");
  * input: {
  *   requirements: object, // structured requirements
  *   clarificationAnswers?: Record<string, string>, // previous answers
+ *   askedQuestions?: string[], // previously asked clarification questions
  *   lastQuestion?: string, // last question asked
  *   lastAnswer?: string, // last answer given
  *   modification?: string // if user is requesting a modification
@@ -24,6 +25,7 @@ async function clarificationAgent(input) {
             throw new Error('Input with requirements required');
         const { model, apiKey } = (0, modelRouter_1.getModelConfigForTask)('clarification');
         const clarificationAnswers = input.clarificationAnswers || {};
+        const askedQuestions = Array.isArray(input.askedQuestions) ? input.askedQuestions : [];
         const modification = input.modification;
         const lastQuestion = input.lastQuestion;
         const lastAnswer = input.lastAnswer;
@@ -31,24 +33,22 @@ async function clarificationAgent(input) {
         let userPrompt = {
             requirements: input.requirements,
             clarificationAnswers,
+            askedQuestions,
             modification,
             lastQuestion,
             lastAnswer
         };
         const systemPrompt = `You are a requirements clarification agent.
 Ask ONLY one blocking clarification question at a time (no scope expansion, no lists).
+Never repeat a question that is already present in askedQuestions or already answered in clarificationAnswers.
 If all clarifications are resolved, set confirmed=true and question=null.
 If user requests a modification, ask for only the next blocking clarification needed for that modification.
 Respond ONLY in JSON: { question: string | null, confirmed: boolean }.`;
-        const llmProxy = new llmProxyClient_1.LLMProxyClient({
-            apiKey,
-            chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/chat/completions',
-            embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
-        });
+        const llmProxy = new llmProxyClient_1.LLMProxyClient({ apiKey });
         const completion = await llmProxy.chatCompletion([
             { role: 'system', content: systemPrompt },
             { role: 'user', content: JSON.stringify(userPrompt) }
-        ], 'gpt-5-chat', 0.8, 0.9, 1000);
+        ], model, 0.8, 0.9, 1000);
         if (process.env.NODE_ENV !== 'production') {
             console.log('[clarificationAgent] LLM completion:', completion);
         }
@@ -84,6 +84,7 @@ Respond ONLY in JSON: { question: string | null, confirmed: boolean }.`;
             done: !!result.confirmed && !result.question,
             context: {
                 clarificationAnswers,
+                askedQuestions,
                 modification,
                 lastQuestion,
                 lastAnswer

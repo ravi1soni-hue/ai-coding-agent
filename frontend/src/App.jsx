@@ -352,6 +352,8 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
                   </svg>
                 </button>
               </div>
+              {redeployStatus ? <div className="historyNotice success">{redeployStatus}</div> : null}
+              {redeployError ? <div className="historyNotice error">{redeployError}</div> : null}
             </div>
           </div>
 
@@ -409,6 +411,9 @@ export default function App() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [projectHistory, setProjectHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [redeployingProjectId, setRedeployingProjectId] = useState('');
+  const [redeployStatus, setRedeployStatus] = useState('');
+  const [redeployError, setRedeployError] = useState('');
 
   async function loadCurrentProject() {
     const res = await fetch('/api/projects/current');
@@ -537,6 +542,27 @@ export default function App() {
     }
   }
 
+  async function onRedeployProject(projectIdToRedeploy) {
+    setRedeployError('');
+    setRedeployStatus('');
+    setRedeployingProjectId(projectIdToRedeploy);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectIdToRedeploy)}/redeploy`, {
+        method: 'POST',
+      });
+      const json = await readJson(res);
+      if (!res.ok) {
+        throw new Error(json.error || 'Redeploy failed.');
+      }
+      setRedeployStatus(`Redeploy started successfully. New URL: ${json.deployment?.frontend_url || 'See history for updates.'}`);
+      await loadProjectHistory();
+    } catch (err) {
+      setRedeployError(err.message || 'Redeploy failed.');
+    } finally {
+      setRedeployingProjectId('');
+    }
+  }
+
   if (loading) {
     return (
       <div className="mainBg authPageBg">
@@ -586,11 +612,17 @@ export default function App() {
               ) : null}
 
               {projectHistory.map((p) => (
-                <button
+                <div
                   key={p.id}
                   className={`historyItem ${p.id === projectId ? 'active' : ''}`}
-                  type="button"
+                  role="button"
+                  tabIndex={0}
                   onClick={() => onSelectProject(p.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      onSelectProject(p.id);
+                    }
+                  }}
                 >
                   <div className="historyItemTop">
                     <span className="historyId">{p.id}</span>
@@ -606,8 +638,23 @@ export default function App() {
                       {p.backend_url ? `Railway: ${p.backend_url}` : ''}
                     </div>
                   ) : null}
-                </button>
+                  <div className="historyActions">
+                    <button
+                      className="topActionBtn"
+                      type="button"
+                      disabled={redeployingProjectId === p.id}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRedeployProject(p.id);
+                      }}
+                    >
+                      {redeployingProjectId === p.id ? 'Redeploying…' : 'Redeploy'}
+                    </button>
+                  </div>
+                </div>
               ))}
+              {redeployStatus ? <div className="historyNotice success">{redeployStatus}</div> : null}
+              {redeployError ? <div className="historyNotice error">{redeployError}</div> : null}
             </div>
           </div>
         </div>

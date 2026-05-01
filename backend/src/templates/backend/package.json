@@ -1,0 +1,14 @@
+{
+  "name": "generated-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "build": "echo \"No build step required for backend service.\""
+  },
+  "dependencies": {
+    "express": "^4.19.0",
+    "pg": "^8.20.0"
+  }
+}

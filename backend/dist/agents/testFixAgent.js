@@ -1,7 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.testFixAgent = testFixAgent;
-// Test & Fix Agent: simulates build/test/fix loop
+// Test & Fix Agent
 async function testFixAgent(input) {
     if (process.env.NODE_ENV !== 'production') {
         console.log('[testFixAgent] called with:', input);
@@ -23,9 +23,20 @@ async function testFixAgent(input) {
                 }
                 return { ...result, fixed: retries > 0 };
             }
+            // Attempt LLM-based fix before retrying
+            if (input.fixFn && retries < 2) {
+                console.log(`[testFixAgent] Build failed, attempting fix (retry ${retries + 1})...`);
+                try {
+                    await input.fixFn(result.logs);
+                }
+                catch (fixErr) {
+                    console.error('[testFixAgent] fixFn error:', fixErr);
+                }
+            }
             retries++;
         } while (retries < 3);
-        throw new Error('Build/test failed after 3 retries.');
+        const lastLogs = result?.logs || 'No build output captured.';
+        throw new Error(`Build failed after 3 attempts. Last error:\n${lastLogs.slice(-2000)}`);
     }
     catch (err) {
         console.error('[testFixAgent] error:', err);

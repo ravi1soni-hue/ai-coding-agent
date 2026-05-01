@@ -5,7 +5,9 @@ let pool: Pool | null = null;
 
 export async function connectPostgres() {
   if (!config.POSTGRES_URL) throw new Error('POSTGRES_URL not set');
-  pool = new Pool({ connectionString: config.POSTGRES_URL });
+  // Railway Postgres requires SSL — rejectUnauthorized: false for their self-signed cert
+  const sslConfig = config.NODE_ENV === 'production' ? { ssl: { rejectUnauthorized: false } } : {};
+  pool = new Pool({ connectionString: config.POSTGRES_URL, ...sslConfig });
   pool.on('connect', () => console.log('Postgres connected'));
   pool.on('error', err => console.error('Postgres error', err));
 }

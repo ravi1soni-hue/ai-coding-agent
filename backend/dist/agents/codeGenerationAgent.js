@@ -4,6 +4,7 @@ exports.codeGenerationAgent = codeGenerationAgent;
 const modelRouter_1 = require("./modelRouter");
 const vectorStore_1 = require("../db/vectorStore");
 const llmProxyClient_1 = require("./llmProxyClient");
+const embeddingAgent_1 = require("./embeddingAgent");
 /**
  * Patch-based code generation agent for continuous evolution.
  * Accepts current state, requirements, and modification request.
@@ -15,7 +16,7 @@ const llmProxyClient_1 = require("./llmProxyClient");
  *   context?: any, // additional context (e.g., previous patches)
  *   embedding?: any // for RAG
  * }
- * returns: { patch: string, frontendRepo?: string, backendRepo?: string }
+ * returns: { patch: string, files?: Array<{ path: string; content: string }>, frontendRepo?: string, backendRepo?: string }
  */
 async function codeGenerationAgent(input) {
     if (process.env.NODE_ENV !== 'production') {
@@ -25,19 +26,32 @@ async function codeGenerationAgent(input) {
         if (!input)
             throw new Error('Input required');
         const { model, apiKey } = (0, modelRouter_1.getModelConfigForTask)('code_generation');
-        const llmProxy = new llmProxyClient_1.LLMProxyClient({
-            apiKey,
-            chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/chat/completions',
-            embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
-        });
+        const llmProxy = new llmProxyClient_1.LLMProxyClient({ apiKey });
         let retrievedPatches = [];
+        let embedding = input.embedding;
+        if (!Array.isArray(embedding)) {
+            try {
+                const basis = JSON.stringify({
+                    systemDesign: input.systemDesign,
+                    requirements: input.requirements,
+                    modification: input.modification,
+                });
+                const embedded = await (0, embeddingAgent_1.embeddingAgent)(basis);
+                if (Array.isArray(embedded) && embedded.length > 0) {
+                    embedding = embedded;
+                }
+            }
+            catch {
+                embedding = undefined;
+            }
+        }
         // If embedding is available in input, retrieve similar code patches for RAG
-        if (input.embedding && Array.isArray(input.embedding)) {
+        if (embedding && Array.isArray(embedding)) {
             try {
                 const similar = await (0, vectorStore_1.searchVectors)({
                     user_id: input.user_id || 'unknown',
                     task: 'code_patch',
-                    embedding: input.embedding,
+                    embedding,
                     topK: 3
                 });
                 retrievedPatches = similar.map(row => row.metadata?.patch).filter(Boolean);
@@ -54,14 +68,15 @@ async function codeGenerationAgent(input) {
             context: input.context,
             retrievedPatches
         };
-        const systemPrompt = `You are a code generation agent for a continuous-evolution system.
-Given the current system design, requirements, and (if present) a user modification request, generate ONLY the minimal patch-based code updates needed (never full repo).
-If modification is present, generate a patch to apply the change to the existing codebase.
-Respond ONLY in JSON: { patch: string, frontendRepo?: string, backendRepo?: string }.`;
+        const systemPrompt = `You are a code generation agent. Given a system design and requirements, generate a complete, working frontend web application.
+Always produce fully materialized files in the files array — every file needed to run the app (HTML, CSS, JS/JSX, config, package.json, etc.).
+Do NOT truncate or abbreviate any file content. Every file must be complete and runnable.
+Also produce a unified diff patch string summarizing the changes.
+Respond ONLY in valid JSON with no markdown fences: { patch: string, files: Array<{ path: string; content: string }> }.`;
         const completion = await llmProxy.chatCompletion([
             { role: 'system', content: systemPrompt },
             { role: 'user', content: JSON.stringify(userPrompt) }
-        ], 'gpt-5-chat', 0.8, 0.9, 1000);
+        ], model, 0.7, 0.95, 8000);
         if (process.env.NODE_ENV !== 'production') {
             console.log('[codeGenerationAgent] LLM completion:', completion);
         }
@@ -92,7 +107,10 @@ Respond ONLY in JSON: { patch: string, frontendRepo?: string, backendRepo?: stri
         if (process.env.NODE_ENV !== 'production') {
             console.log('[codeGenerationAgent] result:', result);
         }
-        return result;
+        return {
+            ...result,
+            embedding: embedding || result.embedding,
+        };
     }
     catch (err) {
         console.error('[codeGenerationAgent] error:', err);

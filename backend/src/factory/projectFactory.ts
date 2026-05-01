@@ -24,8 +24,8 @@ type MaterializeInput = {
 };
 
 const WORKSPACE_ROOT = path.resolve(__dirname, '../../generated-projects');
-// Use the minimal blank template — NOT the builder's own auth frontend
 const FRONTEND_TEMPLATE_DIR = path.resolve(__dirname, '../templates/frontend');
+const BACKEND_TEMPLATE_DIR = path.resolve(__dirname, '../templates/backend');
 
 function sanitizeSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48) || 'project';
@@ -134,6 +134,7 @@ export async function materializeProjectWorkspace(input: MaterializeInput): Prom
 
   await fs.mkdir(workspaceDir, { recursive: true });
   await copyDir(FRONTEND_TEMPLATE_DIR, workspaceDir);
+  await copyDir(BACKEND_TEMPLATE_DIR, path.join(workspaceDir, 'backend'));
 
   const generatedFiles = extractGeneratedFiles(input.codeGen);
   for (const file of generatedFiles) {

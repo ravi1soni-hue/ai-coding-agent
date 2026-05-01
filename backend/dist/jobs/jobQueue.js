@@ -2,9 +2,10 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.JobQueue = void 0;
 class JobQueue {
-    constructor() {
+    constructor(processor) {
         this.queue = [];
         this.processing = false;
+        this.processor = processor;
     }
     async addJob(payload) {
         const job = { id: Date.now().toString(), payload };
@@ -15,15 +16,20 @@ class JobQueue {
         if (this.processing)
             return;
         this.processing = true;
-        while (this.queue.length > 0) {
-            const job = this.queue.shift();
-            if (job) {
-                // Simulate job processing
-                await new Promise((res) => setTimeout(res, 100));
-                console.log('Processed job:', job.id, job.payload);
+        try {
+            while (this.queue.length > 0) {
+                const job = this.queue.shift();
+                if (job) {
+                    if (!this.processor) {
+                        throw new Error('JobQueue processor is not configured. Cannot process queued jobs.');
+                    }
+                    await this.processor(job);
+                }
             }
         }
-        this.processing = false;
+        finally {
+            this.processing = false;
+        }
     }
 }
 exports.JobQueue = JobQueue;

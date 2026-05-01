@@ -126,8 +126,9 @@ export async function runOrchestration(ctx: OrchestrationContext) {
 	  projectId,
 	  revisionId,
 	  buildDir: ctx.testResult?.buildDir || path.resolve(__dirname, '../../../frontend/dist'),
+	  backendDir: ctx.testResult?.backendDir,
 	  frontendProjectName: `proj-${projectId.slice(0, 10)}`,
-	  backendService: 'backend',
+	  backendService: `backend-${projectId.slice(0, 10)}`,
 	});
 	ctx.history.push({
 	  step: 'deployment',

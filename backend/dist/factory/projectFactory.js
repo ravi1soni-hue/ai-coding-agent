@@ -9,7 +9,8 @@ const promises_1 = __importDefault(require("fs/promises"));
 const path_1 = __importDefault(require("path"));
 const child_process_1 = require("child_process");
 const WORKSPACE_ROOT = path_1.default.resolve(__dirname, '../../generated-projects');
-const FRONTEND_TEMPLATE_DIR = path_1.default.resolve(__dirname, '../../../frontend');
+const FRONTEND_TEMPLATE_DIR = path_1.default.resolve(__dirname, '../templates/frontend');
+const BACKEND_TEMPLATE_DIR = path_1.default.resolve(__dirname, '../templates/backend');
 function sanitizeSegment(value) {
     return value.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48) || 'project';
 }
@@ -106,6 +107,7 @@ async function materializeProjectWorkspace(input) {
     const workspaceDir = path_1.default.join(projectDir, revisionId);
     await promises_1.default.mkdir(workspaceDir, { recursive: true });
     await copyDir(FRONTEND_TEMPLATE_DIR, workspaceDir);
+    await copyDir(BACKEND_TEMPLATE_DIR, path_1.default.join(workspaceDir, 'backend'));
     const generatedFiles = extractGeneratedFiles(input.codeGen);
     for (const file of generatedFiles) {
         const normalized = file.path.replace(/^\/+/, '');

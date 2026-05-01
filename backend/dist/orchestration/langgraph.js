@@ -1,4 +1,7 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.runOrchestration = runOrchestration;
 // LangGraph orchestration entry point
@@ -12,8 +15,11 @@ const testFixAgent_1 = require("../agents/testFixAgent");
 const deploymentAgent_1 = require("../agents/deploymentAgent");
 const buildWorker_1 = require("../workers/buildWorker");
 const auditLog_1 = require("../db/auditLog");
+const path_1 = __importDefault(require("path"));
+const projectFactory_1 = require("../factory/projectFactory");
 async function runOrchestration(ctx) {
     const user_id = ctx.user_message?.slice(0, 32) || 'unknown';
+    const projectId = ctx.projectId || `orchestration-${Date.now().toString(36)}`;
     ctx.history = ctx.history || [];
     // Step 1: Requirement Analysis
     ctx.requirements = await (0, requirementAnalysisAgent_1.requirementAnalysisAgent)({ user_message: ctx.user_message });
@@ -56,7 +62,15 @@ async function runOrchestration(ctx) {
     });
     await (0, auditLog_1.logOrchestrationStep)({ user_id, step: 'systemDesign', input: ctx.requirements, output: ctx.systemDesign });
     // Step 5: Code Generation
-    ctx.codeGen = await (0, codeGenerationAgent_1.codeGenerationAgent)(ctx.systemDesign);
+    ctx.codeGen = await (0, codeGenerationAgent_1.codeGenerationAgent)({
+        systemDesign: ctx.systemDesign,
+        requirements: ctx.requirements,
+        user_id,
+    });
+    ctx.materializedRevision = await (0, projectFactory_1.materializeProjectWorkspace)({
+        projectId,
+        codeGen: ctx.codeGen,
+    });
     ctx.history.push({
         step: 'codeGeneration',
         input: ctx.systemDesign,
@@ -74,7 +88,9 @@ async function runOrchestration(ctx) {
         });
     }
     // Step 6: Test & Fix
-    ctx.testResult = await (0, testFixAgent_1.testFixAgent)({ buildFn: () => (0, buildWorker_1.runBuildWorker)(ctx.codeGen) });
+    ctx.testResult = await (0, testFixAgent_1.testFixAgent)({
+        buildFn: () => (0, buildWorker_1.runBuildWorker)({ workspaceDir: ctx.materializedRevision?.workspaceDir }),
+    });
     ctx.history.push({
         step: 'testFix',
         input: ctx.codeGen,
@@ -83,7 +99,15 @@ async function runOrchestration(ctx) {
     });
     await (0, auditLog_1.logOrchestrationStep)({ user_id, step: 'testFix', input: ctx.codeGen, output: ctx.testResult });
     // Step 7: Deployment
-    ctx.deployment = await (0, deploymentAgent_1.deploymentAgent)({ frontend: 'frontend', backend: 'backend' });
+    const revisionId = ctx.revisionId || ctx.materializedRevision?.revisionId || `rev-${Date.now().toString(36)}`;
+    ctx.deployment = await (0, deploymentAgent_1.deploymentAgent)({
+        projectId,
+        revisionId,
+        buildDir: ctx.testResult?.buildDir || path_1.default.resolve(__dirname, '../../../frontend/dist'),
+        backendDir: ctx.testResult?.backendDir,
+        frontendProjectName: `proj-${projectId.slice(0, 10)}`,
+        backendService: `backend-${projectId.slice(0, 10)}`,
+    });
     ctx.history.push({
         step: 'deployment',
         input: ctx.testResult,

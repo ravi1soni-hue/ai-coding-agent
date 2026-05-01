@@ -4,18 +4,18 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const env_1 = require("./config/env");
-// Warn if OpenAI API key is missing or looks invalid
-if (!env_1.config.OPENAI_API_KEY || env_1.config.OPENAI_API_KEY.length < 20 || env_1.config.OPENAI_API_KEY.includes('sk-') === false) {
-    console.warn('[WARNING] OPENAI_API_KEY is missing or may be invalid. Check your .env or Railway environment variables.');
+// Warn if API key is missing
+if (!env_1.config.OPENAI_API_KEY || env_1.config.OPENAI_API_KEY.length < 10) {
+    console.warn('[WARNING] OPENAI_API_KEY is missing or too short. Check your .env or Railway environment variables.');
 }
 const fastify_1 = __importDefault(require("fastify"));
 const static_1 = __importDefault(require("@fastify/static"));
 const path_1 = __importDefault(require("path"));
-const fs_1 = __importDefault(require("fs"));
 const routes_1 = require("./api/routes");
 const socket_1 = require("./api/socket");
 const redis_1 = require("./cache/redis");
 const postgres_1 = require("./db/postgres");
+const schema_1 = require("./db/schema");
 const vectorStore_1 = require("./db/vectorStore");
 async function start() {
     try {
@@ -23,6 +23,8 @@ async function start() {
         await (0, redis_1.connectRedis)();
         // Initialize Postgres
         await (0, postgres_1.connectPostgres)();
+        // Ensure auth/session/project tables
+        await (0, schema_1.ensureCoreTables)();
         // Ensure vectors table and pgvector extension
         await (0, vectorStore_1.ensureVectorTable)();
     }
@@ -35,30 +37,9 @@ async function start() {
     });
     // Serve static frontend
     fastify.register(static_1.default, {
-        root: path_1.default.join(__dirname, '../frontend'),
+        root: path_1.default.join(__dirname, '../../frontend/dist'),
         prefix: '/',
         index: ['index.html'],
-    });
-    // Debug endpoint to list frontend files
-    fastify.get('/debug-frontend-files', async (request, reply) => {
-        try {
-            const dir = path_1.default.join(__dirname, '../frontend');
-            const files = fs_1.default.readdirSync(dir);
-            return reply.send({ files });
-        }
-        catch (e) {
-            return reply.status(500).send({ error: e.message });
-        }
-    });
-    // Debug endpoint to show contents of index.html
-    fastify.get('/debug-index-html', async (request, reply) => {
-        try {
-            const file = fs_1.default.readFileSync(path_1.default.join(__dirname, '../frontend/index.html'), 'utf8');
-            return reply.type('text/html').send(file);
-        }
-        catch (e) {
-            return reply.status(500).send({ error: e.message });
-        }
     });
     await (0, routes_1.registerRoutes)(fastify);
     const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;

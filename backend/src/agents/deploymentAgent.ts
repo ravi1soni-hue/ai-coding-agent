@@ -6,6 +6,7 @@ export async function deploymentAgent(input: {
   projectId: string;
   revisionId: string;
   buildDir: string;
+  backendDir?: string;
   frontendProjectName?: string;
   backendService: string;
 }) {
@@ -32,6 +33,7 @@ export async function deploymentAgent(input: {
       source: 'deploymentAgent',
       projectId: input.projectId,
       revisionId: input.revisionId,
+      sourceDir: input.backendDir,
     });
 
     const result = {

@@ -1,6 +1,10 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.deploymentAgent = deploymentAgent;
+const axios_1 = __importDefault(require("axios"));
 const vercelDeploy_1 = require("./vercelDeploy");
 const railwayDeploy_1 = require("../deploy/railwayDeploy");
 async function deploymentAgent(input) {
@@ -27,6 +31,7 @@ async function deploymentAgent(input) {
             source: 'deploymentAgent',
             projectId: input.projectId,
             revisionId: input.revisionId,
+            sourceDir: input.backendDir,
         });
         const result = {
             frontend_url: `https://${vercelResult.url}`,
@@ -39,7 +44,24 @@ async function deploymentAgent(input) {
             railway_status: railwayResult.status,
             railway_log_url: railwayResult.logUrl,
             railway_dashboard_url: railwayResult.dashboardUrl,
+            frontend_accessible: true,
+            frontend_access_warning: null,
         };
+        // Detect deployments protected by Vercel auth/SSO so UX can show a clear message.
+        try {
+            const probe = await axios_1.default.get(result.frontend_url, {
+                timeout: 10000,
+                maxRedirects: 0,
+                validateStatus: () => true,
+            });
+            if (probe.status === 401 || probe.status === 403) {
+                result.frontend_accessible = false;
+                result.frontend_access_warning = 'Vercel deployment is protected by authentication (SSO/password). Disable Deployment Protection in Vercel to make the URL publicly accessible.';
+            }
+        }
+        catch {
+            // Ignore probe errors and keep deployment result as-is.
+        }
         if (process.env.NODE_ENV !== 'production') {
             console.log('[deploymentAgent] result:', result);
         }

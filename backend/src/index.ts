@@ -6,7 +6,6 @@ if (!config.OPENAI_API_KEY || config.OPENAI_API_KEY.length < 10) {
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import path from 'path';
-import fs from 'fs';
 
 import { registerRoutes } from './api/routes';
 import { createSocketServer } from './api/socket';
@@ -39,27 +38,6 @@ async function start() {
                 root: path.join(__dirname, '../../frontend/dist'),
                 prefix: '/',
                 index: ['index.html'],
-        });
-
-        // Debug endpoint to list frontend files
-        fastify.get('/debug-frontend-files', async (request, reply) => {
-                try {
-                        const dir = path.join(__dirname, '../../frontend/dist');
-                        const files = fs.readdirSync(dir);
-                        return reply.send({ files });
-                } catch (e: any) {
-                        return reply.status(500).send({ error: e.message });
-                }
-        });
-
-        // Debug endpoint to show contents of index.html
-        fastify.get('/debug-index-html', async (request, reply) => {
-                try {
-                        const file = fs.readFileSync(path.join(__dirname, '../../frontend/dist/index.html'), 'utf8');
-                        return reply.type('text/html').send(file);
-                } catch (e: any) {
-                        return reply.status(500).send({ error: e.message });
-                }
         });
 
         await registerRoutes(fastify);

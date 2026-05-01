@@ -12,19 +12,23 @@ const env_1 = require("../config/env");
 const ioredis_1 = __importDefault(require("ioredis"));
 let redis = null;
 async function connectRedis() {
-    if (!env_1.config.REDIS_URL)
-        throw new Error('REDIS_URL not set');
+    if (!env_1.config.REDIS_URL) {
+        console.warn('[Redis] REDIS_URL not set — Redis disabled. Caching will be skipped.');
+        return;
+    }
     redis = new ioredis_1.default(env_1.config.REDIS_URL);
     redis.on('connect', () => console.log('Redis connected'));
     redis.on('error', err => console.error('Redis error', err));
 }
 function getRedis() {
     if (!redis)
-        throw new Error('Redis not connected');
+        return null;
     return redis;
 }
 async function setCache(key, value, ttlSeconds) {
     const client = getRedis();
+    if (!client)
+        return;
     if (ttlSeconds) {
         await client.set(key, value, 'EX', ttlSeconds);
     }
@@ -34,6 +38,8 @@ async function setCache(key, value, ttlSeconds) {
 }
 async function getCache(key) {
     const client = getRedis();
+    if (!client)
+        return null;
     return client.get(key);
 }
 async function closeRedis() {

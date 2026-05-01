@@ -14,7 +14,9 @@ import {
   revokeSession,
   touchProjectSession,
 } from '../auth/authService';
-import { getProjectEvents, listUserProjects } from '../db/projectStore';
+import { getProjectEvents, getLatestProjectCodeRevision, listUserProjects, saveProjectDeployment } from '../db/projectStore';
+import { runBuildWorker, cleanupWorkspace } from '../workers/buildWorker';
+import { deploymentAgent } from '../agents/deploymentAgent';
 
 const jobQueue = new JobQueue(async (job) => {
   console.log('[jobQueue] processed', job.id, job.payload);
@@ -43,7 +45,8 @@ export async function registerRoutes(fastify: FastifyInstance) {
     const email = body.email?.trim() ?? '';
     const password = body.password ?? '';
 
-    if (!name || !email || password.length < 8) {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!name || !emailRegex.test(email) || password.length < 8) {
       return reply.status(400).send({ error: 'Name, valid email, and password (min 8 chars) are required.' });
     }
 
@@ -130,6 +133,69 @@ export async function registerRoutes(fastify: FastifyInstance) {
     return { projects };
   });
 
+  fastify.post('/api/projects/:projectId/redeploy', async (req, reply) => {
+    const user = await requireUser(req, reply);
+    if (!user) return;
+
+    const params = req.params as { projectId: string };
+    const projectId = params.projectId;
+    const projects = await listUserProjects(user.id);
+    const projectExists = projects.some((project) => project.id === projectId);
+
+    if (!projectExists) {
+      return reply.status(404).send({ error: 'Project not found.' });
+    }
+
+    const revision = await getLatestProjectCodeRevision({ projectId, userId: user.id });
+    if (!revision) {
+      return reply.status(404).send({ error: 'No saved code revision found for this project.' });
+    }
+
+    try {
+      const buildResult = await runBuildWorker({ workspaceDir: revision.workspace_path });
+      if (!buildResult.success || !buildResult.buildDir) {
+        return reply.status(500).send({ error: 'Build failed during redeploy.', logs: buildResult.logs });
+      }
+
+      const deployment = await deploymentAgent({
+        projectId,
+        revisionId: revision.id,
+        buildDir: buildResult.buildDir,
+        backendDir: buildResult.backendDir,
+        frontendProjectName: `proj-${projectId.slice(0, 10)}`,
+        backendService: `backend-${projectId.slice(0, 10)}`,
+      });
+
+      await saveProjectDeployment({
+        projectId,
+        userId: user.id,
+        frontendUrl: deployment.frontend_url,
+        backendUrl: deployment.backend_url,
+        vercelDeploymentId: deployment.vercel_deployment_id,
+        vercelInspectUrl: deployment.vercel_inspect_url,
+        vercelStatus: deployment.vercel_status,
+        vercelLogUrl: deployment.vercel_log_url,
+        railwayDeploymentId: deployment.railway_deployment_id,
+        railwayStatus: deployment.railway_status,
+        railwayLogUrl: deployment.railway_log_url,
+        railwayDashboardUrl: deployment.railway_dashboard_url,
+        codeRevisionId: revision.id,
+        sourceArchivePath: revision.source_archive_path,
+        sourceHash: revision.source_hash,
+        raw: deployment,
+      });
+
+      if (revision.workspace_path) {
+        void cleanupWorkspace(revision.workspace_path);
+      }
+
+      return { deployment };
+    } catch (err: any) {
+      const message = err?.message || 'Redeploy failed.';
+      return reply.status(500).send({ error: message });
+    }
+  });
+
   fastify.post('/api/projects/select', async (req, reply) => {
     const user = await requireUser(req, reply);
     if (!user) return;
@@ -164,11 +230,6 @@ export async function registerRoutes(fastify: FastifyInstance) {
 
     const events = await getProjectEvents({ userId: user.id, projectId, limit: 1000 });
     return { events };
-  });
-
-  fastify.post('/echo', async (req, reply) => {
-    const body = req.body;
-    return { echo: body };
   });
 
   fastify.post('/job', async (req, reply) => {

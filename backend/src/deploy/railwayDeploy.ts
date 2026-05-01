@@ -1,6 +1,7 @@
 import axios from 'axios';
 import fs from 'fs/promises';
 import path from 'path';
+import { spawn } from 'child_process';
 import { config as env } from '../config/env';
 
 export type RailwayDeployResult = {
@@ -24,7 +25,6 @@ function isRailwayDashboardUrl(url: string): boolean {
 }
 
 async function resolveRailwayServiceUrl(): Promise<string> {
-  // 1. Prefer explicitly configured railway_url from railway.config.json
   const configPath = path.resolve(__dirname, '../../railway.config.json');
   try {
     const raw = await fs.readFile(configPath, 'utf8');
@@ -35,14 +35,42 @@ async function resolveRailwayServiceUrl(): Promise<string> {
     // config file not readable — fall through
   }
 
-  // 2. Prefer explicit public service URL from env if available.
   const publicUrl = normalizeUrl(env.RAILWAY_PUBLIC_URL || '');
   if (publicUrl && !isRailwayDashboardUrl(publicUrl)) {
     return publicUrl;
   }
 
-  // 3. No public URL resolvable — return empty so callers know.
   return '';
+}
+
+function runCommand(command: string, args: string[], cwd: string, timeoutMs: number): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve({ stdout, stderr: `${stderr}\nTimed out after ${timeoutMs}ms`, exitCode: 124 });
+    }, timeoutMs);
+
+    child.stdout.on('data', (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ stdout, stderr, exitCode: typeof code === 'number' ? code : 1 });
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolve({ stdout, stderr: `${stderr}\n${String(err)}`, exitCode: 1 });
+    });
+  });
 }
 
 async function triggerRailwayDeployment(input: {
@@ -100,7 +128,23 @@ async function triggerRailwayDeployment(input: {
   };
 }
 
-export async function deployToRailway(service: string, deployConfig: any): Promise<RailwayDeployResult> {
+async function runRailwayCliDeploy(sourceDir: string): Promise<{ deploymentId: string; status: RailwayDeployResult['status']; serviceUrl: string; logUrl: string }> {
+  try {
+    const { stdout, stderr, exitCode } = await runCommand('railway', ['up', '--detach'], sourceDir, 180_000);
+    const deploymentId = `railway-cli-${Date.now().toString(36)}`;
+    const serviceUrlMatch = stdout.match(/https?:\/\/[\w.-]+\.railway\.app/);
+    return {
+      deploymentId,
+      status: exitCode === 0 ? 'building' : 'failed',
+      serviceUrl: serviceUrlMatch?.[0] || '',
+      logUrl: `https://railway.app/project/${env.RAILWAY_PROJECT_ID ?? 'unknown'}`,
+    };
+  } catch (err) {
+    throw new Error(`Railway CLI deployment failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+export async function deployToRailway(service: string, deployConfig: { source?: string; projectId?: string; revisionId?: string; sourceDir?: string }): Promise<RailwayDeployResult> {
   if (process.env.NODE_ENV !== 'production') {
     console.log('Deploying to Railway target:', service, deployConfig);
   }
@@ -115,10 +159,23 @@ export async function deployToRailway(service: string, deployConfig: any): Promi
     : dashboardUrl;
 
   let status: RailwayDeployResult['status'] = 'queued';
-  let deploymentId = deployConfig?.revisionId
+  let deploymentId = deployConfig.revisionId
     ? `rail_${String(deployConfig.revisionId).replace(/[^a-zA-Z0-9]/g, '').slice(0, 24)}`
     : `rail_${Date.now().toString(36)}`;
   let logUrl = deploymentView;
+
+  if (deployConfig.sourceDir) {
+    try {
+      const cliResult = await runRailwayCliDeploy(deployConfig.sourceDir);
+      deploymentId = cliResult.deploymentId || deploymentId;
+      status = cliResult.status || status;
+      logUrl = cliResult.logUrl || logUrl;
+    } catch (err) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.error('[railwayDeploy] CLI deploy failed, falling back to GraphQL trigger:', err);
+      }
+    }
+  }
 
   const canTriggerDeploy =
     Boolean(env.RAILWAY_TOKEN) &&

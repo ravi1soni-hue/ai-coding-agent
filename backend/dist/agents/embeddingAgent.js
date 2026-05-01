@@ -10,11 +10,7 @@ async function embeddingAgent(text) {
     }
     try {
         const { apiKey } = (0, modelRouter_1.getModelConfigForTask)('embedding');
-        const llmProxy = new llmProxyClient_1.LLMProxyClient({
-            apiKey,
-            chatUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/chat/completions',
-            embeddingUrl: 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
-        });
+        const llmProxy = new llmProxyClient_1.LLMProxyClient({ apiKey });
         // The new embedding method expects an array of texts and returns an array of arrays
         const result = await llmProxy.embedding([text], 746);
         if (process.env.NODE_ENV !== 'production') {

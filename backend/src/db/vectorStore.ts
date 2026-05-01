@@ -9,19 +9,32 @@ import { getPgPool } from './postgres';
 // metadata (JSONB)
 // created_at (TIMESTAMP)
 
+let vectorsAvailable = false;
+
 export async function ensureVectorTable() {
   const pool = getPgPool();
-  await pool.query(`
-    CREATE EXTENSION IF NOT EXISTS vector;
-    CREATE TABLE IF NOT EXISTS vectors (
-      id SERIAL PRIMARY KEY,
-      user_id TEXT,
-      task TEXT,
-      embedding vector(1536),
-      metadata JSONB,
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-  `);
+  try {
+    await pool.query(`CREATE EXTENSION IF NOT EXISTS vector`);
+  } catch (err) {
+    console.warn('[VectorStore] pgvector extension not available — vector search disabled:', (err as any)?.message);
+    return;
+  }
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS vectors (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT,
+        task TEXT,
+        embedding vector(1536),
+        metadata JSONB,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    vectorsAvailable = true;
+    console.log('[VectorStore] vectors table ready');
+  } catch (err) {
+    console.warn('[VectorStore] Could not create vectors table:', (err as any)?.message);
+  }
 }
 
 export async function insertVector({ user_id, task, embedding, metadata }: {
@@ -30,6 +43,7 @@ export async function insertVector({ user_id, task, embedding, metadata }: {
   embedding: number[];
   metadata?: any;
 }) {
+  if (!vectorsAvailable) return;
   const pool = getPgPool();
   await pool.query(
     'INSERT INTO vectors (user_id, task, embedding, metadata) VALUES ($1, $2, $3, $4)',
@@ -43,6 +57,7 @@ export async function searchVectors({ user_id, task, embedding, topK = 5 }: {
   embedding: number[];
   topK?: number;
 }) {
+  if (!vectorsAvailable) return [];
   const pool = getPgPool();
   const res = await pool.query(
     `SELECT *, (embedding <#> $1::vector) AS distance
