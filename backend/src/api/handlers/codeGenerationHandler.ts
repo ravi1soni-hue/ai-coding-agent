@@ -18,7 +18,7 @@ export interface HandlerResult<T = any> {
   fallback?: any;
 }
 
-const TIMEOUT_MS = 15_000;
+const TIMEOUT_MS = 300_000;
 
 export async function handleCodeGeneration(
   input: CodeGenerationInput
