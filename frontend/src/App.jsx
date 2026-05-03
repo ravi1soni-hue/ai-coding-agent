@@ -237,6 +237,15 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
         case 'stream':
           pushMessage('assistant', payload.token || '');
           break;
+        case 'AGENT_THINKING':
+          pushMessage('system', payload.message || 'Agent thinking...');
+          break;
+        case 'FILE_WRITTEN':
+          pushMessage('system', payload.filePath ? `Wrote ${payload.filePath}` : (payload.message || 'File written.'));
+          break;
+        case 'BUILD_LOG_STREAM':
+          pushMessage('assistant', payload.token || payload.message || '');
+          break;
         case 'clarification':
           pushMessage('assistant', payload.question || 'Please clarify your request.');
           break;
@@ -378,7 +387,7 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
           <div className="buildHint">Describe what to build and follow live progress below.</div>
 
           <div className="activityBox">
-            {messages.slice(-6).map((m, idx) => (
+            {messages.slice(-30).map((m, idx) => (
               <div key={`${m.role}-${idx}`} className={`msg ${m.role}`}>
                 {m.text.split(/(https?:\/\/[^\s]+)/g).map((part, i) =>
                   /^https?:\/\//.test(part)

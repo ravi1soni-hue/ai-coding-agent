@@ -300,13 +300,46 @@ export function createSocketServer(server: http.Server) {
           return { success: result.success, logs: result.logs };
         },
         fixFn: async (logs: string) => {
+          const logPrefix = '--- buildWorker logs (raw) ---\n';
+          const logSuffix = '\n--- end buildWorker logs ---';
+          const normalizedLogs = typeof logs === 'string' ? logs : String(logs);
+
+          // Chunk large logs so the UI can render them reliably.
+          const chunkSize = 8000;
+
+          ws.send(JSON.stringify({
+            type: 'stream',
+            token: `${logPrefix}${normalizedLogs.slice(0, chunkSize)}`,
+          }));
+
+          for (let i = chunkSize; i < normalizedLogs.length; i += chunkSize) {
+            ws.send(JSON.stringify({
+              type: 'stream',
+              token: normalizedLogs.slice(i, i + chunkSize),
+            }));
+          }
+
+          if (normalizedLogs.length === 0) {
+            ws.send(JSON.stringify({ type: 'stream', token: '(no build logs captured)' }));
+          } else {
+            ws.send(JSON.stringify({ type: 'stream', token: logSuffix }));
+          }
+
           ws.send(JSON.stringify({ type: 'stream', token: 'Build failed — asking AI to fix errors...' }));
+
           const fixResult = await handleCodeGeneration({
             systemDesign: session.systemDesign,
             requirements: session.requirements,
-            modification: `Fix these build errors and produce corrected complete files:\n${logs.slice(-2000)}`,
+            modification: `Fix these build errors and produce corrected complete files:\n${normalizedLogs.slice(-2000)}`,
             projectId,
             userId: authedUser.id,
+            emitEvent: (event) => ws.send(JSON.stringify({
+              type: event.type,
+              message: event.message,
+              token: event.token,
+              filePath: event.filePath,
+              payload: event.payload,
+            })),
           });
           if (!fixResult.success) {
             debug(`socket:${flowLabel}-fixFn-failed`, { projectId, error: fixResult.error });
@@ -491,6 +524,13 @@ export function createSocketServer(server: http.Server) {
             requirements: session.requirements,
             projectId,
             userId: authedUser.id,
+            emitEvent: (event) => ws.send(JSON.stringify({
+              type: event.type,
+              message: event.message,
+              token: event.token,
+              filePath: event.filePath,
+              payload: event.payload,
+            })),
           });
           if (!cgResult.success) {
             session.step = 'codeGen'; // stay, allow retry
@@ -502,7 +542,16 @@ export function createSocketServer(server: http.Server) {
           session.stepRetries['codeGen'] = 0;
           debug('socket:codeGen', { projectId, fileCount: session.codeGen?.files?.length });
           sendProgress(ws, session, 'codeGen', 'Code generated!', 1);
-          ws.send(JSON.stringify({ type: 'stream', token: `Code generated (${session.codeGen?.files?.length || 0} files). Building and testing...` }));
+          const genFiles = Array.isArray(session.codeGen?.files) ? session.codeGen.files : [];
+          const fileCount = genFiles.length;
+          const previewPaths = genFiles.slice(0, 20).map((f: any) => f?.path).filter(Boolean) as string[];
+
+          ws.send(JSON.stringify({
+            type: 'stream',
+            token: `Code generated ✅ (${fileCount} files).` +
+              (previewPaths.length ? `\nFiles: ${previewPaths.join(', ')}${fileCount > previewPaths.length ? ', …' : ''}` : '') +
+              `\nBuilding and testing...`,
+          }));
           session.step = 'testFix';
         }
 
@@ -621,6 +670,13 @@ export function createSocketServer(server: http.Server) {
           context: session.modificationContext,
           projectId,
           userId: authedUser.id,
+          emitEvent: (event) => ws.send(JSON.stringify({
+            type: event.type,
+            message: event.message,
+            token: event.token,
+            filePath: event.filePath,
+            payload: event.payload,
+          })),
         });
 
         if (!cgResult.success) {
@@ -632,7 +688,16 @@ export function createSocketServer(server: http.Server) {
         session.codeGen = cgResult.data;
         await rematerializeAndStore(cgResult.data);
         sendProgress(ws, session, 'codeGen_modification', 'Updated code generated!', 1);
-        ws.send(JSON.stringify({ type: 'stream', token: 'Changes generated. Building and testing...' }));
+        const modFiles = Array.isArray(session.codeGen?.files) ? session.codeGen.files : [];
+        const modFileCount = modFiles.length;
+        const modPreviewPaths = modFiles.slice(0, 20).map((f: any) => f?.path).filter(Boolean) as string[];
+
+        ws.send(JSON.stringify({
+          type: 'stream',
+          token: `Code updated ✅ (${modFileCount} files).` +
+            (modPreviewPaths.length ? `\nFiles: ${modPreviewPaths.join(', ')}${modFileCount > modPreviewPaths.length ? ', …' : ''}` : '') +
+            `\nBuilding and testing...`,
+        }));
         session.step = 'testFix_modification';
 
         // Step 4: Build + Fix

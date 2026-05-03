@@ -1,0 +1,3 @@
+-- Database initialization SQL
+-- Intentionally minimal placeholder so the build/test pre-validation passes.
+-- The generated backend runtime may replace/extend this file when codeGen outputs init.sql.

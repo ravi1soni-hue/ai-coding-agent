@@ -1,0 +1,185 @@
+{
+  "manifest_version": "1.0",
+  "session_mode": "atomic_task_queue",
+  "project_scope": {
+    "goal": "Build a React frontend and Node.js/TypeScript backend with session-isolated shared PostgreSQL storage, real-time Socket.io progress emissions, and deployment hooks for Vercel and Railway.",
+    "constraints": [
+      "Frontend must be React",
+      "Backend must be Node.js/TypeScript",
+      "Use shared PostgreSQL",
+      "Enforce data isolation with either RLS or mandatory project_id filtering on every JSONB-backed table",
+      "Emit Socket.io status events at each micro-step",
+      "Deploy frontend to Vercel and backend to Railway"
+    ]
+  },
+  "atomic_queue": [
+    {
+      "step": 1,
+      "phase": "Blueprinting",
+      "action": "Finalize requirements and generate the project manifest only",
+      "outputs": [
+        "project_manifest.json",
+        "DB schema contract",
+        "file tree contract",
+        "event/status contract"
+      ]
+    },
+    {
+      "step": 2,
+      "phase": "Atomic File Generation",
+      "action": "Generate exactly one file per iteration",
+      "rule": "Do not batch files"
+    },
+    {
+      "step": 3,
+      "phase": "Validation Gate",
+      "action": "After each file write, run reviewer checks and TypeScript sandbox validation",
+      "checks": [
+        "syntax review",
+        "tsc compatibility review",
+        "manifest compliance review"
+      ]
+    },
+    {
+      "step": 4,
+      "phase": "Failure Handling",
+      "action": "If build or validation fails, ingest raw logs, identify the exact failure line, and reprompt the coder with that specific error",
+      "rule": "Do not continue until the root cause is fixed"
+    },
+    {
+      "step": 5,
+      "phase": "Deployment",
+      "action": "Deploy frontend to Vercel and backend to Railway after local build success",
+      "outputs": [
+        "live frontend URL",
+        "live backend URL"
+      ]
+    }
+  ],
+  "file_tree": {
+    "root": [
+      "project_manifest.json",
+      "README.md"
+    ],
+    "frontend": [
+      "frontend/index.html",
+      "frontend/package.json",
+      "frontend/vite.config.js",
+      "frontend/src/main.jsx",
+      "frontend/src/App.jsx",
+      "frontend/src/styles.css",
+      "frontend/src/components/*",
+      "frontend/socketClient.html"
+    ],
+    "backend": [
+      "backend/package.json",
+      "backend/tsconfig.json",
+      "backend/src/index.ts",
+      "backend/src/api/server.ts",
+      "backend/src/api/routes.ts",
+      "backend/src/api/socket.ts",
+      "backend/src/api/handlers/*",
+      "backend/src/agents/*",
+      "backend/src/auth/authService.ts",
+      "backend/src/cache/redis.ts",
+      "backend/src/config/env.ts",
+      "backend/src/db/postgres.ts",
+      "backend/src/db/schema.ts",
+      "backend/src/db/projectStore.ts",
+      "backend/src/db/auditLog.ts",
+      "backend/src/db/vectorStore.ts",
+      "backend/src/deploy/railwayDeploy.ts",
+      "backend/src/factory/projectFactory.ts",
+      "backend/src/jobs/jobQueue.ts",
+      "backend/src/orchestration/langgraph.ts",
+      "backend/src/tools/fsTools.ts",
+      "backend/src/utils/logger.ts",
+      "backend/src/utils/timeout.ts",
+      "backend/src/workers/buildWorker.ts",
+      "backend/src/templates/backend/db/init.sql",
+      "backend/src/templates/frontend/*"
+    ]
+  },
+  "database_schema": {
+    "strategy": "shared_postgres_with_project_isolation",
+    "guardrail": "Every row must include project_id and every query must filter by project_id; prefer RLS where supported.",
+    "tables": [
+      {
+        "name": "projects",
+        "columns": [
+          "id UUID PRIMARY KEY",
+          "session_id TEXT UNIQUE NOT NULL",
+          "name TEXT NOT NULL",
+          "status TEXT NOT NULL",
+          "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+          "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+        ]
+      },
+      {
+        "name": "project_tasks",
+        "columns": [
+          "id UUID PRIMARY KEY",
+          "project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE",
+          "task_key TEXT NOT NULL",
+          "payload JSONB NOT NULL DEFAULT '{}'::jsonb",
+          "status TEXT NOT NULL",
+          "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+          "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+        ]
+      },
+      {
+        "name": "project_assets",
+        "columns": [
+          "id UUID PRIMARY KEY",
+          "project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE",
+          "asset_type TEXT NOT NULL",
+          "path TEXT NOT NULL",
+          "content JSONB NOT NULL DEFAULT '{}'::jsonb",
+          "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+        ]
+      },
+      {
+        "name": "project_events",
+        "columns": [
+          "id UUID PRIMARY KEY",
+          "project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE",
+          "event_type TEXT NOT NULL",
+          "details JSONB NOT NULL DEFAULT '{}'::jsonb",
+          "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+        ]
+      }
+    ],
+    "security_rules": [
+      "Enable RLS on all project-scoped tables",
+      "Policy must restrict access to current project_id/session_id context",
+      "All backend repository functions must accept project_id explicitly",
+      "All JSONB reads/writes must be bounded by project_id"
+    ]
+  },
+  "realtime_contract": {
+    "transport": "Socket.io",
+    "events": [
+      "PLANNING_STARTED",
+      "PLANNING_COMPLETE",
+      "FILE_GENERATED",
+      "FILE_WRITTEN",
+      "REVIEW_PASSED",
+      "TSC_PASSED",
+      "LINT_CHECK_PASSED",
+      "BUILD_PASSED",
+      "DEPLOYMENT_STARTED",
+      "DEPLOYMENT_COMPLETE",
+      "ERROR_DETECTED"
+    ]
+  },
+  "deployment_contract": {
+    "frontend": {
+      "platform": "Vercel",
+      "trigger": "Vercel API / deployment hook"
+    },
+    "backend": {
+      "platform": "Railway",
+      "trigger": "Railway API / deployment hook"
+    }
+  }
+}

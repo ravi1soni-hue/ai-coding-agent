@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/apple/.nvm/versions/**)",
+      "Read(//usr/**)",
+      "Read(//opt/**)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
+    ]
+  }
+}

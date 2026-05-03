@@ -9,6 +9,7 @@ export interface CodeGenerationInput {
   context?: any;
   projectId: string;
   userId: string;
+  emitEvent?: (event: { type: string; message?: string; token?: string; filePath?: string; payload?: any }) => void;
 }
 
 export interface HandlerResult<T = any> {
@@ -34,6 +35,7 @@ export async function handleCodeGeneration(
         projectId: input.projectId,
         userId: input.userId,
         user_id: input.userId,
+        emitEvent: input.emitEvent,
       }),
       TIMEOUT_MS,
       'Code generation'
