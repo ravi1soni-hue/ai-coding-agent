@@ -2,12 +2,17 @@
   --bg-main: #f7f8fc;
   --bg-blend: #e7e6f7;
   --panel: #ffffff;
+  --panel-strong: rgba(255, 255, 255, 0.86);
   --text: #111111;
   --muted: #666666;
   --accent: #b46cff;
+  --accent-strong: #a156ff;
   --border: #eaeaea;
+  --border-strong: #dcd7f3;
   --system: #eef6ff;
   --error: #ffecec;
+  --shadow-soft: 0 12px 40px rgba(25, 23, 40, 0.08);
+  --shadow-strong: 0 20px 60px rgba(25, 23, 40, 0.12);
 }
 
 * {
@@ -32,14 +37,17 @@ body {
   min-height: 100vh;
   width: 100%;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(135deg, var(--bg-main) 80%, var(--bg-blend) 100%);
-  padding: 1rem;
+  align-items: stretch;
+  justify-content: stretch;
+  background:
+    radial-gradient(circle at top right, rgba(180, 108, 255, 0.16), transparent 28%),
+    radial-gradient(circle at left bottom, rgba(92, 152, 255, 0.12), transparent 26%),
+    linear-gradient(135deg, var(--bg-main) 72%, var(--bg-blend) 100%);
+  padding: 18px;
 }
 
 .authPageBg {
-  padding: 1.25rem;
+  padding: 18px;
 }
 
 .authLoading {
@@ -51,66 +59,74 @@ body {
 }
 
 .authShell {
-  width: min(1120px, 100%);
-  min-height: 720px;
+  width: min(1320px, 100%);
+  min-height: calc(100vh - 36px);
   display: grid;
-  grid-template-columns: 1.06fr 1fr;
-  background: #ffffff;
-  border-radius: 22px;
+  grid-template-columns: 1.02fr 0.98fr;
+  background: var(--panel-strong);
+  backdrop-filter: blur(18px);
+  border-radius: 28px;
   overflow: hidden;
-  border: 1px solid #ececf4;
-  box-shadow: 0 10px 36px rgba(26, 24, 40, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  box-shadow: var(--shadow-strong);
 }
 
 .authFormPane {
-  padding: 48px 40px;
-  background: #f9f9fc;
+  padding: clamp(28px, 4vw, 56px);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(247, 248, 252, 0.94)),
+    radial-gradient(circle at top left, rgba(180, 108, 255, 0.08), transparent 30%);
   display: flex;
   flex-direction: column;
+  justify-content: center;
 }
 
 .authTitle {
   margin: 0;
   font-family: 'Montserrat', Arial, sans-serif;
-  font-size: 2rem;
-  line-height: 1.1;
+  font-size: clamp(2rem, 3vw, 3.25rem);
+  line-height: 1.02;
+  letter-spacing: -0.03em;
 }
 
 .authSubtitle {
-  margin: 12px 0 18px;
+  margin: 14px 0 22px;
   color: var(--muted);
-  font-size: 0.96rem;
+  font-size: 1rem;
+  max-width: 46ch;
 }
 
 .authTabs {
-  background: #ececf4;
-  border-radius: 10px;
-  padding: 4px;
+  background: rgba(236, 236, 244, 0.88);
+  border: 1px solid rgba(220, 215, 243, 0.7);
+  border-radius: 14px;
+  padding: 5px;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 4px;
-  margin-bottom: 18px;
+  gap: 5px;
+  margin-bottom: 20px;
 }
 
 .authTab {
   border: none;
-  padding: 10px;
-  border-radius: 8px;
+  padding: 12px 10px;
+  border-radius: 10px;
   background: transparent;
   color: #70707b;
-  font-weight: 600;
+  font-weight: 700;
   cursor: pointer;
 }
 
 .authTab.active {
   background: #ffffff;
   color: #111;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  box-shadow: 0 4px 16px rgba(25, 23, 40, 0.08);
 }
 
 .authForm {
   display: grid;
-  gap: 12px;
+  gap: 14px;
+  max-width: 520px;
 }
 
 .authLabel {
@@ -121,16 +137,18 @@ body {
 }
 
 .authInput {
-  border: 1px solid #d8d8e4;
-  border-radius: 10px;
-  background: #fff;
-  padding: 12px;
-  font-size: 0.96rem;
+  border: 1px solid rgba(216, 216, 228, 0.95);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.92);
+  padding: 14px 15px;
+  font-size: 0.98rem;
+  transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
 }
 
 .authInput:focus {
-  outline: 2px solid rgba(180, 108, 255, 0.25);
-  border-color: rgba(180, 108, 255, 0.6);
+  outline: none;
+  border-color: rgba(180, 108, 255, 0.72);
+  box-shadow: 0 0 0 4px rgba(180, 108, 255, 0.14);
 }
 
 .authError {
@@ -145,12 +163,13 @@ body {
 .authSubmit {
   margin-top: 8px;
   border: none;
-  border-radius: 10px;
-  padding: 12px;
+  border-radius: 14px;
+  padding: 14px 16px;
   color: #fff;
-  font-weight: 700;
-  font-size: 0.98rem;
-  background: linear-gradient(90deg, #2f5fe8, #4aa5ef);
+  font-weight: 800;
+  font-size: 1rem;
+  background: linear-gradient(90deg, var(--accent-strong), var(--accent));
+  box-shadow: 0 10px 24px rgba(180, 108, 255, 0.22);
   cursor: pointer;
 }
 
@@ -161,8 +180,10 @@ body {
 
 .authVisualPane {
   position: relative;
-  min-height: 720px;
-  background: #111;
+  min-height: 100%;
+  background:
+    linear-gradient(180deg, rgba(16, 18, 28, 0.15), rgba(16, 18, 28, 0.5)),
+    #111;
 }
 
 .authVisualImg {
@@ -174,30 +195,33 @@ body {
 
 .authVisualOverlay {
   position: absolute;
-  left: 24px;
-  right: 24px;
-  bottom: 24px;
+  left: 28px;
+  right: 28px;
+  bottom: 28px;
   border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(9, 11, 17, 0.62);
+  background: rgba(9, 11, 17, 0.58);
   color: #edf2ff;
-  padding: 14px 16px;
-  border-radius: 12px;
-  font-size: 0.95rem;
-  line-height: 1.45;
+  padding: 16px 18px;
+  border-radius: 18px;
+  font-size: 0.98rem;
+  line-height: 1.5;
+  box-shadow: var(--shadow-soft);
 }
 
 .assistantWrapper {
-  background: var(--panel);
-  border-radius: 32px;
-  box-shadow: 0 4px 32px rgba(0, 0, 0, 0.06);
-  width: 760px;
-  min-height: 700px;
-  max-width: 98vw;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(255, 255, 255, 0.96));
+  border-radius: 30px;
+  box-shadow: var(--shadow-strong);
+  width: min(1440px, calc(100vw - 36px));
+  min-height: calc(100vh - 36px);
+  max-width: 100%;
   margin: 0 auto;
   display: flex;
   flex-direction: row;
   position: relative;
   overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(18px);
 }
 
 .assistantWrapper::before {
@@ -316,7 +340,7 @@ body {
 
 .assistantLeft {
   flex: 1 1 0;
-  padding: 28px 32px 20px;
+  padding: clamp(22px, 2.5vw, 34px);
   display: flex;
   flex-direction: column;
   z-index: 2;
@@ -327,7 +351,7 @@ body {
   justify-content: space-between;
   align-items: flex-start;
   gap: 16px;
-  margin-bottom: 8px;
+  margin-bottom: 12px;
 }
 
 .assistantHeaderRight {
@@ -491,11 +515,12 @@ body {
 }
 
 .assistantTitle {
-  font-size: 2rem;
+  font-size: clamp(2rem, 2.6vw, 3.3rem);
   font-weight: 800;
   color: var(--text);
   margin: 0;
-  line-height: 1.1;
+  line-height: 1.02;
+  letter-spacing: -0.03em;
   font-family: 'Montserrat', Arial, sans-serif;
 }
 
@@ -505,10 +530,10 @@ body {
 }
 
 .assistantQuestion {
-  font-size: 1.22rem;
+  font-size: clamp(1.1rem, 1.5vw, 1.45rem);
   color: var(--accent);
   font-style: normal;
-  font-weight: 600;
+  font-weight: 700;
   margin: 8px 0 10px;
   font-family: 'Montserrat', Arial, sans-serif;
 }
@@ -522,16 +547,17 @@ body {
 
 .socketStatus {
   margin-bottom: 10px;
-  width: min(500px, 100%);
-  border: 1px solid var(--border);
+  width: min(640px, 100%);
+  border: 1px solid rgba(220, 223, 236, 0.95);
   border-radius: 999px;
-  background: #ffffff;
-  font-size: 0.79rem;
-  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.84);
+  font-size: 0.82rem;
+  padding: 8px 12px;
   color: #444;
   display: flex;
   align-items: center;
   gap: 8px;
+  box-shadow: 0 8px 22px rgba(25, 23, 40, 0.04);
 }
 
 .socketStatusCentered {
@@ -577,16 +603,16 @@ body {
 }
 
 .assistantInputRow {
-  margin-top: 10px;
+  margin-top: 12px;
   display: flex;
   align-items: center;
   width: 100%;
   max-width: 100%;
-  background: #fff;
-  border-radius: 24px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
-  border: 1.5px solid var(--border);
-  padding: 4px 8px 4px 16px;
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 22px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.06);
+  border: 1.5px solid rgba(220, 223, 236, 0.95);
+  padding: 6px 8px 6px 16px;
   margin-bottom: max(8px, env(safe-area-inset-bottom));
 }
 
@@ -619,14 +645,15 @@ body {
   margin-top: 8px;
   width: 100%;
   max-width: 100%;
-  border-radius: 12px;
-  background: #fff;
-  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(220, 223, 236, 0.9);
   min-height: 112px;
   max-height: none;
   flex: 1;
   overflow: auto;
-  padding: 10px;
+  padding: 14px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
 }
 
 .projectMeta {
@@ -719,9 +746,13 @@ body {
 }
 
 @media (max-width: 900px) {
+  .mainBg {
+    padding: 10px;
+  }
+
   .authShell {
     grid-template-columns: 1fr;
-    min-height: 0;
+    min-height: calc(100vh - 20px);
   }
 
   .authFormPane {
@@ -729,17 +760,18 @@ body {
   }
 
   .authVisualPane {
-    min-height: 280px;
+    min-height: 240px;
   }
 
   .assistantWrapper {
     flex-direction: column;
-    width: 98vw;
-    min-height: 90vh;
+    width: 100%;
+    min-height: calc(100vh - 20px);
+    border-radius: 24px;
   }
 
   .assistantLeft {
-    padding: 26px 14px 12px;
+    padding: 22px 14px 12px;
   }
 
   .assistantHeaderRow {
@@ -767,12 +799,16 @@ body {
 }
 
 @media (max-width: 600px) {
+  .authPageBg {
+    padding: 8px;
+  }
+
   .authTitle {
     font-size: 1.6rem;
   }
 
   .authVisualPane {
-    min-height: 220px;
+    min-height: 210px;
   }
 
   .assistantDate {
@@ -822,6 +858,7 @@ body {
 
   .assistantWrapper {
     max-width: 100vw;
+    border-radius: 20px;
   }
 
   .historyOverlay {
@@ -869,11 +906,11 @@ body {
 
   .chatTopActions {
     width: auto;
+    flex-wrap: wrap;
   }
 
   .iconActionBtn {
     width: 36px;
     height: 36px;
   }
-
 }
