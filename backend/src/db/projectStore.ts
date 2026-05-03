@@ -64,6 +64,7 @@ export async function updateProjectSnapshot(input: {
   clarifications?: unknown;
   confirmation?: unknown;
   systemDesign?: unknown;
+  uiSpec?: unknown;
   codeGen?: unknown;
   testResult?: unknown;
   deployment?: unknown;
@@ -78,9 +79,10 @@ export async function updateProjectSnapshot(input: {
       clarifications = COALESCE($7::jsonb, clarifications),
       confirmation = COALESCE($8::jsonb, confirmation),
       system_design = COALESCE($9::jsonb, system_design),
-      code_gen = COALESCE($10::jsonb, code_gen),
-      test_result = COALESCE($11::jsonb, test_result),
-      deployment = COALESCE($12::jsonb, deployment),
+      ui_spec = COALESCE($10::jsonb, ui_spec),
+      code_gen = COALESCE($11::jsonb, code_gen),
+      test_result = COALESCE($12::jsonb, test_result),
+      deployment = COALESCE($13::jsonb, deployment),
       last_active_at = NOW()
      WHERE id = $1 AND user_id = $2`,
     [
@@ -93,6 +95,7 @@ export async function updateProjectSnapshot(input: {
       input.clarifications ? JSON.stringify(input.clarifications) : null,
       input.confirmation ? JSON.stringify(input.confirmation) : null,
       input.systemDesign ? JSON.stringify(input.systemDesign) : null,
+      input.uiSpec ? JSON.stringify(input.uiSpec) : null,
       input.codeGen ? JSON.stringify(input.codeGen) : null,
       input.testResult ? JSON.stringify(input.testResult) : null,
       input.deployment ? JSON.stringify(input.deployment) : null,
@@ -269,12 +272,13 @@ export async function getProjectSnapshot(input: { userId: string; projectId: str
     clarifications: any;
     confirmation: any;
     system_design: any;
+    ui_spec: any;
     code_gen: any;
     test_result: any;
     deployment: any;
   }>(
     `SELECT id, status, current_step, progress, requirements, clarifications, confirmation,
-            system_design, code_gen, test_result, deployment
+            system_design, ui_spec, code_gen, test_result, deployment
      FROM project_sessions
      WHERE id = $1 AND user_id = $2
      LIMIT 1`,

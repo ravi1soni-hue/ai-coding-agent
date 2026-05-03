@@ -113,6 +113,27 @@ export async function runOrchestration(ctx: OrchestrationContext) {
     ctx.testResult = await runStage('testFix', ctx.codeGen, async () =>
       testFixAgent({
         buildFn: () => runBuildWorker({ workspaceDir: ctx.materializedRevision?.workspaceDir }),
+        fixFn: async (logs: string) => {
+          const repair = await codeGenerationAgent({
+            systemDesign: ctx.systemDesign,
+            requirements: ctx.requirements,
+            modification: `Fix the build errors below and regenerate complete files:\n${String(logs).slice(-4000)}`,
+            user_id,
+            projectId,
+          });
+          ctx.codeGen = repair;
+          ctx.materializedRevision = await materializeProjectWorkspace({
+            projectId,
+            codeGen: repair,
+          });
+          ctx.history!.push({
+            step: 'codeGeneration',
+            input: ctx.systemDesign,
+            output: repair,
+            timestamp: new Date().toISOString(),
+          });
+          await logOrchestrationStep({ user_id, step: 'codeGeneration', input: ctx.systemDesign, output: repair });
+        },
         files: ctx.codeGen?.files,
         workspaceDir: ctx.materializedRevision?.workspaceDir,
       })

@@ -1,0 +1,416 @@
+/**
+ * UI Specification Agent
+ * Generates a detailed UI specification before code generation
+ * Includes:
+ * - Component interfaces (props)
+ * - Data flow (which component fetches what)
+ * - Layout structure (App.jsx composition)
+ * - API contract (endpoints and response shapes)
+ * - Component dependencies (for ordered generation)
+ */
+
+import { getModelConfigForTask } from './modelRouter';
+import { LLMProxyClient } from './llmProxyClient';
+import { debug, error as logError } from '../utils/logger';
+
+export interface ComponentInterface {
+  name: string;
+  path: string;
+  purpose: string;
+  props: {
+    [key: string]: {
+      type: string;
+      required: boolean;
+      description: string;
+    };
+  };
+  state?: string[];
+  effects?: string[];
+  dependencies: string[];
+  renderLogic: string;
+}
+
+export interface DataFlowNode {
+  componentName: string;
+  fetches?: {
+    endpoint: string;
+    method: string;
+    dataKey: string;
+    responsePath?: string;
+  }[];
+  passesTo: {
+    [componentName: string]: string[];
+  };
+}
+
+export interface APIContract {
+  endpoint: string;
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
+  consumedBy: string[];
+  requestShape?: string;
+  responseShape: {
+    [key: string]: string;
+  };
+  errorResponses?: string[];
+}
+
+export interface UISpec {
+  appName: string;
+  components: ComponentInterface[];
+  dataFlow: DataFlowNode[];
+  layoutStructure: {
+    appRoot: string;
+    compositionOrder: string[];
+    stateManagement: string;
+  };
+  apiContract: APIContract[];
+  generationOrder: string[];
+  navigationStrategy: string;
+  stateManagementStrategy: string;
+}
+
+async function callLLMWithRetry(
+  llmProxy: LLMProxyClient,
+  messages: Array<{ role: string; content: string }>,
+  model: string,
+  maxTokens: number,
+  maxRetries = 2,
+  label = 'llmCall'
+): Promise<string> {
+  let lastError: Error = new Error('Unknown error');
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const completion = await llmProxy.chatCompletion(messages, model, 0.3, 0.9, maxTokens, 120_000);
+      const content: string = completion.choices?.[0]?.message?.content || '';
+      if (/^[\s]*<!doctype|<html/i.test(content)) throw new Error(`${label}: LLM returned HTML error page`);
+      if (!content.trim()) throw new Error(`${label}: LLM returned empty response`);
+      return content;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 1000 * attempt));
+      }
+    }
+  }
+  throw lastError;
+}
+
+function parseJsonFromResponse(content: string): any {
+  const cleaned = content.replace(/```[a-zA-Z]*\s*/g, '').replace(/```/g, '').trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const jsonMatch = cleaned.match(/{[\s\S]*}|\[[\s\S]*\]/);
+    if (jsonMatch) {
+      try {
+        return JSON.parse(jsonMatch[0]);
+      } catch {}
+    }
+  }
+  throw new Error(`No valid JSON found. Snippet: ${content.replace(/\s+/g, ' ').slice(0, 200)}`);
+}
+
+function calculateComponentDependencies(
+  components: ComponentInterface[],
+  dataFlow: DataFlowNode[]
+): { order: string[]; dependencies: Map<string, string[]> } {
+  const depMap = new Map<string, string[]>();
+  
+  // Build dependency graph
+  components.forEach(comp => {
+    depMap.set(comp.name, [...comp.dependencies]);
+  });
+
+  // Add data flow dependencies
+  dataFlow.forEach(flow => {
+    const currentDeps = depMap.get(flow.componentName) || [];
+    Object.keys(flow.passesTo).forEach(childComp => {
+      if (!currentDeps.includes(childComp)) {
+        currentDeps.push(childComp);
+      }
+    });
+    depMap.set(flow.componentName, currentDeps);
+  });
+
+  // Topological sort: generate leaf components first
+  const visited = new Set<string>();
+  const order: string[] = [];
+
+  function visit(name: string, recursionStack: Set<string>): void {
+    if (visited.has(name)) return;
+    if (recursionStack.has(name)) return; // Cycle detection
+
+    recursionStack.add(name);
+    const deps = depMap.get(name) || [];
+    deps.forEach(dep => {
+      if (components.find(c => c.name === dep)) {
+        visit(dep, recursionStack);
+      }
+    });
+    recursionStack.delete(name);
+
+    visited.add(name);
+    order.push(name);
+  }
+
+  components.forEach(comp => {
+    visit(comp.name, new Set());
+  });
+
+  return { order, dependencies: depMap };
+}
+
+export async function uiSpecAgent(input: any): Promise<UISpec> {
+  debug('uiSpecAgent', { input });
+  try {
+    if (!input || !input.systemDesign) {
+      throw new Error('System design required as input');
+    }
+
+    const { model, apiKey } = getModelConfigForTask('code_generation');
+    const llmProxy = new LLMProxyClient({ apiKey });
+
+    const systemDesign = input.systemDesign;
+    const requirements = input.requirements || {};
+    const modification = input.modification || null;
+
+    // Step 1: Generate component interfaces
+    const componentInterfacePrompt = `You are a React component architect. Based on the system design and requirements, define detailed component interfaces.
+
+System Design:
+${JSON.stringify(systemDesign, null, 2)}
+
+Requirements:
+${JSON.stringify(requirements, null, 2)}
+
+Generate a JSON array with this exact shape (no markdown fences):
+[
+  {
+    "name": "ComponentName",
+    "path": "src/components/ComponentName.jsx",
+    "purpose": "What this component does",
+    "props": {
+      "propName": {
+        "type": "string|number|boolean|object|array",
+        "required": true|false,
+        "description": "What this prop is for"
+      }
+    },
+    "state": ["stateVarName1", "stateVarName2"],
+    "effects": ["Description of side effects"],
+    "dependencies": ["OtherComponentName"],
+    "renderLogic": "Brief description of what this component renders"
+  }
+]
+
+RULES:
+- Create 2-4 components matching the actual requirements
+- Each component must have clear, specific props
+- Dependencies should be other component names (for leaf-first generation)
+- renderLogic should describe actual UI output, not generic placeholders
+- Components should be specific to the user's request, not generic examples`;
+
+    const componentInterfaceRaw = await callLLMWithRetry(
+      llmProxy,
+      [{ role: 'system', content: componentInterfacePrompt }, { role: 'user', content: '' }],
+      model,
+      2500,
+      2,
+      'componentInterfaces'
+    );
+
+    const componentInterfaces = parseJsonFromResponse(componentInterfaceRaw);
+    if (!Array.isArray(componentInterfaces)) {
+      throw new Error('Component interfaces must be an array');
+    }
+
+    const components: ComponentInterface[] = componentInterfaces.map((c: any, index: number) => ({
+      name: c.name || `Component${index + 1}`,
+      path: c.path || `src/components/Component${index + 1}.jsx`,
+      purpose: c.purpose || 'Generated component',
+      props: c.props || {},
+      state: Array.isArray(c.state) ? c.state : [],
+      effects: Array.isArray(c.effects) ? c.effects : [],
+      dependencies: Array.isArray(c.dependencies) ? c.dependencies : [],
+      renderLogic: c.renderLogic || 'Renders UI based on props and state',
+    }));
+
+    debug('uiSpecAgent:componentInterfaces', { components });
+
+    // Step 2: Generate data flow
+    const dataFlowPrompt = `You are a React data architecture expert. Define the data flow between components.
+
+Components:
+${JSON.stringify(components.map(c => ({ name: c.name, purpose: c.purpose, props: Object.keys(c.props) })), null, 2)}
+
+System Design:
+${JSON.stringify(systemDesign, null, 2)}
+
+Requirements:
+${JSON.stringify(requirements, null, 2)}
+
+Generate a JSON object with this exact shape (no markdown fences):
+{
+  "nodes": [
+    {
+      "componentName": "ComponentName",
+      "fetches": [
+        {
+          "endpoint": "/api/resource",
+          "method": "GET",
+          "dataKey": "items",
+          "responsePath": "data.items"
+        }
+      ],
+      "passesTo": {
+        "ChildComponentName": ["propName1", "propName2"]
+      }
+    }
+  ]
+}
+
+RULES:
+- Include all components in nodes
+- fetches array should only include endpoints this component actually calls
+- passesTo maps component names to the specific props they receive
+- Ensure data flows logically from parent to child
+- No circular dependencies`;
+
+    const dataFlowRaw = await callLLMWithRetry(
+      llmProxy,
+      [{ role: 'system', content: dataFlowPrompt }, { role: 'user', content: '' }],
+      model,
+      2000,
+      2,
+      'dataFlow'
+    );
+
+    const dataFlowObj = parseJsonFromResponse(dataFlowRaw);
+    const dataFlow: DataFlowNode[] = (dataFlowObj.nodes || []).map((n: any) => ({
+      componentName: n.componentName || '',
+      fetches: Array.isArray(n.fetches) ? n.fetches : [],
+      passesTo: n.passesTo || {},
+    }));
+
+    debug('uiSpecAgent:dataFlow', { dataFlow });
+
+    // Step 3: Generate API contract
+    const apiContractPrompt = `You are a REST API contract expert. Define the exact API endpoints and shapes.
+
+Data Flow:
+${JSON.stringify(dataFlow, null, 2)}
+
+System Design:
+${JSON.stringify(systemDesign, null, 2)}
+
+Requirements:
+${JSON.stringify(requirements, null, 2)}
+
+Generate a JSON array with this exact shape (no markdown fences):
+[
+  {
+    "endpoint": "/api/resource",
+    "method": "GET",
+    "consumedBy": ["ComponentName1", "ComponentName2"],
+    "requestShape": "Query params: ?filter=value&sort=field",
+    "responseShape": {
+      "id": "number",
+      "name": "string",
+      "created_at": "ISO 8601 timestamp"
+    },
+    "errorResponses": ["400 Bad Request", "401 Unauthorized", "500 Server Error"]
+  }
+]
+
+RULES:
+- Include only endpoints actually used in the data flow
+- responseShape must match what components expect
+- Method must be GET, POST, PUT, DELETE, or PATCH
+- consumedBy must list actual component names that fetch from this endpoint
+- Keep field names and types realistic for the domain`;
+
+    const apiContractRaw = await callLLMWithRetry(
+      llmProxy,
+      [{ role: 'system', content: apiContractPrompt }, { role: 'user', content: '' }],
+      model,
+      2000,
+      2,
+      'apiContract'
+    );
+
+    const apiContractArr = parseJsonFromResponse(apiContractRaw);
+    const apiContract: APIContract[] = (Array.isArray(apiContractArr) ? apiContractArr : []).map((a: any) => ({
+      endpoint: a.endpoint || '/api/resource',
+      method: (a.method || 'GET').toUpperCase() as any,
+      consumedBy: Array.isArray(a.consumedBy) ? a.consumedBy : [],
+      requestShape: a.requestShape,
+      responseShape: a.responseShape || {},
+      errorResponses: Array.isArray(a.errorResponses) ? a.errorResponses : [],
+    }));
+
+    debug('uiSpecAgent:apiContract', { apiContract });
+
+    // Step 4: Calculate component generation order
+    const { order: generationOrder } = calculateComponentDependencies(components, dataFlow);
+
+    // Step 5: Generate layout structure
+    const layoutPrompt = `You are a React layout expert. Define how components are composed in App.jsx.
+
+Components (in generation order):
+${generationOrder.join(' -> ')}
+
+Component Details:
+${JSON.stringify(components, null, 2)}
+
+System Design:
+${JSON.stringify(systemDesign, null, 2)}
+
+Generate a JSON object with this exact shape (no markdown fences):
+{
+  "appRoot": "Describes the main App component structure",
+  "compositionOrder": ["ComponentName1", "ComponentName2"],
+  "stateManagement": "Description of state management approach (props drilling, context, etc)",
+  "navigationStrategy": "How navigation/routing is handled (if applicable)",
+  "stateManagementStrategy": "How to manage shared state (useState, context, etc)"
+}
+
+RULES:
+- compositionOrder must list components in logical rendering order
+- stateManagement should describe how props flow and state is shared
+- navigationStrategy describes page/section switching if applicable
+- appRoot should describe the main structure clearly`;
+
+    const layoutRaw = await callLLMWithRetry(
+      llmProxy,
+      [{ role: 'system', content: layoutPrompt }, { role: 'user', content: '' }],
+      model,
+      1500,
+      2,
+      'layoutStructure'
+    );
+
+    const layoutObj = parseJsonFromResponse(layoutRaw);
+
+    // Compile final UI spec
+    const uiSpec: UISpec = {
+      appName: systemDesign.frontend?.appName || requirements.appName || 'GeneratedApp',
+      components,
+      dataFlow,
+      layoutStructure: {
+        appRoot: layoutObj.appRoot || 'App component wrapping all sections',
+        compositionOrder: Array.isArray(layoutObj.compositionOrder) ? layoutObj.compositionOrder : components.map(c => c.name),
+        stateManagement: layoutObj.stateManagement || 'Props drilling for simplicity',
+      },
+      apiContract,
+      generationOrder,
+      navigationStrategy: layoutObj.navigationStrategy || 'Single page with conditional rendering',
+      stateManagementStrategy: layoutObj.stateManagementStrategy || 'useState for local state, props for passing data',
+    };
+
+    debug('uiSpecAgent:final', { uiSpec });
+    return uiSpec;
+  } catch (err) {
+    logError('uiSpecAgent', err);
+    throw err;
+  }
+}

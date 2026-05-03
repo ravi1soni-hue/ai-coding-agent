@@ -5,6 +5,7 @@ import { handleRequirementAnalysis } from './handlers/requirementAnalysisHandler
 import { handleClarification } from './handlers/clarificationHandler';
 import { handleConfirmation } from './handlers/confirmationHandler';
 import { handleSystemDesign } from './handlers/systemDesignHandler';
+import { handleUISpec } from './handlers/uiSpecHandler';
 import { handleCodeGeneration } from './handlers/codeGenerationHandler';
 import { handleTestFix } from './handlers/testFixHandler';
 import { handleDeployment } from './handlers/deploymentHandler';
@@ -39,15 +40,16 @@ export function createSocketServer(server: http.Server) {
   const activePipelines = new TTLSet();
 
   const stageWeights: Record<string, number> = {
-    requirementAnalysis: 0.10,
-    clarification: 0.12,
-    confirmation: 0.06,
-    systemDesign: 0.10,
-    codeGen: 0.25,
+    requirementAnalysis: 0.08,
+    clarification: 0.10,
+    confirmation: 0.05,
+    systemDesign: 0.08,
+    uiSpec: 0.06,
+    codeGen: 0.28,
     testFix: 0.18,
-    deploy: 0.19,
-    codeGen_modification: 0.22,
-    testFix_modification: 0.18,
+    deploy: 0.17,
+    codeGen_modification: 0.20,
+    testFix_modification: 0.15,
     deploy_modification: 0.17,
   };
 
@@ -170,6 +172,7 @@ export function createSocketServer(server: http.Server) {
       clarifications: any;
       confirmation: any;
       systemDesign: any;
+      uiSpec?: any;
       codeGen: any;
       testResult: any;
       deployment: any;
@@ -195,6 +198,7 @@ export function createSocketServer(server: http.Server) {
       clarifications: snapshot?.clarifications,
       confirmation: snapshot?.confirmation,
       systemDesign: snapshot?.system_design,
+      uiSpec: snapshot?.ui_spec,
       codeGen: snapshot?.code_gen,
       testResult: snapshot?.test_result,
       deployment: snapshot?.deployment,
@@ -484,7 +488,29 @@ export function createSocketServer(server: http.Server) {
           session.systemDesign = sdResult.data;
           session.stepRetries['systemDesign'] = 0;
           debug('socket:systemDesign', { projectId });
-          ws.send(JSON.stringify({ type: 'stream', token: 'Architecture ready! Generating your code now...' }));
+          ws.send(JSON.stringify({ type: 'stream', token: 'Architecture ready! Designing UI structure...' }));
+          session.step = 'uiSpec';
+        }
+
+        // ── Stage 4.5: UI Specification ────────────────────────────────────
+        if (session.step === 'uiSpec') {
+          sendProgress(ws, session, 'uiSpec', 'Designing UI structure and data flow...');
+          const uiSpecResult = await handleUISpec({
+            systemDesign: session.systemDesign,
+            requirements: session.requirements,
+            modification: session.modification,
+            projectId,
+            userId: authedUser.id,
+          });
+          if (!uiSpecResult.success) {
+            session.step = 'uiSpec'; // stay, allow retry
+            sendError(ws, session, toClientErrorMessage(uiSpecResult.error, 'UI specification failed. Reply to retry.'));
+            return;
+          }
+          session.uiSpec = uiSpecResult.data;
+          session.stepRetries['uiSpec'] = 0;
+          debug('socket:uiSpec', { projectId, componentCount: session.uiSpec?.components?.length });
+          ws.send(JSON.stringify({ type: 'stream', token: 'UI structure designed! Generating your code now...' }));
           session.step = 'codeGen';
         }
 
@@ -497,6 +523,7 @@ export function createSocketServer(server: http.Server) {
               ...session.requirements,
               clarificationAnswers: Object.keys(clarificationAnswers).length > 0 ? clarificationAnswers : undefined,
             },
+            uiSpec: session.uiSpec,
             projectId,
             userId: authedUser.id,
             emitEvent: (event) => ws.send(JSON.stringify({
@@ -636,12 +663,30 @@ export function createSocketServer(server: http.Server) {
           session.systemDesign = sdResult.data;
         }
 
+        session.step = 'uiSpec_modification';
+
+        // Step 2.5: Re-generate UI spec for modifications
+        sendProgress(ws, session, 'uiSpec_modification', 'Re-evaluating UI structure for your changes...');
+        const uiSpecResult = await handleUISpec({
+          systemDesign: session.systemDesign,
+          requirements: session.requirements,
+          modification,
+          projectId,
+          userId: authedUser.id,
+        });
+        if (uiSpecResult.success) {
+          session.uiSpec = uiSpecResult.data;
+        }
+
+        session.step = 'codeGen_modification';
+
         // Step 3: Code generation
         sendProgress(ws, session, 'codeGen_modification', 'Generating updated code...', 0);
         const cgResult = await handleCodeGeneration({
           systemDesign: session.systemDesign,
           requirements: session.requirements,
           modification,
+          uiSpec: session.uiSpec,
           context: session.modificationContext,
           projectId,
           userId: authedUser.id,

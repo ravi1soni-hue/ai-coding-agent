@@ -5,6 +5,7 @@ import { debug, error } from '../../utils/logger';
 export interface CodeGenerationInput {
   systemDesign: any;
   requirements: any;
+  uiSpec?: any;
   modification?: string;
   context?: any;
   projectId: string;

@@ -49,6 +49,7 @@ export async function ensureCoreTables() {
   await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS clarifications JSONB`);
   await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS confirmation JSONB`);
   await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS system_design JSONB`);
+  await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS ui_spec JSONB`);
   await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS code_gen JSONB`);
   await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS test_result JSONB`);
   await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS deployment JSONB`);

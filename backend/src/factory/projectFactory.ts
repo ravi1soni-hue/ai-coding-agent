@@ -24,8 +24,8 @@ type MaterializeInput = {
 };
 
 const WORKSPACE_ROOT = path.resolve(__dirname, '../../generated-projects');
-const FRONTEND_TEMPLATE_DIR = path.resolve(__dirname, '../templates/frontend');
-const BACKEND_TEMPLATE_DIR = path.resolve(__dirname, '../templates/backend');
+const FRONTEND_TEMPLATE_DIR = path.resolve(__dirname, '../../src/templates/frontend');
+const BACKEND_TEMPLATE_DIR = path.resolve(__dirname, '../../src/templates/backend');
 
 function sanitizeSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48) || 'project';
