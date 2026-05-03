@@ -26,6 +26,47 @@ function MessageText({ text }) {
   );
 }
 
+function buildDetailedLogPayload({ user, projectId, connection, statusText, progress, stageStatus, messages }) {
+  return JSON.stringify(
+    {
+      timestamp: new Date().toISOString(),
+      user: user
+        ? {
+            name: user.name || '',
+            email: user.email || '',
+            id: user.id || '',
+          }
+        : null,
+      projectId,
+      connection,
+      statusText,
+      progress,
+      stageStatus,
+      messageCount: messages.length,
+      messages,
+    },
+    null,
+    2,
+  );
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  document.body.removeChild(textarea);
+}
+
 function AuthPage({ mode, setMode, form, setForm, busy, error, onSubmit }) {
   const isSignup = mode === 'signup';
 
@@ -146,6 +187,7 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
   const [input, setInput] = useState('');
   const [todayText, setTodayText] = useState('');
   const [messages, setMessages] = useState([]);
+  const [copyState, setCopyState] = useState('Copy logs');
 
   const wsRef = useRef(null);
   const msgEndRef = useRef(null);
@@ -317,6 +359,26 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
     setInput('');
   }
 
+  async function onCopyLogs() {
+    try {
+      const payload = buildDetailedLogPayload({
+        user,
+        projectId,
+        connection,
+        statusText,
+        progress,
+        stageStatus,
+        messages,
+      });
+      await copyTextToClipboard(payload);
+      setCopyState('Copied');
+      window.setTimeout(() => setCopyState('Copy logs'), 1600);
+    } catch {
+      setCopyState('Copy failed');
+      window.setTimeout(() => setCopyState('Copy logs'), 1600);
+    }
+  }
+
   function onSubmit(e) {
     e.preventDefault();
     sendText(input);
@@ -397,6 +459,12 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
           ) : null}
 
           <div className="buildHint">Describe what to build and follow live progress below.</div>
+
+          <div className="logsHeader">
+            <button className="copyLogsBtn" type="button" onClick={onCopyLogs}>
+              {copyState}
+            </button>
+          </div>
 
           <div className="activityBox">
             {messages.map((m, idx) => {

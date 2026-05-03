@@ -545,6 +545,34 @@ body {
   color: var(--muted);
 }
 
+.logsHeader {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin: 0 0 8px;
+}
+
+.copyLogsBtn {
+  border: 1px solid rgba(180, 108, 255, 0.22);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(180, 108, 255, 0.12), rgba(180, 108, 255, 0.06));
+  color: #5d2fa8;
+  font-weight: 700;
+  font-size: 0.82rem;
+  padding: 9px 12px;
+  cursor: pointer;
+  box-shadow: 0 8px 18px rgba(25, 23, 40, 0.05);
+}
+
+.copyLogsBtn:hover {
+  border-color: rgba(180, 108, 255, 0.42);
+  background: linear-gradient(180deg, rgba(180, 108, 255, 0.18), rgba(180, 108, 255, 0.09));
+}
+
+.copyLogsBtn:active {
+  transform: translateY(1px);
+}
+
 .socketStatus {
   margin-bottom: 10px;
   width: min(640px, 100%);
@@ -840,6 +868,14 @@ body {
   .buildHint {
     margin-bottom: 5px;
     font-size: 0.84rem;
+  }
+
+  .logsHeader {
+    margin-bottom: 6px;
+  }
+
+  .copyLogsBtn {
+    width: 100%;
   }
 
   .assistantInput {
