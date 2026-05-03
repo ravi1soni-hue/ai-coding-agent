@@ -1,7 +1,31 @@
+function getBackendOrigin() {
+  const viteBackendUrl = typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_BACKEND_URL : '';
+  if (viteBackendUrl) return viteBackendUrl.replace(/\/$/, '');
+
+  const { protocol, hostname, port } = window.location;
+  const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1';
+
+  // In dev the frontend usually runs on Vite (5173) while the backend runs on 3000.
+  // If we stay on the frontend origin, the socket connects to the wrong server and
+  // immediately disconnects or fails the upgrade.
+  if (isLocalhost && port && port !== '3000') {
+    const backendPort = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_BACKEND_PORT
+      ? String(import.meta.env.VITE_BACKEND_PORT)
+      : '3000';
+    return `${protocol}//${hostname}:${backendPort}`;
+  }
+
+  return `${protocol}//${window.location.host}`;
+}
+
 export function makeSocketUrl(projectId) {
-  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-  const suffix = projectId ? `?projectId=${encodeURIComponent(projectId)}` : '';
-  return `${proto}://${window.location.host}/${suffix}`;
+  const baseUrl = getBackendOrigin();
+  const wsProtocol = baseUrl.startsWith('https:') ? 'wss:' : 'ws:';
+  const url = new URL(baseUrl);
+  url.protocol = wsProtocol;
+  url.pathname = '/';
+  url.search = projectId ? `?projectId=${encodeURIComponent(projectId)}` : '';
+  return url.toString();
 }
 
 export async function readJson(res) {
