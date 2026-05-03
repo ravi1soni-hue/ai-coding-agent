@@ -79,15 +79,66 @@ async function railwayGraphql(query: string, variables: Record<string, any>): Pr
   return res.data?.data;
 }
 
+// ---------------------------------------------------------------------------
+// Per-project Railway service management
+// — Each generated project gets its own Railway service so user deployments
+//   never touch or retrigger our base backend service.
+// ---------------------------------------------------------------------------
+
+async function findProjectService(userProjectId: string): Promise<string | null> {
+  if (!env.RAILWAY_PROJECT_ID || !env.RAILWAY_TOKEN) return null;
+  const serviceName = `gen-${userProjectId.slice(0, 12)}`;
+  try {
+    const data = await railwayGraphql(
+      `query($projectId: String!) {
+        project(id: $projectId) {
+          services { edges { node { id name } } }
+        }
+      }`,
+      { projectId: env.RAILWAY_PROJECT_ID }
+    );
+    const edges: any[] = data?.project?.services?.edges || [];
+    const found = edges.find((e: any) => e.node?.name === serviceName);
+    return found?.node?.id || null;
+  } catch {
+    return null;
+  }
+}
+
+async function createProjectService(userProjectId: string): Promise<string | null> {
+  if (!env.RAILWAY_PROJECT_ID || !env.RAILWAY_TOKEN) return null;
+  const serviceName = `gen-${userProjectId.slice(0, 12)}`;
+  try {
+    const data = await railwayGraphql(
+      `mutation($input: ServiceCreateInput!) {
+        serviceCreate(input: $input) { id name }
+      }`,
+      { input: { projectId: env.RAILWAY_PROJECT_ID, name: serviceName } }
+    );
+    debug('railwayDeploy:serviceCreated', { serviceName, id: data?.serviceCreate?.id });
+    return data?.serviceCreate?.id || null;
+  } catch (err) {
+    logWarn('railwayDeploy:serviceCreate-failed', (err as Error).message);
+    return null;
+  }
+}
+
+async function getOrCreateProjectService(userProjectId: string): Promise<string | null> {
+  const existing = await findProjectService(userProjectId);
+  if (existing) return existing;
+  return createProjectService(userProjectId);
+}
+
 /**
- * Upserts environment variables on the Railway service so the generated
+ * Upserts environment variables on a specific Railway service so the generated
  * backend has POSTGRES_URL, PORT, and NODE_ENV when it starts.
+ * Uses the per-project service ID, never the base app's RAILWAY_SERVICE_ID.
  */
-async function setRailwayEnvVars(): Promise<void> {
+async function setRailwayEnvVars(serviceId: string): Promise<void> {
   const canSet =
     Boolean(env.RAILWAY_TOKEN) &&
     Boolean(env.RAILWAY_PROJECT_ID) &&
-    Boolean(env.RAILWAY_SERVICE_ID) &&
+    Boolean(serviceId) &&
     Boolean(env.RAILWAY_ENVIRONMENT_ID);
 
   if (!canSet) {
@@ -117,72 +168,51 @@ async function setRailwayEnvVars(): Promise<void> {
     await railwayGraphql(mutation, {
       environmentId: env.RAILWAY_ENVIRONMENT_ID,
       projectId: env.RAILWAY_PROJECT_ID,
-      serviceId: env.RAILWAY_SERVICE_ID,
+      serviceId,
       variables,
     });
-    debug('railwayDeploy:envVarsSet', { keys: Object.keys(variables) });
+    debug('railwayDeploy:envVarsSet', { serviceId, keys: Object.keys(variables) });
   } catch (err) {
     logWarn('railwayDeploy:setEnvVars-failed', (err as Error).message);
-    // Non-fatal — deployment will still proceed
   }
 }
 
 /**
- * Triggers a new deployment via the Railway GraphQL API.
+ * Triggers a deployment on the per-project Railway service via CLI.
+ * Passes RAILWAY_SERVICE_ID as env var so the CLI targets the correct service,
+ * not the base backend service.
  */
-async function triggerRailwayDeployment(): Promise<{
-  deploymentId?: string;
-  status?: RailwayDeployResult['status'];
-  logUrl?: string;
-}> {
-  const mutation = `
-    mutation serviceInstanceDeploy($environmentId: String!, $serviceId: String!) {
-      serviceInstanceDeploy(input: { environmentId: $environmentId, serviceId: $serviceId }) {
-        id
-        status
-      }
-    }
-  `;
-
-  const data = await railwayGraphql(mutation, {
-    environmentId: env.RAILWAY_ENVIRONMENT_ID,
-    serviceId: env.RAILWAY_SERVICE_ID,
-  });
-
-  const deployment = data?.serviceInstanceDeploy;
-  if (!deployment?.id) {
-    throw new Error(`Railway deploy API did not return a deployment id: ${JSON.stringify(data)}`);
-  }
-
-  const raw = String(deployment.status || '').toLowerCase();
-  const status: RailwayDeployResult['status'] =
-    raw.includes('fail') ? 'failed' :
-    raw.includes('build') ? 'building' :
-    raw.includes('queue') ? 'queued' : 'deployed';
-
-  return {
-    deploymentId: deployment.id,
-    status,
-    logUrl: `https://railway.app/project/${env.RAILWAY_PROJECT_ID}/service/${env.RAILWAY_SERVICE_ID}`,
-  };
-}
-
-/**
- * Deploy via Railway CLI (railway up --detach).
- */
-async function runRailwayCliDeploy(sourceDir: string): Promise<{
+async function runRailwayCliDeploy(sourceDir: string, serviceId: string): Promise<{
   deploymentId: string;
   status: RailwayDeployResult['status'];
   serviceUrl: string;
   logUrl: string;
 }> {
-  const { stdout, exitCode } = await runCommand('railway', ['up', '--detach'], sourceDir, 180_000);
-  const urlMatch = stdout.match(/https?:\/\/[\w.-]+\.railway\.app/);
+  const childEnv: Record<string, string> = { ...process.env as Record<string, string> };
+  if (serviceId) childEnv.RAILWAY_SERVICE_ID = serviceId;
+
+  const result = await new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve) => {
+    const child = spawn('railway', ['up', '--detach'], {
+      cwd: sourceDir,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: childEnv,
+    });
+    let stdout = '', stderr = '';
+    const timer = setTimeout(() => { child.kill('SIGKILL'); resolve({ stdout, stderr: `${stderr}\nTimed out`, exitCode: 124 }); }, 180_000);
+    child.stdout.on('data', c => { stdout += String(c); });
+    child.stderr.on('data', c => { stderr += String(c); });
+    child.on('close', code => { clearTimeout(timer); resolve({ stdout, stderr, exitCode: typeof code === 'number' ? code : 1 }); });
+    child.on('error', err => { clearTimeout(timer); resolve({ stdout, stderr: `${stderr}\n${err}`, exitCode: 1 }); });
+  });
+
+  const urlMatch = result.stdout.match(/https?:\/\/[\w.-]+\.railway\.app/);
   return {
     deploymentId: `railway-cli-${Date.now().toString(36)}`,
-    status: exitCode === 0 ? 'building' : 'failed',
+    status: result.exitCode === 0 ? 'building' : 'failed',
     serviceUrl: urlMatch?.[0] || '',
-    logUrl: `https://railway.app/project/${env.RAILWAY_PROJECT_ID ?? 'unknown'}`,
+    logUrl: env.RAILWAY_PROJECT_ID
+      ? `https://railway.app/project/${env.RAILWAY_PROJECT_ID}/service/${serviceId}`
+      : 'https://railway.app',
   };
 }
 
@@ -199,72 +229,65 @@ export async function deployToRailway(
     sourceDir?: string;
   }
 ): Promise<RailwayDeployResult> {
-  debug('railwayDeploy:start', { service, sourceDir: deployConfig.sourceDir });
+  const userProjectId = deployConfig.projectId || '';
+  debug('railwayDeploy:start', { service, userProjectId, sourceDir: deployConfig.sourceDir });
 
-  const serviceUrl = await resolveRailwayServiceUrl();
   const dashboardUrl = env.RAILWAY_PROJECT_ID
     ? `https://railway.app/project/${env.RAILWAY_PROJECT_ID}`
     : 'https://railway.app';
-  const deploymentView = env.RAILWAY_PROJECT_ID && env.RAILWAY_SERVICE_ID
-    ? `https://railway.app/project/${env.RAILWAY_PROJECT_ID}/service/${env.RAILWAY_SERVICE_ID}`
-    : dashboardUrl;
 
   let status: RailwayDeployResult['status'] = 'queued';
   let deploymentId = deployConfig.revisionId
     ? `rail_${String(deployConfig.revisionId).replace(/[^a-zA-Z0-9]/g, '').slice(0, 24)}`
     : `rail_${Date.now().toString(36)}`;
-  let logUrl = deploymentView;
+  let serviceUrl = '';
+  let logUrl = dashboardUrl;
 
-  // ── Step 1: Inject env vars so backend starts correctly ─────────────────
-  await setRailwayEnvVars();
+  // ── Step 1: Get or create an isolated Railway service for this user project ─
+  // Never reuse env.RAILWAY_SERVICE_ID — that belongs to our base app.
+  const projectServiceId = userProjectId
+    ? await getOrCreateProjectService(userProjectId)
+    : null;
 
-  // ── Step 2: Try CLI deploy if sourceDir is given ─────────────────────────
-  if (deployConfig.sourceDir) {
-    try {
-      const cliResult = await runRailwayCliDeploy(deployConfig.sourceDir);
-      deploymentId = cliResult.deploymentId || deploymentId;
-      status = cliResult.status || status;
-      logUrl = cliResult.logUrl || logUrl;
-      debug('railwayDeploy:cli-result', { status, deploymentId });
-    } catch (err) {
-      logWarn('railwayDeploy:cli-failed', { error: (err as Error).message, fallback: 'GraphQL trigger' });
-    }
+  const targetServiceId = projectServiceId || '';
+
+  const perServiceLogUrl = targetServiceId && env.RAILWAY_PROJECT_ID
+    ? `https://railway.app/project/${env.RAILWAY_PROJECT_ID}/service/${targetServiceId}`
+    : dashboardUrl;
+  logUrl = perServiceLogUrl;
+
+  // ── Step 2: Inject env vars on the per-project service ───────────────────
+  if (targetServiceId) {
+    await setRailwayEnvVars(targetServiceId);
   }
 
-  // ── Step 3: GraphQL trigger (primary for non-CLI, fallback otherwise) ────
-  const canTrigger =
-    Boolean(env.RAILWAY_TOKEN) &&
-    Boolean(env.RAILWAY_PROJECT_ID) &&
-    Boolean(env.RAILWAY_SERVICE_ID) &&
-    Boolean(env.RAILWAY_ENVIRONMENT_ID);
-
-  if (canTrigger) {
+  // ── Step 3: Deploy via Railway CLI with per-project RAILWAY_SERVICE_ID ───
+  if (deployConfig.sourceDir) {
     try {
-      const gqlResult = await triggerRailwayDeployment();
-      deploymentId = gqlResult.deploymentId || deploymentId;
-      status = gqlResult.status || status;
-      logUrl = gqlResult.logUrl || logUrl;
-      debug('railwayDeploy:graphql-result', { status, deploymentId });
+      const cliResult = await runRailwayCliDeploy(deployConfig.sourceDir, targetServiceId);
+      deploymentId = cliResult.deploymentId || deploymentId;
+      status = cliResult.status || status;
+      serviceUrl = cliResult.serviceUrl || serviceUrl;
+      logUrl = cliResult.logUrl || logUrl;
+      debug('railwayDeploy:cli-result', { status, deploymentId, targetServiceId });
     } catch (err) {
-      logWarn('railwayDeploy:graphql-failed', (err as Error).message);
-      // Keep status from CLI result or 'queued'
+      logWarn('railwayDeploy:cli-failed', (err as Error).message);
     }
   }
 
   // ── Step 4: Health check to confirm service is reachable ─────────────────
-  if (serviceUrl) {
+  const resolvedUrl = serviceUrl || await resolveRailwayServiceUrl();
+  if (resolvedUrl) {
     try {
-      const health = await axios.get(serviceUrl, { timeout: 20_000, validateStatus: () => true });
+      const health = await axios.get(resolvedUrl, { timeout: 20_000, validateStatus: () => true });
       if (status !== 'building' && status !== 'queued') {
         status = health.status >= 200 && health.status < 500 ? 'deployed' : 'failed';
       }
       debug('railwayDeploy:health-check', { httpStatus: health.status, deployStatus: status });
     } catch {
-      if (status !== 'building' && status !== 'queued') {
-        status = 'failed';
-      }
+      if (status !== 'building' && status !== 'queued') status = 'failed';
     }
   }
 
-  return { deploymentId, status, serviceUrl, logUrl, dashboardUrl };
+  return { deploymentId, status, serviceUrl: resolvedUrl, logUrl, dashboardUrl };
 }

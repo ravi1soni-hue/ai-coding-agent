@@ -129,7 +129,7 @@ async function generateFrontendFiles(
 8. All file contents must be COMPLETE — do not truncate or use comments like "// ... rest of code"
 9. For icons: use unicode emojis or simple CSS shapes — do NOT import icon libraries unless explicitly listed in requirements
 10. CSS: prefer inline styles or simple CSS files — no Tailwind/shadcn unless requirements explicitly ask for it
-11. API calls: ALWAYS use "const API_BASE = import.meta.env.VITE_API_BASE_URL || '';" and call endpoints as `${API_BASE}/api/resource` — NEVER hardcode localhost or relative /api paths
+11. API calls: ALWAYS use "const API_BASE = import.meta.env.VITE_API_BASE_URL || '';" and call endpoints as \`\${API_BASE}/api/resource\` — NEVER hardcode localhost or relative /api paths
 
 === OUTPUT FORMAT ===
 Respond with ONLY valid JSON — no markdown fences, no explanation, no text before or after:

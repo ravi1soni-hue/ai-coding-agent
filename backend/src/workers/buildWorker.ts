@@ -6,6 +6,71 @@ type BuildWorkerPayload = {
   workspaceDir?: string;
 };
 
+// ---------------------------------------------------------------------------
+// Pre-build validation — catches missing required files before npm install
+// ---------------------------------------------------------------------------
+
+type ValidationResult = { valid: boolean; errors: string[] };
+
+async function validateGeneratedProject(workspaceDir: string): Promise<ValidationResult> {
+  const errors: string[] = [];
+
+  // Frontend required files
+  const frontendRequired = ['package.json', 'index.html'];
+  for (const f of frontendRequired) {
+    if (!await fileExists(path.join(workspaceDir, f))) {
+      errors.push(`Missing required frontend file: ${f}`);
+    }
+  }
+
+  // Frontend must have at least one entry source file
+  const entryCandidates = ['src/main.jsx', 'src/main.tsx', 'src/index.jsx', 'src/index.tsx'];
+  let hasEntry = false;
+  for (const e of entryCandidates) {
+    if (await fileExists(path.join(workspaceDir, e))) { hasEntry = true; break; }
+  }
+  if (!hasEntry) {
+    errors.push(`Missing frontend entry file (expected one of: ${entryCandidates.join(', ')})`);
+  }
+
+  // Validate frontend package.json has required scripts
+  try {
+    const raw = await fs.readFile(path.join(workspaceDir, 'package.json'), 'utf8');
+    const pkg = JSON.parse(raw) as { scripts?: Record<string, string>; dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+    if (!pkg.scripts?.build) errors.push('Frontend package.json is missing scripts.build');
+    if (!pkg.dependencies?.react && !pkg.devDependencies?.react) errors.push('Frontend package.json is missing react dependency');
+  } catch {
+    errors.push('Frontend package.json is not valid JSON');
+  }
+
+  // Backend validation (only if backend/package.json exists)
+  const backendDir = path.join(workspaceDir, 'backend');
+  if (await fileExists(path.join(backendDir, 'package.json'))) {
+    const backendRequired = ['index.js'];
+    for (const f of backendRequired) {
+      if (!await fileExists(path.join(backendDir, f))) {
+        errors.push(`Missing required backend file: backend/${f}`);
+      }
+    }
+    if (!await fileExists(path.join(backendDir, 'db', 'init.sql')) &&
+        !await fileExists(path.join(backendDir, 'db', 'schema.sql'))) {
+      errors.push('Missing backend/db/init.sql (required for database initialization)');
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+// Removes stale dist/ directories before a fresh build.
+async function cleanStaleDist(workspaceDir: string): Promise<void> {
+  const frontendDist = path.join(workspaceDir, 'dist');
+  const backendDist = path.join(workspaceDir, 'backend', 'dist');
+  await Promise.allSettled([
+    fs.rm(frontendDist, { recursive: true, force: true }),
+    fs.rm(backendDist, { recursive: true, force: true }),
+  ]);
+}
+
 type BuildWorkerResult = {
   success: boolean;
   logs: string;
@@ -91,6 +156,22 @@ export async function runBuildWorker(payload: BuildWorkerPayload): Promise<Build
   }
 
   const logs: string[] = [];
+
+  // ── Pre-build: validate required files exist ─────────────────────────────
+  const validation = await validateGeneratedProject(workspaceDir);
+  if (!validation.valid) {
+    const errorList = validation.errors.map(e => `  • ${e}`).join('\n');
+    return {
+      success: false,
+      logs: `[buildWorker] Pre-build validation failed — missing required files:\n${errorList}\n\nFix the generated code to include these files before building.`,
+    };
+  }
+  logs.push('[buildWorker] Pre-build validation passed');
+
+  // ── Pre-build: clean stale dist/ before fresh build ──────────────────────
+  await cleanStaleDist(workspaceDir);
+  logs.push('[buildWorker] Cleaned stale dist/ (fresh build)');
+
   const frontendDir = workspaceDir;
   const backendDir = path.join(workspaceDir, 'backend');
   let frontendBuildDir: string | undefined;
