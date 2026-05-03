@@ -3,6 +3,7 @@ import { requirementAnalysisAgent } from '../agents/requirementAnalysisAgent';
 import { clarificationAgent } from '../agents/clarificationAgent';
 import { confirmationGate } from '../agents/confirmationGate';
 import { systemDesignAgent } from '../agents/systemDesignAgent';
+import { blueprintAgent } from '../agents/blueprintAgent';
 import { codeGenerationAgent } from '../agents/codeGenerationAgent';
 import { insertVector } from '../db/vectorStore';
 import { testFixAgent } from '../agents/testFixAgent';
@@ -19,8 +20,9 @@ export type OrchestrationContext = {
 	requirements?: any;
 	clarifications?: any;
 	confirmation?: any;
-	systemDesign?: any;
-	codeGen?: any;
+  systemDesign?: any;
+  blueprint?: any;
+  codeGen?: any;
 	testResult?: any;
 	deployment?: any;
 	materializedRevision?: any;
@@ -80,10 +82,20 @@ export async function runOrchestration(ctx: OrchestrationContext) {
       systemDesignAgent(ctx.requirements)
     );
 
-    // Step 5: Code Generation
-    ctx.codeGen = await runStage('codeGeneration', ctx.systemDesign, async () =>
+    // Step 5: Blueprint Validation
+    ctx.blueprint = await runStage('blueprint', ctx.systemDesign, async () =>
+      blueprintAgent({
+        requirements: ctx.requirements,
+        systemDesign: ctx.systemDesign,
+        projectId,
+      })
+    );
+
+    // Step 6: Code Generation
+    ctx.codeGen = await runStage('codeGeneration', ctx.blueprint, async () =>
       codeGenerationAgent({
         systemDesign: ctx.systemDesign,
+        blueprint: ctx.blueprint,
         requirements: ctx.requirements,
         user_id,
       })

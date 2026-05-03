@@ -4,6 +4,7 @@ import { searchVectors } from '../db/vectorStore';
 import { LLMProxyClient } from './llmProxyClient';
 import { embeddingAgent } from './embeddingAgent';
 import { debug, error as logError, warn as logWarn } from '../utils/logger';
+import { blueprintMissingFiles, validateProjectBlueprint, type ProjectBlueprint } from './blueprintContract';
 
 type GeneratedFile = { path: string; content: string };
 
@@ -41,6 +42,7 @@ type ProjectManifest = {
   };
   componentRequirements: Array<{ path: string; purpose?: string; reviewerNotes?: string }>;
   project_task_queue: Array<{ id: string; kind: 'file' | 'logic'; path: string; purpose: string }>;
+  blueprint?: ProjectBlueprint;
 };
 
 type EventSink = {
@@ -75,6 +77,16 @@ function parseJsonSafe(content: string): any {
   const extracted = extractJsonObject(cleaned);
   if (extracted) {
     try { return JSON.parse(extracted); } catch {}
+  }
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    const slice = cleaned.slice(firstBrace, lastBrace + 1);
+    try { return JSON.parse(slice); } catch {}
+    const compact = slice
+      .replace(/:\s*'([^']*)'/g, (_, value) => `: "${value.replace(/"/g, '\\"')}"`)
+      .replace(/,\s*([}\]])/g, '$1');
+    try { return JSON.parse(compact); } catch {}
   }
   const candidateLines = cleaned
     .split('\n')
@@ -690,7 +702,11 @@ function fallbackFrontendManifest(requirements: any): FrontendManifest {
   const pages = Array.isArray(requirements?.pages) ? requirements.pages : [];
   const components = [
     ...(authRequired ? [{ path: 'src/components/Login.jsx', name: 'Login', purpose: 'Authentication form for email and password login.' }] : []),
-    ...pages.slice(0, 3).map((page: string, i: number) => ({ path: `src/components/${page.replace(/[^a-zA-Z0-9]/g, '')||`Page${i+1}`}.jsx`, name: page.replace(/[^a-zA-Z0-9]/g, '')||`Page${i+1}`, purpose: `${page} page content and functionality.` })),
+    ...pages.slice(0, 3).map((page: any, i: number) => {
+      const pageLabel = typeof page === 'string' ? page : String(page?.name || page?.title || page?.path || `Page ${i + 1}`);
+      const slug = pageLabel.replace(/[^a-zA-Z0-9]/g, '') || `Page${i + 1}`;
+      return { path: `src/components/${slug}.jsx`, name: slug, purpose: `${pageLabel} page content and functionality.` };
+    }),
   ];
   if (components.length === 0) {
     components.push(
@@ -709,7 +725,8 @@ async function generateFrontendFiles(
   model: string,
   events?: EventSink,
   manifestOut?: { value?: ProjectManifest },
-  uiSpec?: any
+  uiSpec?: any,
+  blueprint?: ProjectBlueprint
 ): Promise<GeneratedFile[]> {
   const partial = new Map<string, string>();
   const metrics: GenerationMetrics = { fallbackCount: 0, fallbackReasons: [] };
@@ -728,6 +745,12 @@ async function generateFrontendFiles(
     code: model,
     review: getModelConfigForTask('clarification').model,
   });
+  if (!blueprint) throw new Error('codeGenerationAgent: validated blueprint is required before code generation');
+  const missingBlueprintFiles = blueprintMissingFiles(blueprint);
+  if (missingBlueprintFiles.length > 0) {
+    throw new Error(`Validated blueprint is missing required files: ${missingBlueprintFiles.join(', ')}`);
+  }
+  projectManifest.blueprint = blueprint;
   manifestOut && (manifestOut.value = projectManifest);
   events?.emit({ type: 'PLANNING_COMPLETE', message: 'Frontend planning complete', payload: { fileCount: projectManifest.fileTree.length } });
 
@@ -928,9 +951,14 @@ function fallbackBackendManifest(tablePrefix: string): BackendManifest {
   };
 }
 
-async function generateBackendFiles(systemDesign: any, requirements: any, projectId: string, modification: string | undefined, llmProxy: LLMProxyClient, model: string, events?: EventSink): Promise<GeneratedFile[]> {
+async function generateBackendFiles(systemDesign: any, requirements: any, projectId: string, modification: string | undefined, llmProxy: LLMProxyClient, model: string, events?: EventSink, blueprint?: ProjectBlueprint): Promise<GeneratedFile[]> {
   const partial = new Map<string, string>();
   const safeId = projectId.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 24);
+  if (!blueprint) throw new Error('codeGenerationAgent: validated blueprint is required before backend generation');
+  const missingBlueprintFiles = blueprintMissingFiles(blueprint);
+  if (missingBlueprintFiles.length > 0) {
+    throw new Error(`Validated blueprint is missing required files: ${missingBlueprintFiles.join(', ')}`);
+  }
   const tablePrefix = `proj_${safeId}_`;
   let manifest: BackendManifest;
 
@@ -1020,6 +1048,8 @@ async function generateBackendFiles(systemDesign: any, requirements: any, projec
 export async function codeGenerationAgent(input: any) {
   debug('codeGenerationAgent:start', { projectId: input?.projectId });
   if (!input) throw new Error('codeGenerationAgent: input required');
+  const blueprint = input.blueprint ? validateProjectBlueprint(input.blueprint) : undefined;
+  if (!blueprint) throw new Error('codeGenerationAgent: validated blueprint is required before code generation');
 
   const { model, apiKey } = getModelConfigForTask('code_generation');
   const llmProxy = new LLMProxyClient({ apiKey });
@@ -1042,8 +1072,8 @@ export async function codeGenerationAgent(input: any) {
   debug('codeGenerationAgent:parallel-start', { projectId, hasBackend, hasUISpec: !!uiSpec });
   const manifestOut: { value?: ProjectManifest } = {};
   const [frontendResult, backendResult] = await Promise.allSettled([
-    generateFrontendFiles(input.systemDesign, input.requirements, input.modification, llmProxy, model, events, manifestOut, uiSpec),
-    hasBackend ? generateBackendFiles(input.systemDesign, input.requirements, projectId, input.modification, llmProxy, model, events) : Promise.resolve([] as GeneratedFile[]),
+    generateFrontendFiles(input.systemDesign, input.requirements, input.modification, llmProxy, model, events, manifestOut, uiSpec, blueprint),
+    hasBackend ? generateBackendFiles(input.systemDesign, input.requirements, projectId, input.modification, llmProxy, model, events, blueprint) : Promise.resolve([] as GeneratedFile[]),
   ]);
 
   const frontendFiles = frontendResult.status === 'fulfilled'
