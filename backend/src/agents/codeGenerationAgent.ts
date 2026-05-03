@@ -59,9 +59,35 @@ function stripMarkdownFences(content: string): string {
   return content.replace(/```[a-zA-Z]*\s*/g, '').replace(/```/g, '').trim();
 }
 
+function extractJsonObject(content: string): string | null {
+  const cleaned = stripMarkdownFences(content);
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return cleaned.slice(firstBrace, lastBrace + 1);
+  }
+  return null;
+}
+
 function parseJsonSafe(content: string): any {
   const cleaned = stripMarkdownFences(content);
   try { return JSON.parse(cleaned); } catch {}
+  const extracted = extractJsonObject(cleaned);
+  if (extracted) {
+    try { return JSON.parse(extracted); } catch {}
+  }
+  const candidateLines = cleaned
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean);
+  for (let i = 0; i < candidateLines.length; i += 1) {
+    const joined = candidateLines.slice(i).join('\n');
+    const start = joined.indexOf('{');
+    const end = joined.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      try { return JSON.parse(joined.slice(start, end + 1)); } catch {}
+    }
+  }
   throw new Error(`No valid JSON found in LLM response. Snippet: ${content.replace(/\s+/g, ' ').slice(0, 220)}`);
 }
 
@@ -170,18 +196,50 @@ async function generateJson(
     ];
     if (jsonAttempt > 1 && lastRaw) {
       messages.push({ role: 'assistant', content: lastRaw.slice(0, 1200) });
-      messages.push({ role: 'user', content: 'Your previous response was not valid JSON. Return ONLY a valid JSON object — no markdown fences, no explanation, no extra text.' });
+      messages.push({ role: 'user', content: 'Return ONLY a valid JSON object. If you included prose or code fences, remove them. Do not wrap in markdown.' });
     }
     try {
       lastRaw = await callWithRetry(llmProxy, messages, model, maxTokens, 120_000, 2, label);
       return parseJsonSafe(lastRaw);
     } catch (err) {
+      const message = (err as Error).message;
+      logWarn(`${label}:json-attempt-failed:${jsonAttempt}`, { error: message, rawSnippet: lastRaw.slice(0, 240) });
       if (jsonAttempt === 3) throw err;
-      logWarn(`${label}:json-self-heal:${jsonAttempt}`, { error: (err as Error).message });
       await new Promise(r => setTimeout(r, 700 * jsonAttempt));
     }
   }
   throw new Error(`${label}: all JSON self-heal attempts exhausted`);
+}
+
+function parseBackendManifest(raw: unknown, tablePrefix: string): BackendManifest {
+  const manifest = assertObject(raw, 'backendManifest') as BackendManifest;
+  const resources = Array.isArray(manifest.resources) ? manifest.resources : [];
+  const normalizedResources = resources.slice(0, MAX_BACKEND_ROUTES).map((resource, index) => {
+    const name = String(resource?.name || `resource${index + 1}`);
+    const routePath = String(resource?.routePath || `/api/${name}`);
+    const tableName = String(resource?.tableName || `${tablePrefix}${name}`);
+    return {
+      ...resource,
+      name,
+      routePath: routePath.startsWith('/api/') ? routePath : `/api/${name}`,
+      tableName: tableName.startsWith(tablePrefix) ? tableName : `${tablePrefix}${tableName.replace(/[^a-zA-Z0-9_]/g, '_')}`,
+      methods: Array.isArray(resource?.methods) && resource.methods.length > 0 ? resource.methods : ['GET', 'POST'],
+      purpose: String(resource?.purpose || `Data operations for ${name}`),
+    };
+  });
+
+  const tables = Array.isArray(manifest.tables) ? manifest.tables : [];
+  const normalizedTables = tables.slice(0, MAX_BACKEND_ROUTES).map((table, index) => {
+    const name = String(table?.name || `${tablePrefix}table${index + 1}`);
+    return {
+      ...table,
+      name: name.startsWith(tablePrefix) ? name : `${tablePrefix}${name.replace(/[^a-zA-Z0-9_]/g, '_')}`,
+      columns: Array.isArray(table?.columns) && table.columns.length > 0 ? table.columns : ['id TEXT PRIMARY KEY', 'name TEXT NOT NULL', 'data JSONB NOT NULL DEFAULT \'{}\'::jsonb'],
+      purpose: String(table?.purpose || `Storage for ${name}`),
+    };
+  });
+
+  return { resources: normalizedResources, tables: normalizedTables };
 }
 
 function normalizeGeneratedPath(filePath: string): string {
@@ -777,10 +835,7 @@ async function generateBackendManifest(systemDesign: any, requirements: any, tab
   const userMessage = String(requirements?.userMessage || '').slice(0, 400);
   const systemPrompt = `Create a backend implementation manifest for Node + Express + Postgres for this app: "${userMessage}". Return ONLY JSON with shape: {"resources":[{"name":"...","routePath":"/api/...","tableName":"...","fields":[],"methods":[],"purpose":"..."}],"tables":[{"name":"...","columns":[],"purpose":"..."}]}`;
   const parsed = await generateJson(llmProxy, model, 'backendManifest', systemPrompt, { requirements, userDescription: userMessage, backendDesign: systemDesign?.backend || null, tablePrefix, modification: modification || null }, 1800);
-  const manifest = assertObject(parsed, 'backendManifest') as BackendManifest;
-  manifest.resources = Array.isArray(manifest.resources) ? manifest.resources.slice(0, MAX_BACKEND_ROUTES) : [];
-  manifest.tables = Array.isArray(manifest.tables) ? manifest.tables : [];
-  return manifest;
+  return parseBackendManifest(parsed, tablePrefix);
 }
 
 async function generateBackendInitSql(manifest: BackendManifest, tablePrefix: string, requirements: any, llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {
@@ -788,6 +843,45 @@ async function generateBackendInitSql(manifest: BackendManifest, tablePrefix: st
   const file = validateGeneratedFile(parsed, 'backend/db/init.sql', 'backend', 'backendInitSql');
   if (!file.content.includes(tablePrefix)) throw new Error(`backendInitSql: SQL does not include required table prefix ${tablePrefix}`);
   return file;
+}
+
+function fallbackBackendFiles(tablePrefix: string): GeneratedFile[] {
+  return [
+    {
+      path: 'backend/package.json',
+      content: JSON.stringify({
+        name: 'generated-backend',
+        version: '0.1.0',
+        private: true,
+        type: 'module',
+        scripts: {
+          start: 'node index.js',
+          build: 'echo done',
+        },
+        dependencies: {
+          express: '^4.19.0',
+          pg: '^8.20.0',
+          cors: '^2.8.5',
+        },
+      }, null, 2),
+    },
+    {
+      path: 'backend/db/database.js',
+      content: `import pg from 'pg';\nconst { Pool } = pg;\nconst connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL || '';\nexport const pool = new Pool(connectionString ? { connectionString } : {});\nexport function query(sql, params = []) { return pool.query(sql, params); }\n`,
+    },
+    {
+      path: 'backend/index.js',
+      content: `import express from 'express';\nimport cors from 'cors';\nimport { readFileSync } from 'fs';\nimport { fileURLToPath } from 'url';\nimport { dirname, join } from 'path';\nimport { query } from './db/database.js';\nimport itemsRouter from './routes/items.js';\nconst __filename = fileURLToPath(import.meta.url);\nconst __dirname = dirname(__filename);\nconst app = express();\nconst port = process.env.PORT || 3000;\napp.use(cors({ origin: '*' }));\napp.use(express.json());\napp.use('/api/items', itemsRouter);\nasync function initDb() { try { const sql = readFileSync(join(__dirname, 'db/init.sql'), 'utf8'); if (sql.trim()) await query(sql); } catch (error) { console.warn('DB init warning:', error.message); } }\napp.get('/api/health', async (req, res) => { try { await query('SELECT 1'); res.json({ status: 'ok', db: 'connected', tablePrefix: '${tablePrefix}' }); } catch (error) { res.status(200).json({ status: 'ok', db: 'unavailable', error: error.message }); } });\napp.use((err, req, res, next) => { res.status(500).json({ error: err.message }); });\ninitDb().then(() => app.listen(port, () => console.log(\`Backend on port \${port}\`)));\n`,
+    },
+    {
+      path: 'backend/routes/items.js',
+      content: `import express from 'express';\nimport { randomUUID } from 'crypto';\nimport { query } from '../db/database.js';\nconst router = express.Router();\nconst tableName = '${tablePrefix}items';\nrouter.get('/', async (req, res, next) => { try { const result = await query(\`SELECT * FROM ${tablePrefix}items ORDER BY created_at DESC LIMIT 100\`); res.json({ items: result.rows }); } catch (error) { next(error); } });\nrouter.post('/', async (req, res, next) => { try { const id = randomUUID(); const name = req.body?.name || 'Untitled'; const data = req.body || {}; const result = await query(\`INSERT INTO ${tablePrefix}items (id, name, data) VALUES ($1, $2, $3) RETURNING *\`, [id, name, data]); res.status(201).json(result.rows[0]); } catch (error) { next(error); } });\nexport default router;\n`,
+    },
+    {
+      path: 'backend/db/init.sql',
+      content: `CREATE TABLE IF NOT EXISTS ${tablePrefix}items (\n  id TEXT PRIMARY KEY,\n  name TEXT NOT NULL,\n  data JSONB NOT NULL DEFAULT '{}'::jsonb,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n`,
+    },
+  ];
 }
 
 async function generateBackendRoute(resource: NonNullable<BackendManifest['resources']>[number], routePath: string, tablePrefix: string, requirements: any, llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {
@@ -798,7 +892,11 @@ async function generateBackendRoute(resource: NonNullable<BackendManifest['resou
 
 function fallbackInitSql(manifest: BackendManifest, tablePrefix: string): GeneratedFile {
   const resources = manifest.resources && manifest.resources.length > 0 ? manifest.resources : [{ name: 'items', tableName: `${tablePrefix}items` }];
-  const statements = resources.map(resource => { const table = String(resource.tableName || `${tablePrefix}${resource.name || 'items'}`).replace(/[^a-zA-Z0-9_]/g, '_'); const safeTable = table.startsWith(tablePrefix) ? table : `${tablePrefix}${table}`; return `CREATE TABLE IF NOT EXISTS ${safeTable} (\n  id TEXT PRIMARY KEY,\n  name TEXT NOT NULL,\n  data JSONB DEFAULT '{}'::jsonb,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);`; }).join('\n\n');
+  const statements = resources.map(resource => {
+    const table = String(resource.tableName || `${tablePrefix}${resource.name || 'items'}`).replace(/[^a-zA-Z0-9_]/g, '_');
+    const safeTable = table.startsWith(tablePrefix) ? table : `${tablePrefix}${table}`;
+    return `CREATE TABLE IF NOT EXISTS ${safeTable} (\n  id TEXT PRIMARY KEY,\n  name TEXT NOT NULL,\n  data JSONB NOT NULL DEFAULT '{}'::jsonb,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);`;
+  }).join('\n\n');
   return { path: 'backend/db/init.sql', content: `${statements}\n` };
 }
 
@@ -810,7 +908,24 @@ function fallbackRoute(resource: NonNullable<BackendManifest['resources']>[numbe
 }
 
 function fallbackBackendManifest(tablePrefix: string): BackendManifest {
-  return { resources: [{ name: 'items', routePath: '/api/items', tableName: `${tablePrefix}items`, methods: ['GET', 'POST'], purpose: 'Default project data resource.' }], tables: [{ name: `${tablePrefix}items`, columns: ['id TEXT PRIMARY KEY', 'name TEXT NOT NULL', 'data JSONB'], purpose: 'Default project data table.' }] };
+  return {
+    resources: [
+      {
+        name: 'items',
+        routePath: '/api/items',
+        tableName: `${tablePrefix}items`,
+        methods: ['GET', 'POST', 'PUT', 'DELETE'],
+        purpose: 'Default project data resource.',
+      },
+    ],
+    tables: [
+      {
+        name: `${tablePrefix}items`,
+        columns: ['id TEXT PRIMARY KEY', 'name TEXT NOT NULL', 'data JSONB NOT NULL DEFAULT \'{}\'::jsonb'],
+        purpose: 'Default project data table.',
+      },
+    ],
+  };
 }
 
 async function generateBackendFiles(systemDesign: any, requirements: any, projectId: string, modification: string | undefined, llmProxy: LLMProxyClient, model: string, events?: EventSink): Promise<GeneratedFile[]> {
@@ -818,44 +933,88 @@ async function generateBackendFiles(systemDesign: any, requirements: any, projec
   const safeId = projectId.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 24);
   const tablePrefix = `proj_${safeId}_`;
   let manifest: BackendManifest;
-  try { manifest = await generateBackendManifest(systemDesign, requirements, tablePrefix, modification, llmProxy, model); } catch (err) { logWarn('codeGenerationAgent:backend-manifest-fallback', { error: (err as Error).message }); manifest = fallbackBackendManifest(tablePrefix); }
-  if (!manifest.resources || manifest.resources.length === 0) manifest.resources = [{ name: 'items', routePath: '/api/items', tableName: `${tablePrefix}items`, methods: ['GET', 'POST'] }];
-  manifest.resources = manifest.resources.map((resource, index) => ({ ...resource, name: resource.name || `resource${index + 1}`, routePath: resource.routePath || `/api/${resource.name || `resource-${index + 1}`}`, tableName: String(resource.tableName || `${tablePrefix}${resource.name || `resource${index + 1}`}`).startsWith(tablePrefix) ? String(resource.tableName || `${tablePrefix}${resource.name || `resource${index + 1}`}`) : `${tablePrefix}${String(resource.tableName || resource.name || `resource${index + 1}`).replace(/[^a-zA-Z0-9_]/g, '_')}` }));
-  backendScaffold(manifest, tablePrefix).forEach(file => setFile(partial, file));
-  events?.emit({ type: 'AGENT_THINKING', message: 'Generated backend scaffold' });
-  // SQL and all routes are independent after the manifest — run them in parallel, capped at 4
-  const backendGenerationTasks: Array<() => Promise<GeneratedFile>> = [
-    async () => {
+
+  try {
+    manifest = await generateBackendManifest(systemDesign, requirements, tablePrefix, modification, llmProxy, model);
+  } catch (err) {
+    logWarn('codeGenerationAgent:backend-manifest-fallback', { error: (err as Error).message });
+    manifest = fallbackBackendManifest(tablePrefix);
+  }
+
+  const resources = Array.isArray(manifest.resources) ? manifest.resources : [];
+  if (resources.length === 0) {
+    manifest.resources = fallbackBackendManifest(tablePrefix).resources;
+  }
+
+  manifest.resources = (manifest.resources || []).map((resource, index) => ({
+    ...resource,
+    name: resource.name || `resource${index + 1}`,
+    routePath: resource.routePath || `/api/${resource.name || `resource-${index + 1}`}`,
+    tableName: String(resource.tableName || `${tablePrefix}${resource.name || `resource${index + 1}`}`).startsWith(tablePrefix)
+      ? String(resource.tableName || `${tablePrefix}${resource.name || `resource${index + 1}`}`)
+      : `${tablePrefix}${String(resource.tableName || resource.name || `resource${index + 1}`).replace(/[^a-zA-Z0-9_]/g, '_')}`,
+    methods: Array.isArray(resource.methods) && resource.methods.length > 0 ? resource.methods : ['GET', 'POST'],
+  }));
+
+  const backendFallback = fallbackBackendFiles(tablePrefix);
+  backendFallback.forEach(file => {
+    if (file.path === 'backend/package.json' || file.path === 'backend/index.js' || file.path === 'backend/db/database.js') {
+      setFile(partial, file);
+    }
+  });
+  events?.emit({ type: 'FILE_WRITTEN', filePath: 'backend/package.json', message: 'Generated backend scaffold: package.json' });
+  events?.emit({ type: 'FILE_WRITTEN', filePath: 'backend/index.js', message: 'Generated backend scaffold: index.js' });
+  events?.emit({ type: 'FILE_WRITTEN', filePath: 'backend/db/database.js', message: 'Generated backend scaffold: db/database.js' });
+
+  const artifactResults = await Promise.all([
+    (async () => {
       try {
         const f = await generateBackendInitSql(manifest, tablePrefix, requirements, llmProxy, model);
         setFile(partial, f);
         events?.emit({ type: 'FILE_WRITTEN', filePath: f.path, message: `Wrote ${f.path}` });
-        return f;
+        return { kind: 'sql', ok: true, path: f.path };
       } catch (err) {
         logWarn('codeGenerationAgent:init-sql-fallback', { error: (err as Error).message });
-        const f = fallbackInitSql(manifest, tablePrefix);
+        const f = backendFallback.find(file => file.path === 'backend/db/init.sql') || fallbackInitSql(manifest, tablePrefix);
         setFile(partial, f);
         events?.emit({ type: 'FILE_WRITTEN', filePath: f.path, message: `Wrote fallback ${f.path}` });
-        return f;
+        return { kind: 'sql', ok: false, path: f.path, error: (err as Error).message };
       }
-    },
-    ...(manifest.resources || []).map(resource => async (): Promise<GeneratedFile> => {
+    })(),
+    ...(manifest.resources || []).map((resource) => (async () => {
+      const expectedPath = sanitizeRoutePath('', resource.name || 'resource');
       try {
         const route = await generateBackendRoute(resource, resource.routePath || '/', tablePrefix, requirements, llmProxy, model);
         setFile(partial, route);
         events?.emit({ type: 'FILE_WRITTEN', filePath: route.path, message: `Wrote ${route.path}` });
-        return route;
+        return { kind: 'route', ok: true, path: route.path, resource: resource.name, expectedPath };
       } catch (err) {
-        logWarn('codeGenerationAgent:route-fallback', { resource: resource.name, error: (err as Error).message });
-        const route = fallbackRoute(resource, tablePrefix);
+        logWarn('codeGenerationAgent:route-fallback', { resource: resource.name, expectedPath, error: (err as Error).message });
+        const route = backendFallback.find(file => file.path === expectedPath) || fallbackRoute(resource, tablePrefix);
         setFile(partial, route);
         events?.emit({ type: 'FILE_WRITTEN', filePath: route.path, message: `Wrote fallback ${route.path}` });
-        return route;
+        return { kind: 'route', ok: false, path: route.path, resource: resource.name, expectedPath, error: (err as Error).message };
       }
-    }),
-  ];
-  await mapWithConcurrency(backendGenerationTasks, 4, task => task());
-  return Array.from(partial.entries()).map(([filePath, content]) => ({ path: filePath, content }));
+    })()),
+  ]);
+
+  const failedArtifacts = artifactResults.filter(r => !r.ok).map((r: any) => `${r.kind}:${r.expectedPath || r.path}${r.error ? ` (${r.error})` : ''}`);
+  if (failedArtifacts.length > 0) {
+    logWarn('codeGenerationAgent:backend-artifact-fallbacks', { failedArtifacts });
+  }
+
+  const files = Array.from(partial.entries()).map(([filePath, content]) => ({ path: filePath, content }));
+  const missingRequired = Array.from(BACKEND_REQUIRED).filter(required => !files.some(f => f.path === required));
+  if (missingRequired.length > 0) {
+    logWarn('codeGenerationAgent:backend-missing-required', { missingRequired, files: files.map(f => f.path) });
+    for (const fallback of backendFallback) {
+      if (!files.some(f => f.path === fallback.path)) {
+        files.push(fallback);
+      }
+    }
+  }
+
+  return files;
 }
 
 export async function codeGenerationAgent(input: any) {
@@ -882,18 +1041,24 @@ export async function codeGenerationAgent(input: any) {
 
   debug('codeGenerationAgent:parallel-start', { projectId, hasBackend, hasUISpec: !!uiSpec });
   const manifestOut: { value?: ProjectManifest } = {};
-  const [frontendFiles, backendFiles] = await Promise.all([
-    generateFrontendFiles(input.systemDesign, input.requirements, input.modification, llmProxy, model, events, manifestOut, uiSpec).catch((err: unknown) => {
-      logError('codeGenerationAgent:frontend-failed', err);
-      throw new Error(`Frontend code generation failed: ${(err as Error).message}`);
-    }),
-    hasBackend
-      ? generateBackendFiles(input.systemDesign, input.requirements, projectId, input.modification, llmProxy, model, events).catch((err: unknown) => {
-          logError('codeGenerationAgent:backend-failed', err);
-          throw new Error(`Backend code generation failed: ${(err as Error).message}`);
-        })
-      : Promise.resolve([] as GeneratedFile[]),
+  const [frontendResult, backendResult] = await Promise.allSettled([
+    generateFrontendFiles(input.systemDesign, input.requirements, input.modification, llmProxy, model, events, manifestOut, uiSpec),
+    hasBackend ? generateBackendFiles(input.systemDesign, input.requirements, projectId, input.modification, llmProxy, model, events) : Promise.resolve([] as GeneratedFile[]),
   ]);
+
+  const frontendFiles = frontendResult.status === 'fulfilled'
+    ? frontendResult.value
+    : (() => {
+        logError('codeGenerationAgent:frontend-failed', frontendResult.reason);
+        throw new Error(`Frontend code generation failed: ${(frontendResult.reason as Error)?.message || String(frontendResult.reason)}`);
+      })();
+
+  const backendFiles = backendResult.status === 'fulfilled'
+    ? backendResult.value
+    : (() => {
+        logError('codeGenerationAgent:backend-failed', backendResult.reason);
+        throw new Error(`Backend code generation failed: ${(backendResult.reason as Error)?.message || String(backendResult.reason)}`);
+      })();
   const projectManifest = manifestOut.value;
 
   const allFiles = Array.from(new Map([...frontendFiles, ...backendFiles].map(f => [normalizeGeneratedPath(f.path), f.content])).entries()).map(([pathName, content]) => ({ path: pathName, content }));
@@ -901,10 +1066,15 @@ export async function codeGenerationAgent(input: any) {
   const hasFrontendPkg = allFiles.some(f => f.path === 'package.json');
   const hasApp = allFiles.some(f => f.path === 'src/App.jsx');
   const hasCss = allFiles.some(f => f.path === 'src/index.css');
-  if (!hasFrontendPkg || !hasApp || !hasCss) throw new Error('Code generation did not produce the required frontend scaffold.');
+  if (!hasFrontendPkg || !hasApp || !hasCss) {
+    const missingFrontend = ['package.json', 'src/App.jsx', 'src/index.css'].filter(required => !allFiles.some(f => f.path === required));
+    throw new Error(`Code generation did not produce the required frontend scaffold. Missing: ${missingFrontend.join(', ')}`);
+  }
   if (hasBackend) {
     const missingBackend = Array.from(BACKEND_REQUIRED).filter(required => !allFiles.some(f => f.path === required));
-    if (missingBackend.length > 0) throw new Error(`Code generation did not produce required backend files: ${missingBackend.join(', ')}`);
+    if (missingBackend.length > 0) {
+      throw new Error(`Code generation did not produce required backend files: ${missingBackend.join(', ')}`);
+    }
   }
 
   // Validate that generated code is not stubs
