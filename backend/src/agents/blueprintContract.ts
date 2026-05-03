@@ -18,6 +18,13 @@ export type BlueprintBackendRoute = {
   queryNotes?: string;
 };
 
+export type BlueprintApproval = {
+  approved: boolean;
+  reviewer: string;
+  reviewedAt: string;
+  notes: string[];
+};
+
 export type BlueprintState = {
   owner: 'context' | 'zustand' | 'local';
   store: string;
@@ -26,6 +33,7 @@ export type BlueprintState = {
 
 export type ProjectBlueprint = {
   title: string;
+  approved?: BlueprintApproval;
   stack: {
     frontend: 'react-vite';
     backend: 'node-express-ts';

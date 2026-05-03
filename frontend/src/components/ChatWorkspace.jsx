@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { makeSocketUrl, readJson, buildDetailedLogPayload, copyTextToClipboard } from '../utils/helpers';
 
 function MessageText({ text }) {
@@ -13,6 +13,35 @@ function MessageText({ text }) {
   );
 }
 
+function countLines(text) {
+  if (!text) return 0;
+  return String(text).replace(/\n$/, '').split('\n').length;
+}
+
+function FileCodeDialog({ file, onClose }) {
+  if (!file) return null;
+  return (
+    <div className="historyOverlay fileDialogOverlay" role="dialog" aria-modal="true">
+      <div className="historyPanel fileDialogPanel">
+        <div className="historyHeader">
+          <div>
+            <h3>Generated file</h3>
+            <div className="historyMeta fileDialogMeta">
+              {file.path} · {countLines(file.content)} lines
+            </div>
+          </div>
+          <button className="topActionBtn ghost" type="button" onClick={onClose}>
+            Close
+          </button>
+        </div>
+        <div className="fileDialogBody">
+          <pre className="fileDialogCode">{file.content || '(empty file)'}</pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory }) {
   const [connection, setConnection] = useState('connecting');
   const [statusText, setStatusText] = useState('Initializing');
@@ -22,6 +51,8 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
   const [todayText, setTodayText] = useState('');
   const [messages, setMessages] = useState([]);
   const [copyState, setCopyState] = useState('Copy logs');
+  const [generatedFiles, setGeneratedFiles] = useState([]);
+  const [viewerFile, setViewerFile] = useState(null);
 
   const wsRef = useRef(null);
   const msgEndRef = useRef(null);
@@ -30,6 +61,8 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
   useEffect(() => {
     let active = true;
     setMessages([]);
+    setGeneratedFiles([]);
+    setViewerFile(null);
     setProgress(0);
     setStageStatus('');
     setStatusText('Initializing');
@@ -67,6 +100,14 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
 
   function pushMessage(role, text) {
     setMessages((prev) => [...prev, { role, text }]);
+  }
+
+  function upsertGeneratedFile(file) {
+    if (!file?.path) return;
+    setGeneratedFiles((prev) => {
+      const filtered = prev.filter((item) => item.path !== file.path);
+      return [...filtered, file];
+    });
   }
 
   useEffect(() => {
@@ -119,7 +160,16 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
           pushMessage('system', payload.message || 'Agent thinking...');
           break;
         case 'FILE_WRITTEN':
-          pushMessage('system', payload.filePath ? `Wrote ${payload.filePath}` : (payload.message || 'File written.'));
+          if (payload.payload?.file) upsertGeneratedFile(payload.payload.file);
+          if (payload.payload?.path && payload.payload?.content) {
+            upsertGeneratedFile({ path: payload.payload.path, content: payload.payload.content });
+          }
+          pushMessage(
+            'system',
+            payload.filePath
+              ? `Wrote ${payload.filePath}${payload.payload?.content ? ` (${countLines(payload.payload.content)} lines)` : ''}`
+              : (payload.message || 'File written.')
+          );
           break;
         case 'BUILD_LOG_STREAM':
           pushMessage('assistant', payload.token || payload.message || '');
@@ -187,6 +237,8 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
     sendText(input);
   }
 
+  const fileCountText = useMemo(() => `${generatedFiles.length} generated files`, [generatedFiles.length]);
+
   return (
     <div className="mainBg">
       <div className="assistantWrapper">
@@ -239,10 +291,38 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
 
           <div className="buildHint">Describe what to build and follow live progress below.</div>
 
+          <div className="generatedSummaryRow">
+            <span className="generatedSummaryPill">{fileCountText}</span>
+            <span className="generatedSummaryHint">Click the eye button beside any file to inspect the generated code.</span>
+          </div>
+
           <div className="logsHeader">
             <button className="copyLogsBtn" type="button" onClick={onCopyLogs}>
               {copyState}
             </button>
+          </div>
+
+          <div className="generatedFilesPanel">
+            {generatedFiles.length === 0 ? (
+              <div className="generatedFilesEmpty">Generated files will appear here as code is written.</div>
+            ) : (
+              generatedFiles.map((file) => (
+                <div className="generatedFileRow" key={file.path}>
+                  <div className="generatedFileMeta">
+                    <div className="generatedFilePath">{file.path}</div>
+                    <div className="generatedFileLines">{countLines(file.content)} lines</div>
+                  </div>
+                  <button className="eyeBtn" type="button" onClick={() => setViewerFile(file)} aria-label={`View ${file.path}`}>
+                    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+                      <path
+                        d="M12 5c5.5 0 9.7 4 11 7-1.3 3-5.5 7-11 7S2.3 15 1 12c1.3-3 5.5-7 11-7zm0 2C8 7 4.8 9.8 3.3 12 4.8 14.2 8 17 12 17s7.2-2.8 8.7-5C19.2 9.8 16 7 12 7zm0 1.8A3.2 3.2 0 1 1 12 15.2a3.2 3.2 0 0 1 0-6.4zm0 2A1.2 1.2 0 1 0 12 13.2a1.2 1.2 0 0 0 0-2.4z"
+                        fill="currentColor"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              ))
+            )}
           </div>
 
           <div className="activityBox">
@@ -280,6 +360,8 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
           </form>
         </section>
       </div>
+
+      <FileCodeDialog file={viewerFile} onClose={() => setViewerFile(null)} />
     </div>
   );
 }

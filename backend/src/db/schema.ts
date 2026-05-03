@@ -35,11 +35,44 @@ export async function ensureCoreTables() {
       clarifications JSONB,
       confirmation JSONB,
       system_design JSONB,
+      ui_spec JSONB,
+      blueprint JSONB,
+      task_queue JSONB,
+      terminal_logs JSONB NOT NULL DEFAULT '[]'::jsonb,
       code_gen JSONB,
       test_result JSONB,
       deployment JSONB,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       last_active_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await pgQuery(`
+    CREATE TABLE IF NOT EXISTS project_blackboards (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES project_sessions(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      state JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await pgQuery(`
+    CREATE TABLE IF NOT EXISTS project_tasks (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES project_sessions(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      phase TEXT NOT NULL,
+      action TEXT NOT NULL,
+      file_path TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      priority INTEGER NOT NULL DEFAULT 0,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      error_log TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
 

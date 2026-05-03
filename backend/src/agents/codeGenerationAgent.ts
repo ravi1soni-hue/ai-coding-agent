@@ -5,6 +5,7 @@ import { LLMProxyClient } from './llmProxyClient';
 import { embeddingAgent } from './embeddingAgent';
 import { debug, error as logError, warn as logWarn } from '../utils/logger';
 import { blueprintMissingFiles, validateProjectBlueprint, type ProjectBlueprint } from './blueprintContract';
+import { reviewerAgent } from './reviewerAgent';
 
 type GeneratedFile = { path: string; content: string };
 
@@ -1048,8 +1049,12 @@ async function generateBackendFiles(systemDesign: any, requirements: any, projec
 export async function codeGenerationAgent(input: any) {
   debug('codeGenerationAgent:start', { projectId: input?.projectId });
   if (!input) throw new Error('codeGenerationAgent: input required');
-  const blueprint = input.blueprint ? validateProjectBlueprint(input.blueprint) : undefined;
-  if (!blueprint) throw new Error('codeGenerationAgent: validated blueprint is required before code generation');
+  const rawBlueprint = input.blueprint ? validateProjectBlueprint(input.blueprint) : undefined;
+  if (!rawBlueprint) throw new Error('codeGenerationAgent: validated blueprint is required before code generation');
+  const blueprint = rawBlueprint.approved?.approved ? rawBlueprint : await reviewerAgent({ blueprint: rawBlueprint, reviewerName: 'Code Generation Gate' });
+  if (!blueprint.approved?.approved) {
+    throw new Error(`codeGenerationAgent: blueprint approval required before code generation${blueprint.approved?.notes?.length ? `: ${blueprint.approved.notes.join('; ')}` : ''}`);
+  }
 
   const { model, apiKey } = getModelConfigForTask('code_generation');
   const llmProxy = new LLMProxyClient({ apiKey });

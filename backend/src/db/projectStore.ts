@@ -20,6 +20,38 @@ export type ProjectHistoryRow = {
   source_hash: string | null;
 };
 
+export type ProjectBlackboardState = {
+  sessionId: string;
+  deployment: {
+    frontendUrl: string | null;
+    backendUrl: string | null;
+    dbStatus: string;
+  };
+  blueprint: unknown | null;
+  taskQueue: unknown[];
+  terminalLogs: unknown[];
+  currentStage: string | null;
+  status: string;
+  progress: number;
+  updatedAt: string;
+};
+
+export type ProjectTaskRow = {
+  id: string;
+  project_id: string;
+  user_id: string;
+  phase: string;
+  action: string;
+  file_path: string | null;
+  status: string;
+  priority: number;
+  attempt_count: number;
+  payload: unknown;
+  error_log: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type ProjectCodeRevision = {
   id: string;
   workspace_path: string;
@@ -65,6 +97,9 @@ export async function updateProjectSnapshot(input: {
   confirmation?: unknown;
   systemDesign?: unknown;
   uiSpec?: unknown;
+  blueprint?: unknown;
+  taskQueue?: unknown;
+  terminalLogs?: unknown;
   codeGen?: unknown;
   testResult?: unknown;
   deployment?: unknown;
@@ -80,9 +115,12 @@ export async function updateProjectSnapshot(input: {
       confirmation = COALESCE($8::jsonb, confirmation),
       system_design = COALESCE($9::jsonb, system_design),
       ui_spec = COALESCE($10::jsonb, ui_spec),
-      code_gen = COALESCE($11::jsonb, code_gen),
-      test_result = COALESCE($12::jsonb, test_result),
-      deployment = COALESCE($13::jsonb, deployment),
+      blueprint = COALESCE($11::jsonb, blueprint),
+      task_queue = COALESCE($12::jsonb, task_queue),
+      terminal_logs = COALESCE($13::jsonb, terminal_logs),
+      code_gen = COALESCE($14::jsonb, code_gen),
+      test_result = COALESCE($15::jsonb, test_result),
+      deployment = COALESCE($16::jsonb, deployment),
       last_active_at = NOW()
      WHERE id = $1 AND user_id = $2`,
     [
@@ -96,10 +134,87 @@ export async function updateProjectSnapshot(input: {
       input.confirmation ? JSON.stringify(input.confirmation) : null,
       input.systemDesign ? JSON.stringify(input.systemDesign) : null,
       input.uiSpec ? JSON.stringify(input.uiSpec) : null,
+      input.blueprint ? JSON.stringify(input.blueprint) : null,
+      input.taskQueue ? JSON.stringify(input.taskQueue) : null,
+      input.terminalLogs ? JSON.stringify(input.terminalLogs) : null,
       input.codeGen ? JSON.stringify(input.codeGen) : null,
       input.testResult ? JSON.stringify(input.testResult) : null,
       input.deployment ? JSON.stringify(input.deployment) : null,
     ],
+  );
+}
+
+export async function upsertProjectBlackboard(input: {
+  projectId: string;
+  userId: string;
+  state: ProjectBlackboardState;
+}) {
+  await pgQuery(
+    `INSERT INTO project_blackboards (id, project_id, user_id, state)
+     VALUES ($1, $2, $3, $4::jsonb)
+     ON CONFLICT (id) DO UPDATE
+     SET state = EXCLUDED.state,
+         updated_at = NOW()`,
+    [
+      input.projectId,
+      input.projectId,
+      input.userId,
+      JSON.stringify(input.state),
+    ],
+  );
+}
+
+export async function getProjectBlackboard(input: { projectId: string; userId: string }): Promise<ProjectBlackboardState | null> {
+  const rows = await pgQuery<{ state: ProjectBlackboardState }>(
+    `SELECT state
+     FROM project_blackboards
+     WHERE project_id = $1 AND user_id = $2
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [input.projectId, input.userId],
+  );
+  return rows[0]?.state ?? null;
+}
+
+export async function appendProjectTask(input: {
+  projectId: string;
+  userId: string;
+  phase: string;
+  action: string;
+  filePath?: string | null;
+  status?: string;
+  priority?: number;
+  payload?: unknown;
+  errorLog?: string | null;
+}) {
+  const id = crypto.randomUUID();
+  await pgQuery(
+    `INSERT INTO project_tasks (
+      id, project_id, user_id, phase, action, file_path, status, priority, attempt_count, payload, error_log
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9::jsonb, $10)`,
+    [
+      id,
+      input.projectId,
+      input.userId,
+      input.phase,
+      input.action,
+      input.filePath ?? null,
+      input.status ?? 'pending',
+      input.priority ?? 0,
+      JSON.stringify(input.payload ?? {}),
+      input.errorLog ?? null,
+    ],
+  );
+  return id;
+}
+
+export async function listProjectTasks(input: { projectId: string; userId: string }): Promise<ProjectTaskRow[]> {
+  return pgQuery<ProjectTaskRow>(
+    `SELECT id, project_id, user_id, phase, action, file_path, status, priority, attempt_count, payload, error_log, created_at, updated_at
+     FROM project_tasks
+     WHERE project_id = $1 AND user_id = $2
+     ORDER BY priority DESC, created_at ASC`,
+    [input.projectId, input.userId],
   );
 }
 

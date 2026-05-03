@@ -20,10 +20,14 @@ import {
 } from '../auth/authService';
 import {
   appendProjectEvent,
+  appendProjectTask,
   createProjectCodeRevision,
+  getProjectBlackboard,
   getProjectSnapshot,
+  listProjectTasks,
   saveProjectDeployment,
   updateProjectSnapshot,
+  upsertProjectBlackboard,
 } from '../db/projectStore';
 import { materializeProjectWorkspace } from '../factory/projectFactory';
 import { config } from '../config/env';
@@ -163,6 +167,7 @@ export function createSocketServer(server: http.Server) {
     ws.send(JSON.stringify({ type: 'info', message: 'Connected!' }));
 
     const snapshot = await getProjectSnapshot({ userId: authedUser.id, projectId });
+    const blackboardSnapshot = await getProjectBlackboard({ userId: authedUser.id, projectId });
 
     // Session state
     type Session = {
@@ -192,8 +197,8 @@ export function createSocketServer(server: http.Server) {
     };
 
     const session: Session = {
-      progress: Number(snapshot?.progress) || 0,
-      step: snapshot?.current_step || 'init',
+      progress: Number(snapshot?.progress || blackboardSnapshot?.progress) || 0,
+      step: snapshot?.current_step || blackboardSnapshot?.currentStage || 'init',
       requirements: snapshot?.requirements,
       clarifications: snapshot?.clarifications,
       confirmation: snapshot?.confirmation,
@@ -239,6 +244,28 @@ export function createSocketServer(server: http.Server) {
     // -----------------------------------------------------------------------
     // Helper: rematerialize code into workspace
     // -----------------------------------------------------------------------
+    async function persistBlackboardState(): Promise<void> {
+      await upsertProjectBlackboard({
+        projectId,
+        userId: authedUser.id,
+        state: {
+          sessionId: projectId,
+          deployment: {
+            frontendUrl: session.deployment?.frontend_url || null,
+            backendUrl: session.deployment?.backend_url || null,
+            dbStatus: 'ready',
+          },
+          blueprint: session.systemDesign || null,
+          taskQueue: await listProjectTasks({ projectId, userId: authedUser.id }).catch(() => []),
+          terminalLogs: [],
+          currentStage: session.step,
+          status: session.step === 'done' ? 'completed' : 'active',
+          progress: session.progress,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+    }
+
     async function rematerializeAndStore(codeGenData: any): Promise<void> {
       const mat = await materializeProjectWorkspace({ projectId, codeGen: codeGenData });
       session.activeRevisionId = mat.revisionId;
@@ -256,6 +283,7 @@ export function createSocketServer(server: http.Server) {
         patchApplyLog: mat.patchApplyLog,
         generationPayload: codeGenData,
       });
+      await persistBlackboardState();
     }
 
     // -----------------------------------------------------------------------
@@ -394,6 +422,15 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.requirements = { ...raResult.data, userMessage: userMsg };
+          await appendProjectTask({
+            projectId,
+            userId: authedUser.id,
+            phase: 'PM',
+            action: 'ANALYZE_REQUIREMENTS',
+            status: 'completed',
+            payload: raResult.data,
+            priority: 10,
+          });
           session.stepRetries['requirementAnalysis'] = 0;
           debug('socket:requirementAnalysis', { projectId });
           ws.send(JSON.stringify({ type: 'stream', token: 'Got it! Let me ask a couple of quick questions.' }));
@@ -471,6 +508,7 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.confirmation = confResult.data;
+          await persistBlackboardState();
           debug('socket:confirmation', { projectId });
           ws.send(JSON.stringify({ type: 'stream', token: 'Requirements confirmed! Designing the system now...' }));
           session.step = 'systemDesign';
@@ -486,6 +524,7 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.systemDesign = sdResult.data;
+          await persistBlackboardState();
           session.stepRetries['systemDesign'] = 0;
           debug('socket:systemDesign', { projectId });
           ws.send(JSON.stringify({ type: 'stream', token: 'Architecture ready! Designing UI structure...' }));
@@ -508,6 +547,7 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.uiSpec = uiSpecResult.data;
+          await persistBlackboardState();
           session.stepRetries['uiSpec'] = 0;
           debug('socket:uiSpec', { projectId, componentCount: session.uiSpec?.components?.length });
           ws.send(JSON.stringify({ type: 'stream', token: 'UI structure designed! Generating your code now...' }));
@@ -592,6 +632,7 @@ export function createSocketServer(server: http.Server) {
 
           session.deployment = deployResult.data;
           await persistDeployment();
+          await persistBlackboardState();
 
           debug('socket:deploy', { projectId, frontend_url: session.deployment?.frontend_url });
           const frontendUrl = session.deployment?.frontend_url || '';
@@ -753,6 +794,7 @@ export function createSocketServer(server: http.Server) {
 
         session.deployment = deployResult.data;
         await persistDeployment();
+        await persistBlackboardState();
 
         const frontendUrl = session.deployment?.frontend_url || '';
         const backendUrl = session.deployment?.backend_url || '';
@@ -869,6 +911,7 @@ export function createSocketServer(server: http.Server) {
 
           // For any other stuck state, treat as fresh request
           session.progress = 0;
+          await persistBlackboardState();
           session.step = 'init';
           session.requirements = undefined;
           session.clarifications = undefined;
