@@ -133,7 +133,6 @@ export async function materializeProjectWorkspace(input: MaterializeInput): Prom
   const workspaceDir = path.join(projectDir, revisionId);
 
   await fs.mkdir(workspaceDir, { recursive: true });
-  await copyDir(FRONTEND_TEMPLATE_DIR, workspaceDir);
   await copyDir(BACKEND_TEMPLATE_DIR, path.join(workspaceDir, 'backend'));
 
   const generatedFiles = extractGeneratedFiles(input.codeGen);
