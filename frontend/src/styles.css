@@ -645,6 +645,14 @@ body {
   margin-bottom: 8px;
   padding: 6px 8px;
   border-radius: 8px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.msg a {
+  color: inherit;
+  text-decoration: underline;
+  overflow-wrap: anywhere;
 }
 
 .msg.user {
@@ -660,8 +668,54 @@ body {
 }
 
 .msg.error {
-  background: var(--error);
-  color: #9d2f2f;
+  background: #fff2f2;
+  color: #8d2a2a;
+  border: 1px solid #ffd7d7;
+}
+
+.msg.details {
+  background: #f6f7fb;
+  border: 1px solid #dfe3f1;
+}
+
+.msgDetails {
+  display: grid;
+  gap: 8px;
+}
+
+.msgDetails summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #39415f;
+  list-style: none;
+}
+
+.msgDetails summary::-webkit-details-marker {
+  display: none;
+}
+
+.msgDetails summary::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.15s ease;
+}
+
+.msgDetails[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.msgDetails pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  color: #2d334d;
+  background: #fff;
+  border: 1px solid #e4e7f3;
+  border-radius: 10px;
+  padding: 10px;
+  overflow: auto;
 }
 
 @media (max-width: 900px) {
@@ -764,6 +818,10 @@ body {
 
   .activityBox {
     max-height: 42vh;
+  }
+
+  .assistantWrapper {
+    max-width: 100vw;
   }
 
   .historyOverlay {

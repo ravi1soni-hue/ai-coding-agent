@@ -14,6 +14,18 @@ async function readJson(res) {
   }
 }
 
+function MessageText({ text }) {
+  return text.split(/(https?:\/\/[^\s]+)/g).map((part, i) =>
+    /^https?:\/\//.test(part) ? (
+      <a key={i} href={part} target="_blank" rel="noopener noreferrer">
+        {part}
+      </a>
+    ) : (
+      part
+    ),
+  );
+}
+
 function AuthPage({ mode, setMode, form, setForm, busy, error, onSubmit }) {
   const isSignup = mode === 'signup';
 
@@ -165,8 +177,7 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
           if (e.event_type === 'done') return { role: 'system', text: e.message || '' };
           return null;
         })
-        .filter((m) => m && m.text)
-        .slice(-30);
+        .filter((m) => m && m.text);
 
       if (restored.length > 0) {
         setMessages(restored);
@@ -266,14 +277,15 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
             pushMessage('system', `🔍 Inspect deployment: ${payload.vercel_inspect_url}`);
           }
           if (payload.frontend_access_warning) {
-            pushMessage('error', `⚠️ ${payload.frontend_access_warning}`);
+            pushMessage('details', `Warning: ${payload.frontend_access_warning}`);
           }
           break;
         case 'error':
-          pushMessage('error', payload.message || 'Unknown error.');
+          pushMessage('details', payload.message || 'Unknown error.');
           break;
         default:
-          pushMessage('assistant', JSON.stringify(payload));
+          pushMessage('system', 'Received an unrecognized event from the server.');
+          pushMessage('details', JSON.stringify(payload, null, 2));
       }
     };
 
@@ -387,15 +399,21 @@ function ChatWorkspace({ user, projectId, onLogout, onNewProject, onOpenHistory 
           <div className="buildHint">Describe what to build and follow live progress below.</div>
 
           <div className="activityBox">
-            {messages.slice(-30).map((m, idx) => (
-              <div key={`${m.role}-${idx}`} className={`msg ${m.role}`}>
-                {m.text.split(/(https?:\/\/[^\s]+)/g).map((part, i) =>
-                  /^https?:\/\//.test(part)
-                    ? <a key={i} href={part} target="_blank" rel="noopener noreferrer" style={{color:'inherit',textDecoration:'underline',wordBreak:'break-all'}}>{part}</a>
-                    : part
-                )}
-              </div>
-            ))}
+            {messages.map((m, idx) => {
+              const isDetails = m.role === 'details';
+              return (
+                <div key={`${m.role}-${idx}`} className={`msg ${m.role}`}>
+                  {isDetails ? (
+                    <details className="msgDetails">
+                      <summary>{m.text.length > 120 ? 'Show details' : 'Show message details'}</summary>
+                      <pre>{m.text}</pre>
+                    </details>
+                  ) : (
+                    <MessageText text={m.text} />
+                  )}
+                </div>
+              );
+            })}
             <div ref={msgEndRef} />
           </div>
 
