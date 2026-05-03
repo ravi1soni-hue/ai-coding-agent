@@ -31,6 +31,7 @@ export async function handleCodeGeneration(
         requirements: input.requirements,
         modification: input.modification,
         context: input.context,
+        projectId: input.projectId,
       }),
       TIMEOUT_MS,
       'Code generation'

@@ -1,11 +1,52 @@
 import axios from 'axios';
 import fs from 'fs';
+import path from 'path';
+import { Pool } from 'pg';
 import { deployToVercel } from './vercelDeploy';
 import { deployToRailway } from '../deploy/railwayDeploy';
-import { debug, error as logError } from '../utils/logger';
+import { config as env } from '../config/env';
+import { debug, error as logError, warn as logWarn } from '../utils/logger';
 
+// ---------------------------------------------------------------------------
+// DB Init — runs backend/db/init.sql against the shared Postgres instance
+// ---------------------------------------------------------------------------
 
+async function runDbInitSql(backendDir: string): Promise<void> {
+  const initSqlPath = path.join(backendDir, 'db', 'init.sql');
+  if (!fs.existsSync(initSqlPath)) {
+    debug('deploymentAgent:db-init', 'no init.sql found, skipping');
+    return;
+  }
 
+  const sql = fs.readFileSync(initSqlPath, 'utf8').trim();
+  if (!sql || sql.startsWith('--')) {
+    debug('deploymentAgent:db-init', 'init.sql empty or comment-only, skipping');
+    return;
+  }
+
+  const postgresUrl = env.POSTGRES_URL;
+  if (!postgresUrl) {
+    logWarn('deploymentAgent:db-init', 'POSTGRES_URL not set, skipping DB init');
+    return;
+  }
+
+  const pool = new Pool({ connectionString: postgresUrl, connectionTimeoutMillis: 15_000 });
+  try {
+    await pool.query(sql);
+    debug('deploymentAgent:db-init', 'DB tables initialized successfully');
+  } catch (err) {
+    logWarn('deploymentAgent:db-init-error', {
+      message: (err as Error).message,
+      hint: 'Tables may already exist — this is usually safe to ignore',
+    });
+  } finally {
+    await pool.end().catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 export async function deploymentAgent(input: {
   projectId: string;
@@ -24,22 +65,31 @@ export async function deploymentAgent(input: {
 
     const defaultProjectName = `proj-${input.projectId.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 18) || 'site'}`;
 
+    // ── Frontend: deploy to Vercel ──────────────────────────────────────────
     const vercelResult = await deployToVercel({
       buildDir: input.buildDir,
       projectName: input.frontendProjectName || defaultProjectName,
-      meta: {
-        projectId: input.projectId,
-        revisionId: input.revisionId,
-      },
+      meta: { projectId: input.projectId, revisionId: input.revisionId },
     });
 
+    // ── Backend: deploy to Railway (conditional) ────────────────────────────
     const backendService = input.backendService || `backend-${input.projectId.slice(0, 10)}`;
     const backendRequested = input.hasBackend !== false;
-    const backendDirLooksValid = Boolean(
-      input.backendDir && fs.existsSync(input.backendDir) && fs.existsSync(`${input.backendDir}/package.json`),
+
+    // Verify backend directory has the needed files
+    const backendDirValid = Boolean(
+      input.backendDir &&
+      fs.existsSync(input.backendDir) &&
+      fs.existsSync(path.join(input.backendDir, 'package.json'))
     );
 
-    const shouldDeployBackend = backendRequested && backendDirLooksValid;
+    const shouldDeployBackend = backendRequested && backendDirValid;
+
+    if (shouldDeployBackend && input.backendDir) {
+      // Run DB init SQL before deploying so tables exist when backend starts
+      await runDbInitSql(input.backendDir);
+    }
+
     const railwayResult = shouldDeployBackend
       ? await deployToRailway(backendService, {
           source: 'deploymentAgent',
@@ -50,7 +100,7 @@ export async function deploymentAgent(input: {
       : null;
 
     if (!vercelResult.url) {
-      throw new Error('Vercel deployment succeeded but did not return a frontend deployment URL.');
+      throw new Error('Vercel deployment succeeded but did not return a frontend URL.');
     }
 
     const result = {
@@ -68,20 +118,23 @@ export async function deploymentAgent(input: {
       frontend_access_warning: null as string | null,
     };
 
-    // Detect deployments protected by Vercel auth/SSO so UX can show a clear message.
+    // Probe Vercel URL for SSO/password protection
     try {
       const probe = await axios.get(result.frontend_url, {
-        timeout: 10_000,
+        timeout: 12_000,
         maxRedirects: 0,
         validateStatus: () => true,
       });
       if (probe.status === 401 || probe.status === 403) {
         result.frontend_accessible = false;
-        result.frontend_access_warning = 'Vercel deployment is protected by authentication (SSO/password). Disable Deployment Protection in Vercel to make the URL publicly accessible.';
+        result.frontend_access_warning =
+          'Vercel deployment is protected by authentication (SSO/password). ' +
+          'Disable Deployment Protection in Vercel settings to make the URL public.';
       }
     } catch {
-      // Ignore probe errors and keep deployment result as-is.
+      // Ignore probe errors — deployment is still valid
     }
+
     debug('deploymentAgent:result', { result });
     return result;
   } catch (err) {

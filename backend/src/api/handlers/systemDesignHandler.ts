@@ -5,6 +5,7 @@ import { debug, error } from '../../utils/logger';
 export interface SystemDesignInput {
   requirements: any;
   projectId: string;
+  modification?: string;
 }
 
 export interface HandlerResult<T = any> {
@@ -14,15 +15,17 @@ export interface HandlerResult<T = any> {
   fallback?: any;
 }
 
-const TIMEOUT_MS = 10_000;
+const TIMEOUT_MS = 30_000;
 
-export async function handleSystemDesign(
-  input: SystemDesignInput
-): Promise<HandlerResult> {
+export async function handleSystemDesign(input: SystemDesignInput): Promise<HandlerResult> {
   debug('handleSystemDesign', { projectId: input.projectId });
   try {
+    const agentInput = {
+      requirements: input.requirements,
+      modification: input.modification,
+    };
     const result = await withTimeout(
-      systemDesignAgent(input.requirements),
+      systemDesignAgent(agentInput),
       TIMEOUT_MS,
       'System design'
     );

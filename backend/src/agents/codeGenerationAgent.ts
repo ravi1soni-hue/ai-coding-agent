@@ -3,204 +3,375 @@ import { getModelConfigForTask } from './modelRouter';
 import { searchVectors } from '../db/vectorStore';
 import { LLMProxyClient } from './llmProxyClient';
 import { embeddingAgent } from './embeddingAgent';
-import { debug, error as logError } from '../utils/logger';
+import { debug, error as logError, warn as logWarn } from '../utils/logger';
 
-function stripMarkdownCodeBlocks(content: string): string {
-  return content.replace(/```[a-zA-Z]*\s*|```/g, '').trim();
+// ---------------------------------------------------------------------------
+// JSON helpers
+// ---------------------------------------------------------------------------
+
+function stripMarkdownFences(content: string): string {
+  return content.replace(/```[a-zA-Z]*\s*/g, '').replace(/```/g, '').trim();
 }
 
-function extractBalancedJson(content: string): string | null {
-  const text = content.trim();
-  const startTokens = ['{', '['];
-
-  for (let startIndex = 0; startIndex < text.length; startIndex++) {
-    const firstChar = text[startIndex];
-    if (!startTokens.includes(firstChar)) continue;
-
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-
-    for (let i = startIndex; i < text.length; i++) {
-      const char = text[i];
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-      if (char === '\\') {
-        escaped = true;
-        continue;
-      }
-      if (char === '"') {
-        inString = !inString;
-        continue;
-      }
-      if (inString) continue;
-      if (char === '{' || char === '[') {
-        depth += 1;
-      } else if (char === '}' || char === ']') {
-        depth -= 1;
+function parseJsonSafe(content: string): any {
+  const cleaned = stripMarkdownFences(content);
+  try { return JSON.parse(cleaned); } catch {}
+  const text = cleaned.trim();
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '{' && text[i] !== '[') continue;
+    let depth = 0, inStr = false, escaped = false;
+    for (let j = i; j < text.length; j++) {
+      const c = text[j];
+      if (escaped) { escaped = false; continue; }
+      if (c === '\\') { escaped = true; continue; }
+      if (c === '"') { inStr = !inStr; continue; }
+      if (inStr) continue;
+      if (c === '{' || c === '[') depth++;
+      else if (c === '}' || c === ']') {
+        depth--;
         if (depth === 0) {
-          const candidate = text.slice(startIndex, i + 1);
-          try {
-            JSON.parse(candidate);
-            return candidate;
-          } catch {
-            // continue searching for the next balanced JSON block
-          }
+          try { return JSON.parse(text.slice(i, j + 1)); } catch { break; }
         }
       }
     }
   }
-  return null;
+  throw new Error('No valid JSON found in LLM response');
 }
 
-function parseJsonFromText(content: string): any {
-  const cleaned = stripMarkdownCodeBlocks(content);
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    const candidate = extractBalancedJson(cleaned);
-    if (!candidate) {
-      throw new Error('Malformed LLM output: No valid JSON object found');
+// ---------------------------------------------------------------------------
+// LLM call with retry
+// ---------------------------------------------------------------------------
+
+async function callWithRetry(
+  llmProxy: LLMProxyClient,
+  messages: Array<{ role: string; content: string }>,
+  model: string,
+  maxTokens: number,
+  timeoutMs: number,
+  maxRetries = 3,
+  label = 'llmCall'
+): Promise<string> {
+  let lastError: Error = new Error('Unknown error');
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const completion = await llmProxy.chatCompletion(messages, model, 0.0, 0.9, maxTokens, timeoutMs);
+      const content: string = completion.choices?.[0]?.message?.content || '';
+      if (typeof content === 'string' && /^[\s]*<!doctype|<html/i.test(content)) {
+        throw new Error(`${label}: LLM returned HTML error page`);
+      }
+      if (!content.trim()) throw new Error(`${label}: LLM returned empty response`);
+      return content;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      logWarn(`${label}:attempt${attempt}`, { error: lastError.message });
+      if (attempt < maxRetries) await new Promise(r => setTimeout(r, 2500 * attempt));
     }
-    return JSON.parse(candidate);
   }
+  throw lastError;
 }
 
+// ---------------------------------------------------------------------------
+// File filtering
+// ---------------------------------------------------------------------------
 
-/**
- * Patch-based code generation agent for continuous evolution.
- * Accepts current state, requirements, and modification request.
- * Generates only the necessary code changes (patches).
- * input: {
- *   systemDesign: object, // current system design
- *   requirements: object, // current requirements
- *   modification?: string, // user modification request
- *   context?: any, // additional context (e.g., previous patches)
- *   embedding?: any // for RAG
- * }
- * returns: { patch: string, files?: Array<{ path: string; content: string }>, frontendRepo?: string, backendRepo?: string }
- */
+const BAN_LIST = [
+  'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml',
+  '.pnpm-store', 'bun.lockb',
+];
+
+function filterAndNormalizeFiles(
+  files: Array<{ path: string; content: string }>
+): Array<{ path: string; content: string }> {
+  const seen = new Map<string, string>();
+  for (const f of files) {
+    if (!f || typeof f.path !== 'string' || typeof f.content !== 'string') continue;
+    const p = f.path.replace(/^\/+/, '');
+    if (BAN_LIST.some(b => p === b || p.startsWith(`${b}/`))) continue;
+    if (p.startsWith('node_modules') || p.includes('/node_modules/')) continue;
+    if (p.startsWith('dist/') || p === 'dist') continue;
+    seen.set(p, f.content); // later (backend) entries overwrite earlier (frontend)
+  }
+  return Array.from(seen.entries()).map(([path, content]) => ({ path, content }));
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1 — Frontend (React + Vite)
+// ---------------------------------------------------------------------------
+
+async function generateFrontendFiles(
+  systemDesign: any,
+  requirements: any,
+  modification: string | undefined,
+  llmProxy: LLMProxyClient,
+  model: string
+): Promise<Array<{ path: string; content: string }>> {
+
+  const systemPrompt = `You are a senior frontend engineer. Generate a complete React + Vite 5 web application.
+
+=== VITE PROJECT STRUCTURE (follow exactly) ===
+- index.html           → ROOT level (NOT inside public/). Must have: <div id="root"></div> and <script type="module" src="/src/main.jsx"></script>
+- vite.config.js       → ROOT level. Use @vitejs/plugin-react
+- package.json         → ROOT level. Must include scripts: { "dev": "vite", "build": "vite build", "preview": "vite preview" }
+- src/main.jsx         → ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+- src/App.jsx          → Main app component with all routing/pages
+- src/index.css        → Global styles (can be minimal)
+- src/components/*.jsx → Reusable components (as needed)
+- src/pages/*.jsx      → Page components if multi-page (optional)
+
+=== CRITICAL RULES ===
+1. index.html at ROOT level (NEVER in public/) — this is Vite, not Create React App
+2. "type": "module" in package.json (ES modules)
+3. Every npm import in code MUST be declared in package.json dependencies/devDependencies
+4. devDependencies must include: "vite": "^5.4.20", "@vitejs/plugin-react": "^4.3.1"
+5. dependencies must include: "react": "^18.3.1", "react-dom": "^18.3.1"
+6. Images: use https://via.placeholder.com/WIDTHxHEIGHT (never external URLs)
+7. NO package-lock.json, NO node_modules, NO dist files
+8. All file contents must be COMPLETE — do not truncate or use comments like "// ... rest of code"
+9. For icons: use unicode emojis or simple CSS shapes — do NOT import icon libraries unless explicitly listed in requirements
+10. CSS: prefer inline styles or simple CSS files — no Tailwind/shadcn unless requirements explicitly ask for it
+11. API calls: ALWAYS use "const API_BASE = import.meta.env.VITE_API_BASE_URL || '';" and call endpoints as `${API_BASE}/api/resource` — NEVER hardcode localhost or relative /api paths
+
+=== OUTPUT FORMAT ===
+Respond with ONLY valid JSON — no markdown fences, no explanation, no text before or after:
+{"files": [{"path": "string", "content": "string"}, ...]}`;
+
+  const userPrompt = JSON.stringify({
+    requirements,
+    frontendDesign: systemDesign?.frontend || null,
+    authDesign: systemDesign?.auth || null,
+    modification: modification || null,
+    hasBackend: Boolean(systemDesign?.backend),
+    backendApiBase: systemDesign?.backend ? 'import.meta.env.VITE_API_BASE_URL' : null,
+    backendApiNote: systemDesign?.backend
+      ? 'Use import.meta.env.VITE_API_BASE_URL as the API base. Example: const API = import.meta.env.VITE_API_BASE_URL || ""; fetch(`${API}/api/users`). This value is injected at build time.'
+      : null,
+  });
+
+  const raw = await callWithRetry(
+    llmProxy,
+    [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+    model,
+    8000,
+    240_000,
+    3,
+    'generateFrontend'
+  );
+
+  const parsed = parseJsonSafe(raw);
+  if (!Array.isArray(parsed?.files)) {
+    throw new Error(`Frontend generation returned invalid output (no files array). Raw snippet: ${raw.slice(0, 200)}`);
+  }
+  return parsed.files.filter((f: any) => typeof f?.path === 'string' && typeof f?.content === 'string');
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — Backend (Express + DB)
+// ---------------------------------------------------------------------------
+
+async function generateBackendFiles(
+  systemDesign: any,
+  requirements: any,
+  projectId: string,
+  modification: string | undefined,
+  llmProxy: LLMProxyClient,
+  model: string
+): Promise<Array<{ path: string; content: string }>> {
+
+  const safeId = projectId.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 24);
+  const tablePrefix = `proj_${safeId}_`;
+
+  const systemPrompt = `You are a senior backend engineer. Generate a complete Node.js + Express backend API.
+
+=== DB TABLE NAMESPACE ===
+ALL database tables MUST use prefix: "${tablePrefix}"
+Example: table "users" → "${tablePrefix}users", table "posts" → "${tablePrefix}posts"
+This is mandatory — the DB is shared across projects and prefix prevents conflicts.
+
+=== BACKEND STRUCTURE (all files under backend/ directory) ===
+- backend/package.json         → "type":"module", scripts: {"start":"node index.js","build":"echo done"}, deps: express, pg, cors
+- backend/index.js             → Express server (port from process.env.PORT||3000), imports routes, runs DB init on startup
+- backend/db/database.js       → pg Pool via process.env.POSTGRES_URL, exports { pool, query(sql,params) }
+- backend/db/init.sql          → CREATE TABLE IF NOT EXISTS for each table (using "${tablePrefix}" prefix)
+- backend/routes/[resource].js → One file per resource with CRUD routes (GET /api/resource, POST, PUT, DELETE)
+- backend/middleware/           → Optional middleware files
+
+=== backend/index.js template ===
+import express from 'express';
+import cors from 'cors';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import { query } from './db/database.js';
+// import routes...
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.use(cors({ origin: '*' }));
+app.use(express.json());
+
+// Mount routes
+// app.use('/api/users', usersRouter);
+
+// DB init: run init.sql at startup
+async function initDb() {
+  try {
+    const sql = readFileSync(join(__dirname, 'db/init.sql'), 'utf8');
+    if (sql.trim()) await query(sql);
+    console.log('DB initialized');
+  } catch (e) { console.warn('DB init warning:', e.message); }
+}
+
+app.get('/api/health', async (req, res) => {
+  try { await query('SELECT 1'); res.json({ status: 'ok', db: 'connected' }); }
+  catch (e) { res.status(500).json({ status: 'error', db: String(e) }); }
+});
+
+app.use((err, req, res, next) => { res.status(500).json({ error: err.message }); });
+
+initDb().then(() => app.listen(port, () => console.log(\`Backend on port \${port}\`)));
+
+=== CRITICAL RULES ===
+1. "type": "module" in backend/package.json (ES modules, use import/export)
+2. All tables in init.sql MUST be prefixed with "${tablePrefix}"
+3. database.js exports a query(sql, params) helper using pg Pool
+4. CORS must be enabled for all routes (allow all origins)
+5. All routes must have try/catch with proper error responses
+6. backend/db/init.sql must use CREATE TABLE IF NOT EXISTS (safe to re-run)
+7. backend/package.json scripts.build MUST be present (can be "echo done" if no build needed)
+8. NO package-lock.json, NO node_modules
+
+=== OUTPUT FORMAT ===
+Respond with ONLY valid JSON — no markdown fences, no explanation:
+{"files": [{"path": "string", "content": "string"}, ...]}`;
+
+  const userPrompt = JSON.stringify({
+    requirements,
+    backendDesign: systemDesign?.backend || null,
+    databaseDesign: systemDesign?.database || null,
+    authDesign: systemDesign?.auth || null,
+    tablePrefix,
+    modification: modification || null,
+  });
+
+  const raw = await callWithRetry(
+    llmProxy,
+    [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+    model,
+    7000,
+    240_000,
+    3,
+    'generateBackend'
+  );
+
+  const parsed = parseJsonSafe(raw);
+  if (!Array.isArray(parsed?.files)) {
+    throw new Error(`Backend generation returned invalid output (no files array). Raw snippet: ${raw.slice(0, 200)}`);
+  }
+  return parsed.files.filter((f: any) => typeof f?.path === 'string' && typeof f?.content === 'string');
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
 export async function codeGenerationAgent(input: any) {
-  debug('codeGenerationAgent', { input });
+  debug('codeGenerationAgent:start', { projectId: input?.projectId });
+  if (!input) throw new Error('codeGenerationAgent: input required');
+
+  const { model, apiKey } = getModelConfigForTask('code_generation');
+  const llmProxy = new LLMProxyClient({ apiKey });
+
+  // RAG: retrieve similar patches for context (best-effort, non-blocking)
+  let retrievedPatches: string[] = [];
   try {
-    if (!input) throw new Error('Input required');
-    const { model, apiKey } = getModelConfigForTask('code_generation');
-    const llmProxy = new LLMProxyClient({ apiKey });
-    let retrievedPatches = [];
-    let embedding = input.embedding;
-    if (!Array.isArray(embedding)) {
-      try {
-        const basis = JSON.stringify({
-          systemDesign: input.systemDesign,
-          requirements: input.requirements,
-          modification: input.modification,
-        });
-        const embedded = await embeddingAgent(basis);
-        if (Array.isArray(embedded) && embedded.length > 0) {
-          embedding = embedded;
-        }
-      } catch {
-        embedding = undefined;
-      }
-    }
-    // If embedding is available in input, retrieve similar code patches for RAG
-    if (embedding && Array.isArray(embedding)) {
-      try {
-        const similar = await searchVectors({
-          user_id: input.user_id || 'unknown',
-          task: 'code_patch',
-          embedding,
-          topK: 3
-        });
-        retrievedPatches = similar.map(row => row.metadata?.patch).filter(Boolean);
-      } catch (e) {
-        // Ignore retrieval errors, fallback to no context
-      }
-    }
-    // Compose prompt for patch-based or modification-based codegen
-    let userPrompt = {
+    const basis = JSON.stringify({
       systemDesign: input.systemDesign,
       requirements: input.requirements,
-      modification: input.modification,
-      context: input.context,
-      retrievedPatches
-    };
-    // Image Handling Strategy:
-    // - LLM is instructed to use placeholder service URLs (https://via.placeholder.com/WIDTHxHEIGHT)
-    // - This avoids external image dependencies and CORS issues
-    // - Placeholder service is reliable and requires no authentication
-    // - In production, users can replace placeholder URLs with real image URLs
-    const systemPrompt = `You are a code generation agent. Given a system design and requirements, generate a complete, working frontend web application.\nAlways produce fully materialized files in the files array — every file needed to run the app (HTML, CSS, JS/JSX, config, package.json, etc.).\nDo NOT truncate or abbreviate any file content. Every file must be complete and runnable.\nAlso produce a unified diff patch string summarizing the changes.\n\nRESPOND WITH ONLY ONE JSON OBJECT.\nThe JSON object MUST contain exactly these top-level keys: patch, files.\nThe files value must be an array of objects with path and content strings.\nDo NOT include markdown fences, commentary, or any text outside the JSON object.\nIf you cannot comply, return a valid object with files: [] and patch: "".\n\nCRITICAL REQUIREMENT FOR REACT PROJECTS:\nIf the project uses React (i.e. package.json includes \"react\" as a dependency), you MUST include a \"public/index.html\" file in the files array.\nThis file is required by react-scripts (Create React App) to build successfully.\nThe public/index.html MUST contain a proper HTML5 structure with a <div id=\"root\"></div> element where React mounts.\nUse exactly this structure (customise the <title> as appropriate):\n<!DOCTYPE html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n    <title>App</title>\n  </head>\n  <body>\n    <div id=\"root\"></div>\n  </body>\n</html>\n\nCRITICAL: Package.json Management\n- Every library imported in code MUST be declared in package.json dependencies or devDependencies\n- If you generate code using react-router-dom, Redux, Axios, or any other third-party library, you MUST add it to package.json\n- Do NOT generate code that imports undeclared libraries\n- If code imports a library, it MUST be in package.json dependencies or devDependencies\n- Ensure package.json is valid JSON with proper formatting and all required fields (name, version, dependencies, scripts)\n\nIMPORTANT: Do not include lockfiles or package manager artifacts in the output.\n- Do NOT return package-lock.json, npm-shrinkwrap.json, yarn.lock, or node_modules.\n- Only return source files, configuration files, and the exact package.json required to run the app.\n\nImage Handling\n- Do NOT use external image URLs (e.g., https://example.com/image.png)\n- Use placeholder service URLs instead: https://via.placeholder.com/300x200 (for 300x200 images)\n- Format: https://via.placeholder.com/WIDTHxHEIGHT\n- Example: https://via.placeholder.com/400x300 for a 400x300 image\n- This ensures images work without external dependencies or CORS issues\n\nRespond ONLY in valid JSON with no markdown fences: { patch: string, files: Array<{ path: string; content: string }> }.`;
-
-    const completion = await llmProxy.chatCompletion([
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: JSON.stringify(userPrompt) }
-    ], model, 0.0, 0.9, 6000, 180_000); // deterministic generation for structured JSON output
-    debug('codeGenerationAgent:completion', { completion });
-    let content = completion.choices?.[0]?.message?.content || '{}';
-    debug('LLM_RAW_CONTENT_CODEGEN', { content });
-    if (typeof content === 'string' && content.trim().startsWith('<')) {
-      const snippet = content.replace(/\s+/g, ' ').slice(0, 1000);
-      logError('codeGenerationAgent:html-response', { snippet });
-      throw new Error(`Code generation proxy failure: received HTML response. ${snippet}`);
-    }
-    content = stripMarkdownCodeBlocks(content);
-    let result = parseJsonFromText(content);
-
-    if (Array.isArray(result)) {
-      result = { files: result, patch: '' };
-    }
-
-    if (!result || typeof result !== 'object') {
-      logError('codeGenerationAgent:no-json', { content });
-      throw new Error('Malformed LLM output: No valid JSON object found');
-    }
-
-    if (!Array.isArray((result as any).files)) {
-      logError('codeGenerationAgent:missing-files', { result });
-      throw new Error('Malformed codeGenerationAgent output: missing files array');
-    }
-
-    const normalizedFiles = (result as any).files.map((file: any) => {
-      if (!file || typeof file.path !== 'string' || typeof file.content !== 'string') {
-        throw new Error('Malformed codeGenerationAgent output: every file item must include path and content strings');
-      }
-      return { path: file.path.replace(/^\/*/, ''), content: file.content };
     });
-
-    const filteredFiles = normalizedFiles.filter((file: any) => {
-      const banList = ['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'node_modules'];
-      const normalizedPath = file.path.replace(/^\/*/, '');
-      if (banList.some((ban) => normalizedPath === ban || normalizedPath.startsWith(`${ban}/`))) {
-        logError('codeGenerationAgent:removed-artifact', { path: normalizedPath });
-        return false;
-      }
-      return true;
-    });
-
-    const finalResult = {
-      ...result,
-      files: filteredFiles,
-      patch: typeof (result as any).patch === 'string' ? (result as any).patch : String((result as any).patch || ''),
-    };
-
-    const hasPackageJson = finalResult.files.some(
-      (file: any) => file.path === 'package.json' || file.path === '/package.json'
-    );
-    if (!hasPackageJson) {
-      logError('codeGenerationAgent:missing-package-json', { result: finalResult });
-      throw new Error('Malformed codeGenerationAgent output: missing required package.json file');
+    const embedding = await embeddingAgent(basis);
+    if (Array.isArray(embedding) && embedding.length > 0) {
+      const similar = await searchVectors({
+        user_id: input.user_id || 'unknown',
+        task: 'code_patch',
+        embedding,
+        topK: 2,
+      });
+      retrievedPatches = similar.map((r: any) => r.metadata?.patch).filter(Boolean);
     }
-
-    debug('codeGenerationAgent:result', { result: finalResult });
-    return {
-      ...finalResult,
-      embedding: embedding || (result as any).embedding,
-    };
-  } catch (err) {
-    logError('codeGenerationAgent', err);
-    throw err;
+  } catch {
+    // RAG failure is non-fatal
   }
+
+  const hasBackend = Boolean(input.systemDesign?.backend);
+  const projectId: string = input.projectId || 'unknown';
+
+  // ── Phase 1: Frontend ──────────────────────────────────────────────────────
+  debug('codeGenerationAgent:phase1', { projectId });
+  let frontendFiles: Array<{ path: string; content: string }>;
+  try {
+    frontendFiles = await generateFrontendFiles(
+      input.systemDesign,
+      input.requirements,
+      input.modification,
+      llmProxy,
+      model
+    );
+  } catch (err) {
+    logError('codeGenerationAgent:phase1-failed', err);
+    throw new Error(`Frontend code generation failed: ${(err as Error).message}`);
+  }
+
+  // ── Phase 2: Backend + DB (only if systemDesign has backend) ───────────────
+  let backendFiles: Array<{ path: string; content: string }> = [];
+  if (hasBackend) {
+    debug('codeGenerationAgent:phase2', { projectId });
+    try {
+      backendFiles = await generateBackendFiles(
+        input.systemDesign,
+        input.requirements,
+        projectId,
+        input.modification,
+        llmProxy,
+        model
+      );
+    } catch (err) {
+      logError('codeGenerationAgent:phase2-failed', err);
+      throw new Error(`Backend code generation failed: ${(err as Error).message}`);
+    }
+  }
+
+  // ── Merge: backend files overwrite frontend files of same path ─────────────
+  const allFiles = filterAndNormalizeFiles([...frontendFiles, ...backendFiles]);
+
+  // Validate
+  const hasFrontendPkg = allFiles.some(f => f.path === 'package.json');
+  if (!hasFrontendPkg) {
+    logError('codeGenerationAgent:no-package-json', { fileCount: allFiles.length });
+    throw new Error('Code generation produced no root package.json — cannot build frontend');
+  }
+  if (hasBackend) {
+    const hasBackendPkg = allFiles.some(f => f.path === 'backend/package.json');
+    if (!hasBackendPkg) {
+      logWarn('codeGenerationAgent:no-backend-package-json', { fileCount: allFiles.length });
+    }
+  }
+
+  debug('codeGenerationAgent:done', {
+    projectId,
+    fileCount: allFiles.length,
+    hasBackend,
+    frontendCount: frontendFiles.length,
+    backendCount: backendFiles.length,
+    retrievedPatches: retrievedPatches.length,
+  });
+
+  return {
+    files: allFiles,
+    patch: '',
+    hasBackend,
+    projectId,
+  };
 }

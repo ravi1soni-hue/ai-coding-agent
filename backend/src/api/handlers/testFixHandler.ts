@@ -32,6 +32,7 @@ export async function handleTestFix(input: TestFixInput): Promise<HandlerResult>
         fixFn: input.fixFn,
         files: input.files,
         workspaceDir: input.workspaceDir,
+        projectId: input.projectId,
       });
       debug('handleTestFix:done', { projectId: input.projectId, success: result.success });
       return { success: true, data: result };
