@@ -70,6 +70,40 @@ export class LLMProxyClient {
     return `LLM Proxy ${operation} failed (${status}): ${cleanDetail.slice(0, 200)}`;
   }
 
+  private describeHtmlResponse(status: number, statusText: string, raw: string, contentType: string | null): string {
+    const snippet = raw.replace(/\s+/g, ' ').slice(0, 360);
+    const title = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, ' ').trim();
+    const lower = raw.toLowerCase();
+    const hints: string[] = [];
+    if (status === 401 || status === 403 || /login|unauthorized|forbidden|auth|sso/.test(lower)) {
+      hints.push('authentication/protection');
+    }
+    if (status === 404 || /not found/.test(lower)) {
+      hints.push('wrong URL or route');
+    }
+    if (status === 408 || status === 504 || /timeout|gateway/.test(lower)) {
+      hints.push('gateway timeout');
+    }
+    if (status === 413 || /too large|payload/.test(lower)) {
+      hints.push('payload too large');
+    }
+    if (status === 429 || /rate limit|too many/.test(lower)) {
+      hints.push('rate limit');
+    }
+    if (status >= 500 || /server error|bad gateway|service unavailable/.test(lower)) {
+      hints.push('provider/server error');
+    }
+
+    return [
+      `LLM Proxy returned HTML (${status} ${statusText || 'Unknown Status'})`,
+      contentType ? `content-type=${contentType}` : null,
+      title ? `title="${title.slice(0, 120)}"` : null,
+      hints.length ? `likely=${Array.from(new Set(hints)).join(', ')}` : null,
+      `url=${this.chatUrl}`,
+      `snippet=${snippet}`,
+    ].filter(Boolean).join('; ');
+  }
+
   async chatCompletion(messages: any[], model: string, temperature = 0.8, top_p = 0.9, max_tokens = 1000, timeoutMs?: number): Promise<any> {
     const selectedModel = model || 'gpt-4o-mini';
     if (!this.apiKey || this.apiKey.trim().length < 3) {
@@ -129,11 +163,12 @@ export class LLMProxyClient {
           } catch (parseErr) {
             const snippet = raw.replace(/\s+/g, ' ').slice(0, 240);
             const isHtml = raw.trim().toLowerCase().startsWith('<');
+            const contentType = response.headers.get('content-type');
             this.log('chatCompletion invalid JSON response', {
               status: response.status,
               statusText: response.statusText,
               model: modelCandidate,
-              contentType: response.headers.get('content-type'),
+              contentType,
               isHtmlResponse: isHtml,
               raw: raw.slice(0, 800),
               snippet,
@@ -142,13 +177,14 @@ export class LLMProxyClient {
               apiKeyLength: this.apiKey?.length || 0,
             });
             if (!response.ok || isHtml) {
-              const urlHint = isHtml ? ` (Check LLM_PROXY_CHAT_URL: ${this.chatUrl})` : '';
-              const authHint = response.status === 401 || response.status === 403 ? ' (Authentication may have failed)' : '';
               if (this.shouldRetryStatus(response.status) && attempt < 2) {
                 await this.sleep(750 * (attempt + 1));
                 continue;
               }
-              throw new Error(`LLM Proxy chatCompletion returned HTML (${response.status} ${response.statusText})${authHint}${urlHint}. ${snippet}`);
+              if (isHtml) {
+                throw new Error(this.describeHtmlResponse(response.status, response.statusText, raw, contentType));
+              }
+              throw new Error(`LLM Proxy chatCompletion returned invalid non-JSON response (${response.status} ${response.statusText}). ${snippet}`);
             }
             throw new Error(`LLM Proxy returned invalid JSON response: ${snippet}`);
           }

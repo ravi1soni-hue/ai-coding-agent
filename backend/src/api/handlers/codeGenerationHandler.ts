@@ -32,6 +32,8 @@ export async function handleCodeGeneration(
         modification: input.modification,
         context: input.context,
         projectId: input.projectId,
+        userId: input.userId,
+        user_id: input.userId,
       }),
       TIMEOUT_MS,
       'Code generation'
