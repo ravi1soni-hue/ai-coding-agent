@@ -91,6 +91,23 @@ async function callWithRetry(
   throw lastError;
 }
 
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  return results;
+}
+
 async function generateJson(
   llmProxy: LLMProxyClient,
   model: string,
@@ -99,16 +116,26 @@ async function generateJson(
   userPayload: unknown,
   maxTokens: number
 ): Promise<any> {
-  const raw = await callWithRetry(
-    llmProxy,
-    [{ role: 'system', content: systemPrompt }, { role: 'user', content: JSON.stringify(userPayload) }],
-    model,
-    maxTokens,
-    120_000,
-    2,
-    label
-  );
-  return parseJsonSafe(raw);
+  let lastRaw = '';
+  for (let jsonAttempt = 1; jsonAttempt <= 3; jsonAttempt++) {
+    const messages: Array<{ role: string; content: string }> = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: JSON.stringify(userPayload) },
+    ];
+    if (jsonAttempt > 1 && lastRaw) {
+      messages.push({ role: 'assistant', content: lastRaw.slice(0, 1200) });
+      messages.push({ role: 'user', content: 'Your previous response was not valid JSON. Return ONLY a valid JSON object — no markdown fences, no explanation, no extra text.' });
+    }
+    try {
+      lastRaw = await callWithRetry(llmProxy, messages, model, maxTokens, 120_000, 2, label);
+      return parseJsonSafe(lastRaw);
+    } catch (err) {
+      if (jsonAttempt === 3) throw err;
+      logWarn(`${label}:json-self-heal:${jsonAttempt}`, { error: (err as Error).message });
+      await new Promise(r => setTimeout(r, 700 * jsonAttempt));
+    }
+  }
+  throw new Error(`${label}: all JSON self-heal attempts exhausted`);
 }
 
 function normalizeGeneratedPath(filePath: string): string {
@@ -231,9 +258,45 @@ function backendScaffold(manifest: BackendManifest, tablePrefix: string): Genera
 }
 
 async function generateFrontendManifest(systemDesign: any, requirements: any, modification: string | undefined, llmProxy: LLMProxyClient, model: string): Promise<FrontendManifest> {
-  const parsed = await generateJson(llmProxy, model, 'frontendManifest', 'Return ONLY JSON for a compact React + Vite implementation manifest.', { requirements, frontendDesign: systemDesign?.frontend || null, modification: modification || null }, 1800);
+  const userMessage = String(requirements?.userMessage || '');
+  const clarificationAnswers = requirements?.clarificationAnswers || {};
+  const pages = Array.isArray(requirements?.pages) ? requirements.pages : [];
+  const authRequired = Boolean(requirements?.auth_required);
+
+  const systemPrompt = `You are a React app architect. Generate a detailed implementation manifest for the app described by the user.
+
+Return ONLY valid JSON with this exact shape (no markdown fences):
+{
+  "appName": "string",
+  "dependencies": {},
+  "apiResources": [],
+  "components": [
+    { "path": "src/components/ComponentName.jsx", "name": "ComponentName", "purpose": "what this component does" }
+  ],
+  "styleNotes": "string"
+}
+
+RULES:
+- Always include 2-4 components in the components array that directly implement the user's requested features
+- Component paths MUST start with src/components/ and end with .jsx
+- If auth is required, include a Login/Auth component${authRequired ? ' — always include authentication UI' : ''}
+- If there are specific pages requested (${pages.join(', ')}), map each to a component
+- Base components on the user's actual description, not generic placeholders`;
+
+  const parsed = await generateJson(llmProxy, model, 'frontendManifest', systemPrompt, {
+    userDescription: userMessage,
+    requirements,
+    clarificationAnswers,
+    frontendDesign: systemDesign?.frontend || null,
+    modification: modification || null,
+  }, 1800);
   const manifest = assertObject(parsed, 'frontendManifest') as FrontendManifest;
-  const components = Array.isArray(manifest.components) ? manifest.components : [];
+  let components = Array.isArray(manifest.components) ? manifest.components : [];
+  if (components.length === 0) {
+    const fallback = fallbackFrontendManifest(requirements);
+    components = fallback.components || [];
+    if (!manifest.appName) manifest.appName = fallback.appName;
+  }
   manifest.components = components.slice(0, MAX_COMPONENTS).map((component, index) => ({ ...component, path: sanitizeComponentPath(component?.path || '', index), name: sanitizeIdentifier(component?.name || `GeneratedSection${index + 1}`, `GeneratedSection${index + 1}`) }));
   manifest.dependencies = manifest.dependencies && typeof manifest.dependencies === 'object' ? manifest.dependencies : {};
   return manifest;
@@ -242,18 +305,24 @@ async function generateFrontendManifest(systemDesign: any, requirements: any, mo
 async function generateFrontendComponent(component: { path: string; name?: string; purpose?: string }, manifest: FrontendManifest, requirements: any, llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {
   const expectedPath = sanitizeComponentPath(component.path, 0);
   const componentName = sanitizeIdentifier(component.name || path.basename(expectedPath, '.jsx'), path.basename(expectedPath, '.jsx'));
-  const parsed = await generateJson(llmProxy, model, `frontendComponent:${expectedPath}`, `Generate one small React component file. Return ONLY JSON: {"path":"${expectedPath}","content":"complete file content"}`, { component, appName: manifest.appName, requirements, componentName }, 2200);
+  const userMessage = String(requirements?.userMessage || '').slice(0, 400);
+  const systemPrompt = `Generate one production-quality React component file for this app: "${userMessage || manifest.appName}". The component is: ${component.purpose || componentName}. Return ONLY JSON: {"path":"${expectedPath}","content":"complete JSX file content"}`;
+  const parsed = await generateJson(llmProxy, model, `frontendComponent:${expectedPath}`, systemPrompt, { component, appName: manifest.appName, requirements, componentName, userDescription: userMessage }, 2200);
   return validateGeneratedFile(parsed, expectedPath, 'frontend', `frontendComponent:${expectedPath}`);
 }
 
 async function generateFrontendApp(manifest: FrontendManifest, requirements: any, systemDesign: any, modification: string | undefined, componentFiles: GeneratedFile[], llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {
   const imports = componentFiles.map((file) => ({ name: sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection'), importLine: `import ${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} from './${file.path.replace(/^src\//, '')}';` }));
-  const parsed = await generateJson(llmProxy, model, 'frontendApp', `Generate src/App.jsx for a React + Vite app. Return ONLY JSON: {"path":"src/App.jsx","content":"complete file content"}`, { requirements, frontendDesign: systemDesign?.frontend || null, manifest, componentImports: imports, modification: modification || null }, 3200);
+  const userMessage = String(requirements?.userMessage || '').slice(0, 500);
+  const systemPrompt = `Generate src/App.jsx for this React + Vite app: "${userMessage || manifest.appName}". Wire up all the component imports and implement routing/state as required. Return ONLY JSON: {"path":"src/App.jsx","content":"complete file content"}`;
+  const parsed = await generateJson(llmProxy, model, 'frontendApp', systemPrompt, { requirements, userDescription: userMessage, frontendDesign: systemDesign?.frontend || null, manifest, componentImports: imports, modification: modification || null }, 3200);
   return validateGeneratedFile(parsed, 'src/App.jsx', 'frontend', 'frontendApp');
 }
 
 async function generateFrontendCss(manifest: FrontendManifest, requirements: any, appFile: GeneratedFile, componentFiles: GeneratedFile[], llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {
-  const parsed = await generateJson(llmProxy, model, 'frontendCss', 'Generate src/index.css for the React app. Return ONLY JSON: {"path":"src/index.css","content":"complete CSS"}', { manifest, requirements, appSnippet: appFile.content.slice(0, 4000), componentSnippets: componentFiles.map(f => ({ path: f.path, content: f.content.slice(0, 1800) })) }, 2600);
+  const userMessage = String(requirements?.userMessage || '').slice(0, 300);
+  const systemPrompt = `Generate src/index.css for this React app: "${userMessage || manifest.appName}". Match the visual style to the app's purpose. Return ONLY JSON: {"path":"src/index.css","content":"complete CSS"}`;
+  const parsed = await generateJson(llmProxy, model, 'frontendCss', systemPrompt, { manifest, requirements, appSnippet: appFile.content.slice(0, 4000), componentSnippets: componentFiles.map(f => ({ path: f.path, content: f.content.slice(0, 1800) })) }, 2600);
   return validateGeneratedFile(parsed, 'src/index.css', 'frontend', 'frontendCss');
 }
 
@@ -268,8 +337,23 @@ function fallbackFrontendCss(): GeneratedFile {
 }
 
 function fallbackFrontendManifest(requirements: any): FrontendManifest {
-  const summary = typeof requirements?.summary === 'string' ? requirements.summary : typeof requirements?.app_type === 'string' ? requirements.app_type : 'Generated App';
-  return { appName: String(summary).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'generated-app', dependencies: {}, apiResources: [], components: [{ path: 'src/components/Overview.jsx', name: 'Overview', purpose: 'Summarize the core user workflow.' }, { path: 'src/components/Workspace.jsx', name: 'Workspace', purpose: 'Present the primary interactive area.' }], styleNotes: 'Clean responsive application UI.' };
+  const rawName = typeof requirements?.userMessage === 'string' ? requirements.userMessage.slice(0, 60)
+    : typeof requirements?.summary === 'string' ? requirements.summary
+    : typeof requirements?.app_type === 'string' ? requirements.app_type : 'Generated App';
+  const appName = String(rawName).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'generated-app';
+  const authRequired = Boolean(requirements?.auth_required);
+  const pages = Array.isArray(requirements?.pages) ? requirements.pages : [];
+  const components = [
+    ...(authRequired ? [{ path: 'src/components/Login.jsx', name: 'Login', purpose: 'Authentication form for email and password login.' }] : []),
+    ...pages.slice(0, 3).map((page: string, i: number) => ({ path: `src/components/${page.replace(/[^a-zA-Z0-9]/g, '')||`Page${i+1}`}.jsx`, name: page.replace(/[^a-zA-Z0-9]/g, '')||`Page${i+1}`, purpose: `${page} page content and functionality.` })),
+  ];
+  if (components.length === 0) {
+    components.push(
+      { path: 'src/components/Overview.jsx', name: 'Overview', purpose: 'Core user workflow overview.' },
+      { path: 'src/components/Workspace.jsx', name: 'Workspace', purpose: 'Primary interactive workspace.' }
+    );
+  }
+  return { appName, dependencies: {}, apiResources: [], components: components.slice(0, MAX_COMPONENTS), styleNotes: 'Clean responsive application UI.' };
 }
 
 async function generateFrontendFiles(systemDesign: any, requirements: any, modification: string | undefined, llmProxy: LLMProxyClient, model: string, events?: EventSink, manifestOut?: { value?: ProjectManifest }): Promise<GeneratedFile[]> {
@@ -281,23 +365,26 @@ async function generateFrontendFiles(systemDesign: any, requirements: any, modif
   events?.emit({ type: 'PLANNING_COMPLETE', message: 'Frontend planning complete', payload: { fileCount: projectManifest.fileTree.length } });
   frontendScaffold(manifest).forEach(file => setFile(partial, file));
   events?.emit({ type: 'AGENT_THINKING', message: 'Generated frontend manifest and scaffold' });
-  const componentFiles: GeneratedFile[] = [];
-  for (const component of manifest.components || []) {
-    try {
-      const file = await generateFrontendComponent(component, manifest, requirements, llmProxy, model);
-      const review = reviewFileAgainstManifest(file, projectManifest);
-      if (!review.ok) throw new Error(review.notes.join(' '));
-      setFile(partial, file);
-      componentFiles.push(file);
-      events?.emit({ type: 'FILE_WRITTEN', filePath: file.path, message: `Wrote ${file.path}` });
-    } catch (err) {
-      logWarn('codeGenerationAgent:component-fallback', { path: component.path, error: (err as Error).message });
-      const fallback: GeneratedFile = { path: sanitizeComponentPath(component.path, componentFiles.length), content: `import React from 'react';\nexport default function ${sanitizeIdentifier(component.name || path.basename(component.path, '.jsx'), 'GeneratedSection')}() { return (<article className="panel"><h2>${escapeJsxText(component.name, 'Feature')}</h2><p>${escapeJsxText(component.purpose, 'This section is ready for project-specific content.')}</p></article>); }\n` };
-      setFile(partial, fallback);
-      componentFiles.push(fallback);
-      events?.emit({ type: 'FILE_WRITTEN', filePath: fallback.path, message: `Wrote fallback ${fallback.path}` });
+  const componentFiles: GeneratedFile[] = await mapWithConcurrency(
+    manifest.components || [],
+    4,
+    async (component, index) => {
+      try {
+        const file = await generateFrontendComponent(component, manifest, requirements, llmProxy, model);
+        const review = reviewFileAgainstManifest(file, projectManifest);
+        if (!review.ok) throw new Error(review.notes.join(' '));
+        setFile(partial, file);
+        events?.emit({ type: 'FILE_WRITTEN', filePath: file.path, message: `Wrote ${file.path}` });
+        return file;
+      } catch (err) {
+        logWarn('codeGenerationAgent:component-fallback', { path: component.path, error: (err as Error).message });
+        const fallback: GeneratedFile = { path: sanitizeComponentPath(component.path, index), content: `import React from 'react';\nexport default function ${sanitizeIdentifier(component.name || path.basename(component.path, '.jsx'), 'GeneratedSection')}() { return (<article className="panel"><h2>${escapeJsxText(component.name, 'Feature')}</h2><p>${escapeJsxText(component.purpose, 'This section is ready for project-specific content.')}</p></article>); }\n` };
+        setFile(partial, fallback);
+        events?.emit({ type: 'FILE_WRITTEN', filePath: fallback.path, message: `Wrote fallback ${fallback.path}` });
+        return fallback;
+      }
     }
-  }
+  );
   let appFile: GeneratedFile;
   try { appFile = await generateFrontendApp(manifest, requirements, systemDesign, modification, componentFiles, llmProxy, model); } catch (err) { logWarn('codeGenerationAgent:app-fallback', { error: (err as Error).message, partialFiles: partial.size }); appFile = fallbackFrontendApp(manifest, componentFiles); }
   setFile(partial, appFile);
@@ -310,7 +397,9 @@ async function generateFrontendFiles(systemDesign: any, requirements: any, modif
 }
 
 async function generateBackendManifest(systemDesign: any, requirements: any, tablePrefix: string, modification: string | undefined, llmProxy: LLMProxyClient, model: string): Promise<BackendManifest> {
-  const parsed = await generateJson(llmProxy, model, 'backendManifest', 'Create a compact backend implementation manifest for Node + Express + Postgres. Return ONLY JSON.', { requirements, backendDesign: systemDesign?.backend || null, tablePrefix, modification: modification || null }, 1800);
+  const userMessage = String(requirements?.userMessage || '').slice(0, 400);
+  const systemPrompt = `Create a backend implementation manifest for Node + Express + Postgres for this app: "${userMessage}". Return ONLY JSON with shape: {"resources":[{"name":"...","routePath":"/api/...","tableName":"...","fields":[],"methods":[],"purpose":"..."}],"tables":[{"name":"...","columns":[],"purpose":"..."}]}`;
+  const parsed = await generateJson(llmProxy, model, 'backendManifest', systemPrompt, { requirements, userDescription: userMessage, backendDesign: systemDesign?.backend || null, tablePrefix, modification: modification || null }, 1800);
   const manifest = assertObject(parsed, 'backendManifest') as BackendManifest;
   manifest.resources = Array.isArray(manifest.resources) ? manifest.resources.slice(0, MAX_BACKEND_ROUTES) : [];
   manifest.tables = Array.isArray(manifest.tables) ? manifest.tables : [];
@@ -357,22 +446,38 @@ async function generateBackendFiles(systemDesign: any, requirements: any, projec
   manifest.resources = manifest.resources.map((resource, index) => ({ ...resource, name: resource.name || `resource${index + 1}`, routePath: resource.routePath || `/api/${resource.name || `resource-${index + 1}`}`, tableName: String(resource.tableName || `${tablePrefix}${resource.name || `resource${index + 1}`}`).startsWith(tablePrefix) ? String(resource.tableName || `${tablePrefix}${resource.name || `resource${index + 1}`}`) : `${tablePrefix}${String(resource.tableName || resource.name || `resource${index + 1}`).replace(/[^a-zA-Z0-9_]/g, '_')}` }));
   backendScaffold(manifest, tablePrefix).forEach(file => setFile(partial, file));
   events?.emit({ type: 'AGENT_THINKING', message: 'Generated backend scaffold' });
-  let initSql: GeneratedFile;
-  try { initSql = await generateBackendInitSql(manifest, tablePrefix, requirements, llmProxy, model); } catch (err) { logWarn('codeGenerationAgent:init-sql-fallback', { error: (err as Error).message }); initSql = fallbackInitSql(manifest, tablePrefix); }
-  setFile(partial, initSql);
-  events?.emit({ type: 'FILE_WRITTEN', filePath: initSql.path, message: `Wrote ${initSql.path}` });
-  for (const resource of manifest.resources) {
-    try {
-      const route = await generateBackendRoute(resource, resource.routePath || '/', tablePrefix, requirements, llmProxy, model);
-      setFile(partial, route);
-      events?.emit({ type: 'FILE_WRITTEN', filePath: route.path, message: `Wrote ${route.path}` });
-    } catch (err) {
-      logWarn('codeGenerationAgent:route-fallback', { resource: resource.name, error: (err as Error).message });
-      const route = fallbackRoute(resource, tablePrefix);
-      setFile(partial, route);
-      events?.emit({ type: 'FILE_WRITTEN', filePath: route.path, message: `Wrote fallback ${route.path}` });
-    }
-  }
+  // SQL and all routes are independent after the manifest — run them in parallel, capped at 4
+  const backendGenerationTasks: Array<() => Promise<GeneratedFile>> = [
+    async () => {
+      try {
+        const f = await generateBackendInitSql(manifest, tablePrefix, requirements, llmProxy, model);
+        setFile(partial, f);
+        events?.emit({ type: 'FILE_WRITTEN', filePath: f.path, message: `Wrote ${f.path}` });
+        return f;
+      } catch (err) {
+        logWarn('codeGenerationAgent:init-sql-fallback', { error: (err as Error).message });
+        const f = fallbackInitSql(manifest, tablePrefix);
+        setFile(partial, f);
+        events?.emit({ type: 'FILE_WRITTEN', filePath: f.path, message: `Wrote fallback ${f.path}` });
+        return f;
+      }
+    },
+    ...(manifest.resources || []).map(resource => async (): Promise<GeneratedFile> => {
+      try {
+        const route = await generateBackendRoute(resource, resource.routePath || '/', tablePrefix, requirements, llmProxy, model);
+        setFile(partial, route);
+        events?.emit({ type: 'FILE_WRITTEN', filePath: route.path, message: `Wrote ${route.path}` });
+        return route;
+      } catch (err) {
+        logWarn('codeGenerationAgent:route-fallback', { resource: resource.name, error: (err as Error).message });
+        const route = fallbackRoute(resource, tablePrefix);
+        setFile(partial, route);
+        events?.emit({ type: 'FILE_WRITTEN', filePath: route.path, message: `Wrote fallback ${route.path}` });
+        return route;
+      }
+    }),
+  ];
+  await mapWithConcurrency(backendGenerationTasks, 4, task => task());
   return Array.from(partial.entries()).map(([filePath, content]) => ({ path: filePath, content }));
 }
 
@@ -397,26 +502,21 @@ export async function codeGenerationAgent(input: any) {
   const hasBackend = Boolean(input.systemDesign?.backend);
   const projectId: string = input.projectId || 'unknown';
 
-  debug('codeGenerationAgent:frontend-start', { projectId });
-  let frontendFiles: GeneratedFile[];
-  let projectManifest: ProjectManifest | undefined;
-  try {
-    frontendFiles = await generateFrontendFiles(input.systemDesign, input.requirements, input.modification, llmProxy, model, events, { value: projectManifest });
-  } catch (err) {
-    logError('codeGenerationAgent:frontend-failed', err);
-    throw new Error(`Frontend code generation failed: ${(err as Error).message}`);
-  }
-
-  let backendFiles: GeneratedFile[] = [];
-  if (hasBackend) {
-    debug('codeGenerationAgent:backend-start', { projectId });
-    try {
-      backendFiles = await generateBackendFiles(input.systemDesign, input.requirements, projectId, input.modification, llmProxy, model, events);
-    } catch (err) {
-      logError('codeGenerationAgent:backend-failed', err);
-      throw new Error(`Backend code generation failed: ${(err as Error).message}`);
-    }
-  }
+  debug('codeGenerationAgent:parallel-start', { projectId, hasBackend });
+  const manifestOut: { value?: ProjectManifest } = {};
+  const [frontendFiles, backendFiles] = await Promise.all([
+    generateFrontendFiles(input.systemDesign, input.requirements, input.modification, llmProxy, model, events, manifestOut).catch((err: unknown) => {
+      logError('codeGenerationAgent:frontend-failed', err);
+      throw new Error(`Frontend code generation failed: ${(err as Error).message}`);
+    }),
+    hasBackend
+      ? generateBackendFiles(input.systemDesign, input.requirements, projectId, input.modification, llmProxy, model, events).catch((err: unknown) => {
+          logError('codeGenerationAgent:backend-failed', err);
+          throw new Error(`Backend code generation failed: ${(err as Error).message}`);
+        })
+      : Promise.resolve([] as GeneratedFile[]),
+  ]);
+  const projectManifest = manifestOut.value;
 
   const allFiles = Array.from(new Map([...frontendFiles, ...backendFiles].map(f => [normalizeGeneratedPath(f.path), f.content])).entries()).map(([pathName, content]) => ({ path: pathName, content }));
 

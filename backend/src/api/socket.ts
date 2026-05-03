@@ -1,4 +1,3 @@
-// WebSocket server — lightweight message router dispatching to independent handlers
 import { Server } from 'ws';
 import http from 'http';
 
@@ -28,38 +27,8 @@ import {
 import { materializeProjectWorkspace } from '../factory/projectFactory';
 import { config } from '../config/env';
 import { debug, error as logError } from '../utils/logger';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function toClientErrorMessage(err: unknown, fallback: string): string {
-  const raw = String((err as any)?.message || '').trim();
-  if (!raw) return fallback;
-  const sanitized = raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-  if (/<!doctype|<html|<head|<body/i.test(raw) || sanitized.length > 300) {
-    return fallback;
-  }
-  return sanitized;
-}
-
-// ---------------------------------------------------------------------------
-// activePipelines TTL set — prevents concurrent runs + stale-entry leaks
-// ---------------------------------------------------------------------------
-
-const PIPELINE_TTL_MS = 10 * 60 * 1000; // 10 minutes
-
-class TTLSet {
-  private entries = new Map<string, number>();
-  has(key: string): boolean {
-    const expiry = this.entries.get(key);
-    if (expiry === undefined) return false;
-    if (Date.now() > expiry) { this.entries.delete(key); return false; }
-    return true;
-  }
-  add(key: string): void { this.entries.set(key, Date.now() + PIPELINE_TTL_MS); }
-  delete(key: string): void { this.entries.delete(key); }
-}
+import { toClientErrorMessage } from '../utils/errors';
+import { TTLSet } from '../utils/ttlSet';
 
 // ---------------------------------------------------------------------------
 // Socket server
@@ -329,7 +298,10 @@ export function createSocketServer(server: http.Server) {
 
           const fixResult = await handleCodeGeneration({
             systemDesign: session.systemDesign,
-            requirements: session.requirements,
+            requirements: {
+              ...session.requirements,
+              clarificationAnswers: Object.keys(clarificationAnswers).length > 0 ? clarificationAnswers : undefined,
+            },
             modification: `Fix these build errors and produce corrected complete files:\n${normalizedLogs.slice(-2000)}`,
             projectId,
             userId: authedUser.id,
@@ -417,7 +389,7 @@ export function createSocketServer(server: http.Server) {
             sendError(ws, session, toClientErrorMessage(raResult.error, 'Failed to analyze requirements. Please try again.'));
             return;
           }
-          session.requirements = raResult.data;
+          session.requirements = { ...raResult.data, userMessage: userMsg };
           session.stepRetries['requirementAnalysis'] = 0;
           debug('socket:requirementAnalysis', { projectId });
           ws.send(JSON.stringify({ type: 'stream', token: 'Got it! Let me ask a couple of quick questions.' }));
@@ -521,7 +493,10 @@ export function createSocketServer(server: http.Server) {
           sendProgress(ws, session, 'codeGen', 'Generating code...', 0);
           const cgResult = await handleCodeGeneration({
             systemDesign: session.systemDesign,
-            requirements: session.requirements,
+            requirements: {
+              ...session.requirements,
+              clarificationAnswers: Object.keys(clarificationAnswers).length > 0 ? clarificationAnswers : undefined,
+            },
             projectId,
             userId: authedUser.id,
             emitEvent: (event) => ws.send(JSON.stringify({
