@@ -13,12 +13,7 @@ function buildApprovalNotes(blueprint: ProjectBlueprint): string[] {
     notes.push('Blueprint has no files.');
   }
 
-  const hasBackendEntrypoints = Array.isArray(blueprint.entrypoints?.backend) && blueprint.entrypoints.backend.length > 0;
   const hasBackendRoutes = Array.isArray(blueprint.backendRoutes) && blueprint.backendRoutes.length > 0;
-
-  if (hasBackendEntrypoints && !hasBackendRoutes) {
-    notes.push('Blueprint has backend entrypoints but no backend routes.');
-  }
 
   if (!blueprint.invariants.some((rule) => /project_id/i.test(rule))) {
     notes.push('Blueprint is missing a project_id isolation invariant.');

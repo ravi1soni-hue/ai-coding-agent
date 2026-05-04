@@ -1112,7 +1112,7 @@ export async function codeGenerationAgent(input: any) {
     }
   } catch {}
 
-  const hasBackend = Boolean(input.systemDesign?.backend);
+  const hasBackend = Boolean(input.projectSpec?.requirements?.backend_required ?? input.systemDesign?.backend);
   const projectId: string = input.projectId || 'unknown';
   const uiSpec = input.uiSpec; // UISpec from prior stage
 
