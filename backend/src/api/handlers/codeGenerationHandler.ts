@@ -22,7 +22,9 @@ export interface HandlerResult<T = any> {
 }
 
 const TIMEOUT_MS = 300_000;
-const MAX_ATTEMPTS = 3;
+// Keep to 2: targeted failures are repaired inside codeGenerationAgent itself.
+// This outer retry only covers true unexpected crashes (network blip, OOM, etc.).
+const MAX_ATTEMPTS = 2;
 
 export async function handleCodeGeneration(
   input: CodeGenerationInput
@@ -33,6 +35,9 @@ export async function handleCodeGeneration(
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
+      // Suppress UI events on retries to avoid the frontend seeing duplicate
+      // PLANNING_COMPLETE / FILE_WRITTEN sequences when the first attempt fails.
+      const emitEvent = attempt === 1 ? input.emitEvent : undefined;
       const result = await withTimeout(
         codeGenerationAgent({
           systemDesign: input.systemDesign,
@@ -44,7 +49,7 @@ export async function handleCodeGeneration(
           projectId: input.projectId,
           userId: input.userId,
           user_id: input.userId,
-          emitEvent: input.emitEvent,
+          emitEvent,
         }),
         TIMEOUT_MS,
         'Code generation'

@@ -1096,27 +1096,80 @@ export async function codeGenerationAgent(input: any) {
       })();
   const projectManifest = manifestOut.value;
 
-  const allFiles = Array.from(new Map([...frontendFiles, ...backendFiles].map(f => [normalizeGeneratedPath(f.path), f.content])).entries()).map(([pathName, content]) => ({ path: pathName, content }));
+  const fileMap = new Map([...frontendFiles, ...backendFiles].map(f => [normalizeGeneratedPath(f.path), f.content]));
 
-  const hasFrontendPkg = allFiles.some(f => f.path === 'package.json');
-  const hasApp = allFiles.some(f => f.path === 'src/App.jsx');
-  const hasCss = allFiles.some(f => f.path === 'src/index.css');
-  if (!hasFrontendPkg || !hasApp || !hasCss) {
-    const missingFrontend = ['package.json', 'src/App.jsx', 'src/index.css'].filter(required => !allFiles.some(f => f.path === required));
-    throw new Error(`Code generation did not produce the required frontend scaffold. Missing: ${missingFrontend.join(', ')}`);
-  }
-  if (hasBackend) {
-    const missingBackend = Array.from(BACKEND_REQUIRED).filter(required => !allFiles.some(f => f.path === required));
-    if (missingBackend.length > 0) {
-      throw new Error(`Code generation did not produce required backend files: ${missingBackend.join(', ')}`);
+  // Targeted repair: fill missing frontend scaffold files without re-running the full lifecycle.
+  const frontendManifestForRepair = manifestOut.value;
+  const repairComponents = frontendFiles.filter(f => f.path.startsWith('src/components/'));
+  const repairBackendRequired = hasBackend;
+
+  for (const required of ['package.json', 'src/App.jsx', 'src/index.css'] as const) {
+    if (!fileMap.has(required)) {
+      logWarn('codeGenerationAgent:repair-missing', { path: required });
+      events?.emit({ type: 'AGENT_THINKING', message: `Repairing missing file: ${required}` });
+      if (required === 'src/App.jsx') {
+        try {
+          const frontendManifest = frontendManifestForRepair?.blueprint
+            ? fallbackFrontendManifest(input.requirements)
+            : fallbackFrontendManifest(input.requirements);
+          const repairedApp = await generateFrontendApp(frontendManifest, input.requirements, input.systemDesign, input.modification, repairComponents, llmProxy, model, input.uiSpec);
+          fileMap.set(required, repairedApp.content);
+          events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Repaired ${required}` });
+        } catch {
+          const fallback = fallbackFrontendApp(fallbackFrontendManifest(input.requirements), repairComponents, repairBackendRequired);
+          fileMap.set(required, fallback.content);
+          events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Fallback repair for ${required}` });
+        }
+      } else if (required === 'src/index.css') {
+        const fallback = fallbackFrontendCss();
+        fileMap.set(required, fallback.content);
+        events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Fallback repair for ${required}` });
+      } else if (required === 'package.json') {
+        const scaffoldFiles = frontendScaffold(fallbackFrontendManifest(input.requirements));
+        const pkgFile = scaffoldFiles.find(f => f.path === 'package.json');
+        if (pkgFile) {
+          fileMap.set(required, pkgFile.content);
+          events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Fallback repair for ${required}` });
+        }
+      }
     }
   }
 
-  // Validate that generated code is not stubs
-  const appFile = allFiles.find(f => f.path === 'src/App.jsx');
-  if (appFile && appFile.content.length < 200) {
-    throw new Error('Generated App.jsx is too small - appears to be a stub. Regenerating with better prompts.');
+  // Targeted repair: fill missing backend required files without re-running the full lifecycle.
+  if (hasBackend) {
+    const safeId = projectId.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 24);
+    const tablePrefix = `proj_${safeId}_`;
+    const backendFallbackFiles = fallbackBackendFiles(tablePrefix);
+    for (const required of Array.from(BACKEND_REQUIRED)) {
+      if (!fileMap.has(required)) {
+        logWarn('codeGenerationAgent:repair-missing-backend', { path: required });
+        const fallback = backendFallbackFiles.find(f => f.path === required);
+        if (fallback) {
+          fileMap.set(required, fallback.content);
+          events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Repaired missing backend file: ${required}` });
+        }
+      }
+    }
   }
+
+  // Targeted repair: regenerate App.jsx if it is a stub, reusing all already-generated components.
+  const appContent = fileMap.get('src/App.jsx') ?? '';
+  if (appContent.length < 200) {
+    logWarn('codeGenerationAgent:repair-stub-app', { contentLength: appContent.length });
+    events?.emit({ type: 'AGENT_THINKING', message: 'App.jsx appears to be a stub — repairing without restarting...' });
+    try {
+      const frontendManifest = fallbackFrontendManifest(input.requirements);
+      const repairedApp = await generateFrontendApp(frontendManifest, input.requirements, input.systemDesign, input.modification, repairComponents, llmProxy, model, input.uiSpec);
+      fileMap.set('src/App.jsx', repairedApp.content);
+      events?.emit({ type: 'FILE_WRITTEN', filePath: 'src/App.jsx', message: 'Repaired stub App.jsx' });
+    } catch {
+      const fallback = fallbackFrontendApp(fallbackFrontendManifest(input.requirements), repairComponents, repairBackendRequired);
+      fileMap.set('src/App.jsx', fallback.content);
+      events?.emit({ type: 'FILE_WRITTEN', filePath: 'src/App.jsx', message: 'Fallback repair for stub App.jsx' });
+    }
+  }
+
+  const allFiles = Array.from(fileMap.entries()).map(([pathName, content]) => ({ path: pathName, content }));
 
   const componentFiles = allFiles.filter(f => f.path.startsWith('src/components/'));
   for (const comp of componentFiles) {
