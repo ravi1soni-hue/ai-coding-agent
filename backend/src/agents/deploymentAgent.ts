@@ -90,14 +90,22 @@ export async function deploymentAgent(input: {
       await runDbInitSql(input.backendDir);
     }
 
-    const railwayResult = shouldDeployBackend
-      ? await deployToRailway(backendService, {
+    let railwayResult: Awaited<ReturnType<typeof deployToRailway>> | null = null;
+    if (shouldDeployBackend && input.backendDir) {
+      try {
+        railwayResult = await deployToRailway(backendService, {
           source: 'deploymentAgent',
           projectId: input.projectId,
           revisionId: input.revisionId,
           sourceDir: input.backendDir,
-        })
-      : null;
+        });
+      } catch (railwayErr) {
+        logWarn('deploymentAgent:railway-failed', {
+          message: (railwayErr as Error).message,
+          hint: 'Frontend deployment will still complete. Railway can be redeployed separately.',
+        });
+      }
+    }
 
     if (!vercelResult.url) {
       throw new Error('Vercel deployment succeeded but did not return a frontend URL.');
@@ -111,7 +119,7 @@ export async function deploymentAgent(input: {
       vercel_status: vercelResult.status,
       vercel_log_url: vercelResult.logUrl,
       railway_deployment_id: railwayResult?.deploymentId || null,
-      railway_status: railwayResult?.status || (shouldDeployBackend ? 'failed' : 'skipped'),
+      railway_status: railwayResult?.status || (shouldDeployBackend ? 'deploy_error' : 'skipped'),
       railway_log_url: railwayResult?.logUrl || null,
       railway_dashboard_url: railwayResult?.dashboardUrl || null,
       frontend_accessible: true,

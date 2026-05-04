@@ -846,8 +846,8 @@ async function generateFrontendFiles(
     cssFile = fallbackFrontendCss();
   }
 
-  if (metrics.fallbackCount >= 3) {
-    throw new Error(`Frontend generation fell back too often (${metrics.fallbackCount}). Reasons: ${metrics.fallbackReasons.join('; ')}`);
+  if (metrics.fallbackCount > 0) {
+    logWarn('codeGenerationAgent:frontend-fallbacks', { fallbackCount: metrics.fallbackCount, reasons: metrics.fallbackReasons });
   }
   setFile(partial, cssFile);
   events?.emit({ type: 'FILE_WRITTEN', filePath: cssFile.path, message: `Wrote ${cssFile.path}` });

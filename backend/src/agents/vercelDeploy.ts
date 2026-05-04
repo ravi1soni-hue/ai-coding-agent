@@ -100,7 +100,8 @@ export async function deployToVercel({ buildDir = '../../frontend/dist', project
         headers: {
           Authorization: `Bearer ${VERCEL_ACCESS_TOKEN}`,
           'Content-Type': 'application/json'
-        }
+        },
+        timeout: 120_000,
       }
     );
   } catch (err: any) {

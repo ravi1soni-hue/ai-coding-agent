@@ -1,6 +1,6 @@
 import { codeGenerationAgent } from '../../agents/codeGenerationAgent';
 import { withTimeout } from '../../utils/timeout';
-import { debug, error } from '../../utils/logger';
+import { debug, error, warn } from '../../utils/logger';
 
 export interface CodeGenerationInput {
   systemDesign: any;
@@ -22,38 +22,51 @@ export interface HandlerResult<T = any> {
 }
 
 const TIMEOUT_MS = 300_000;
+const MAX_ATTEMPTS = 3;
 
 export async function handleCodeGeneration(
   input: CodeGenerationInput
 ): Promise<HandlerResult> {
   debug('handleCodeGeneration', { projectId: input.projectId });
-  try {
-    const result = await withTimeout(
-      codeGenerationAgent({
-        systemDesign: input.systemDesign,
-        requirements: input.requirements,
-        blueprint: input.blueprint,
-        uiSpec: input.uiSpec,
-        modification: input.modification,
-        context: input.context,
-        projectId: input.projectId,
-        userId: input.userId,
-        user_id: input.userId,
-        emitEvent: input.emitEvent,
-      }),
-      TIMEOUT_MS,
-      'Code generation'
-    );
-    debug('handleCodeGeneration:done', { projectId: input.projectId });
-    return { success: true, data: result };
-  } catch (err) {
-    error('handleCodeGeneration', err);
-    return {
-      success: false,
-      error: toMessage(err, 'Code generation failed'),
-      fallback: null,
-    };
+
+  let lastError = 'Code generation failed';
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const result = await withTimeout(
+        codeGenerationAgent({
+          systemDesign: input.systemDesign,
+          requirements: input.requirements,
+          blueprint: input.blueprint,
+          uiSpec: input.uiSpec,
+          modification: input.modification,
+          context: input.context,
+          projectId: input.projectId,
+          userId: input.userId,
+          user_id: input.userId,
+          emitEvent: input.emitEvent,
+        }),
+        TIMEOUT_MS,
+        'Code generation'
+      );
+      debug('handleCodeGeneration:done', { projectId: input.projectId, attempt });
+      return { success: true, data: result };
+    } catch (err) {
+      lastError = toMessage(err, 'Code generation failed');
+      if (attempt < MAX_ATTEMPTS) {
+        warn('handleCodeGeneration:retry', { projectId: input.projectId, attempt, error: lastError });
+        await new Promise(r => setTimeout(r, 1500 * attempt));
+        continue;
+      }
+      error('handleCodeGeneration', err);
+    }
   }
+
+  return {
+    success: false,
+    error: lastError,
+    fallback: null,
+  };
 }
 
 function toMessage(err: unknown, fallback: string): string {

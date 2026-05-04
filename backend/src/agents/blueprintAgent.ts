@@ -11,60 +11,18 @@ type BlueprintInput = {
   modification?: string;
 };
 
-const REQUIRED_FILES_DEFAULTS: Array<{ path: string; purpose: string; kind: 'entry' | 'config' | 'style' | 'schema' | 'utility' }> = [
-  { path: 'package.json', purpose: 'Frontend npm package configuration', kind: 'config' },
-  { path: 'index.html', purpose: 'Vite entry HTML template', kind: 'entry' },
-  { path: 'vite.config.js', purpose: 'Vite build configuration', kind: 'config' },
-  { path: 'src/main.jsx', purpose: 'React application entry point', kind: 'entry' },
-  { path: 'src/App.jsx', purpose: 'Root React component with routing', kind: 'entry' },
-  { path: 'src/index.css', purpose: 'Global styles', kind: 'style' },
-  { path: 'backend/package.json', purpose: 'Backend npm package configuration', kind: 'config' },
-  { path: 'backend/index.js', purpose: 'Express server entry point', kind: 'entry' },
-  { path: 'backend/db/database.js', purpose: 'PostgreSQL database connection pool', kind: 'utility' },
-  { path: 'backend/db/init.sql', purpose: 'Database schema initialization SQL', kind: 'schema' },
-];
+type Message = { role: 'system' | 'user' | 'assistant'; content: string };
 
-function ensureRequiredFiles(parsed: Record<string, unknown>): Record<string, unknown> {
-  if (!Array.isArray(parsed.files)) parsed.files = [];
-  const files = parsed.files as Array<Record<string, unknown>>;
-  const existingPaths = new Set(files.map((f) => String(f.path || '')));
-  for (const required of REQUIRED_FILES_DEFAULTS) {
-    if (!existingPaths.has(required.path)) {
-      files.push({ path: required.path, purpose: required.purpose, kind: required.kind });
-    }
-  }
-  return parsed;
-}
+const MAX_RETRIES = 3;
 
-function stripMarkdown(content: string): string {
-  return content.replace(/```[a-zA-Z]*\s*/g, '').replace(/```/g, '').trim();
-}
-
-function extractJson(content: string): string {
-  const cleaned = stripMarkdown(content);
-  const first = cleaned.indexOf('{');
-  const last = cleaned.lastIndexOf('}');
-  if (first >= 0 && last > first) return cleaned.slice(first, last + 1);
-  return cleaned;
-}
-
-export async function blueprintAgent(input: BlueprintInput): Promise<ProjectBlueprint> {
-  debug('blueprintAgent:start', { projectId: input.projectId });
-  if (!input?.requirements) throw new Error('Blueprint input requires requirements');
-
-  const { model, apiKey } = getModelConfigForTask('core_reasoning');
-  const llmProxy = new LLMProxyClient({ apiKey });
-
-  const systemPrompt = `You are a principal full-stack architect. Return ONLY valid JSON for a PROJECT_BLUEPRINT object.
+const SYSTEM_PROMPT = `You are a principal full-stack architect. Return ONLY valid JSON for a PROJECT_BLUEPRINT object.
 
 Rules:
-- The blueprint must be machine-validatable.
-- Include build-critical React/Vite files and backend Node/Express/TypeScript files.
+- The blueprint must be machine-validatable with no prose, markdown fences, or comments outside the JSON.
 - Every backend route must set requiresProjectId to true and describe project_id filtering.
 - Include exact file paths, purposes, dependencies, entrypoints, navigation, state, invariants, and backend routes.
-- Do not include markdown fences, prose, or comments.
 
-Required shape:
+Required shape (all fields are mandatory):
 {
   "title": "string",
   "stack": {
@@ -84,9 +42,7 @@ Required shape:
   },
   "navigation": {
     "type": "react-router|single-page",
-    "routes": [
-      { "path": "/", "component": "ComponentName", "purpose": "string" }
-    ]
+    "routes": [{ "path": "/", "component": "ComponentName", "purpose": "string" }]
   },
   "files": [
     { "path": "package.json", "purpose": "Frontend npm package configuration", "kind": "config" },
@@ -98,15 +54,7 @@ Required shape:
     { "path": "backend/package.json", "purpose": "Backend npm package configuration", "kind": "config" },
     { "path": "backend/index.js", "purpose": "Express server entry point", "kind": "entry" },
     { "path": "backend/db/database.js", "purpose": "PostgreSQL database connection pool", "kind": "utility" },
-    { "path": "backend/db/init.sql", "purpose": "Database schema initialization SQL", "kind": "schema" },
-    {
-      "path": "src/components/Component.jsx",
-      "purpose": "string",
-      "kind": "component",
-      "exports": ["default"],
-      "dependsOn": ["src/App.jsx"],
-      "mustInclude": ["useState", "fetch"]
-    }
+    { "path": "backend/db/init.sql", "purpose": "Database schema initialization SQL", "kind": "schema" }
   ],
   "backendRoutes": [
     {
@@ -122,46 +70,95 @@ Required shape:
     "Every backend query must filter by project_id",
     "The frontend must render from explicit entrypoints"
   ]
+}`;
+
+function stripMarkdown(content: string): string {
+  return content.replace(/```[a-zA-Z]*\s*/g, '').replace(/```/g, '').trim();
 }
 
-Always include all required files.`;
+function extractJson(content: string): string {
+  const cleaned = stripMarkdown(content);
+  const first = cleaned.indexOf('{');
+  const last = cleaned.lastIndexOf('}');
+  if (first >= 0 && last > first) return cleaned.slice(first, last + 1);
+  return cleaned;
+}
 
-  const completion = await llmProxy.chatCompletion(
-    [
-      { role: 'system', content: systemPrompt },
-      {
-        role: 'user',
-        content: JSON.stringify({
-          requirements: input.requirements,
-          systemDesign: input.systemDesign || null,
-          uiSpec: input.uiSpec || null,
-          modification: input.modification || null,
-          projectId: input.projectId || null,
-        }),
-      },
-    ],
-    model,
-    0.2,
-    0.9,
-    4000,
-  );
-
-  let content = completion.choices?.[0]?.message?.content || '';
-  content = extractJson(content);
-  let parsed: Record<string, unknown>;
+function tryParseBlueprint(raw: string): { blueprint: ProjectBlueprint } | { error: string } {
+  let jsonStr: string;
   try {
-    parsed = JSON.parse(content);
-  } catch (err) {
-    logError('blueprintAgent:parse-error', { err, content: content.slice(0, 2000) });
-    throw new Error('Blueprint agent returned malformed JSON');
+    jsonStr = extractJson(raw);
+  } catch {
+    return { error: 'Could not extract JSON from response' };
   }
 
-  ensureRequiredFiles(parsed);
-  const blueprint = validateProjectBlueprint(parsed);
-  debug('blueprintAgent:done', {
-    title: blueprint.title,
-    fileCount: blueprint.files.length,
-    routeCount: blueprint.backendRoutes.length,
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch (err: any) {
+    return { error: `JSON parse failed: ${err.message}` };
+  }
+
+  try {
+    const blueprint = validateProjectBlueprint(parsed);
+    return { blueprint };
+  } catch (err: any) {
+    return { error: `Blueprint validation failed: ${err.message}` };
+  }
+}
+
+export async function blueprintAgent(input: BlueprintInput): Promise<ProjectBlueprint> {
+  debug('blueprintAgent:start', { projectId: input.projectId });
+  if (!input?.requirements) throw new Error('Blueprint input requires requirements');
+
+  const { model, apiKey } = getModelConfigForTask('core_reasoning');
+  const llmProxy = new LLMProxyClient({ apiKey });
+
+  const userContent = JSON.stringify({
+    requirements: input.requirements,
+    systemDesign: input.systemDesign || null,
+    uiSpec: input.uiSpec || null,
+    modification: input.modification || null,
+    projectId: input.projectId || null,
   });
-  return blueprint;
+
+  const messages: Message[] = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'user', content: userContent },
+  ];
+
+  let lastError = 'Unknown error';
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    debug('blueprintAgent:attempt', { attempt, projectId: input.projectId });
+
+    const completion = await llmProxy.chatCompletion(messages, model, 0.2, 0.9, 4000);
+    const raw = completion.choices?.[0]?.message?.content || '';
+
+    const result = tryParseBlueprint(raw);
+
+    if ('blueprint' in result) {
+      debug('blueprintAgent:done', {
+        attempt,
+        title: result.blueprint.title,
+        fileCount: result.blueprint.files.length,
+        routeCount: result.blueprint.backendRoutes.length,
+      });
+      return result.blueprint;
+    }
+
+    lastError = result.error;
+    logError('blueprintAgent:validation-error', { attempt, error: lastError });
+
+    if (attempt < MAX_RETRIES) {
+      // Feed the broken output and exact error back to the LLM so it can self-correct
+      messages.push({ role: 'assistant', content: raw });
+      messages.push({
+        role: 'user',
+        content: `Your previous response failed validation with this exact error:\n\n${lastError}\n\nFix ONLY what the error describes and return the complete corrected JSON blueprint. No prose, no markdown fences.`,
+      });
+    }
+  }
+
+  throw new Error(`Blueprint generation failed after ${MAX_RETRIES} attempts. Last error: ${lastError}`);
 }
