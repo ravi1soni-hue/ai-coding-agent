@@ -29,13 +29,23 @@ function hashPassword(password: string, salt?: string) {
 }
 
 function verifyPassword(password: string, storedHash: string) {
-  const [salt, expected] = storedHash.split(':');
-  if (!salt || !expected) return false;
-  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
-  const expectedBuf = Buffer.from(expected, 'hex');
-  const actualBuf = Buffer.from(derived, 'hex');
-  if (expectedBuf.length !== actualBuf.length) return false;
-  return crypto.timingSafeEqual(expectedBuf, actualBuf);
+  const normalizedStoredHash = String(storedHash ?? '').trim();
+  if (!normalizedStoredHash) return false;
+
+  const parts = normalizedStoredHash.split(':');
+  if (parts.length === 2) {
+    const [salt, expected] = parts;
+    const derived = crypto.scryptSync(password, salt, 64).toString('hex');
+    const expectedBuf = Buffer.from(expected, 'hex');
+    const actualBuf = Buffer.from(derived, 'hex');
+    if (expectedBuf.length === actualBuf.length && crypto.timingSafeEqual(expectedBuf, actualBuf)) {
+      return true;
+    }
+  }
+
+  // Backward compatibility for legacy accounts that may have been stored in plaintext
+  // before the current scrypt-based password hashing was introduced.
+  return password === normalizedStoredHash;
 }
 
 export function parseCookie(cookieHeader?: string): Record<string, string> {
