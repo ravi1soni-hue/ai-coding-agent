@@ -13,7 +13,8 @@ function buildApprovalNotes(blueprint: ProjectBlueprint): string[] {
     notes.push('Blueprint has no files.');
   }
 
-  if (!Array.isArray(blueprint.backendRoutes) || blueprint.backendRoutes.length === 0) {
+  const hasBackendEntrypoints = Array.isArray(blueprint.entrypoints?.backend) && blueprint.entrypoints.backend.length > 0;
+  if (hasBackendEntrypoints && (!Array.isArray(blueprint.backendRoutes) || blueprint.backendRoutes.length === 0)) {
     notes.push('Blueprint has no backend routes.');
   }
 
