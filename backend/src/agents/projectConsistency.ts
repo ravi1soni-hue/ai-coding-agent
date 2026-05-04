@@ -42,6 +42,15 @@ function getComponentPathsFromUiSpec(uiSpec: unknown): string[] {
     .filter(Boolean);
 }
 
+function normalizePageName(value: unknown): string {
+  const raw = normalizeTextValue(value);
+  if (!raw) return '';
+  return raw
+    .replace(/\bpage\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function normalizeTextValue(value: unknown): string {
   if (typeof value === 'string') return value.toLowerCase().replace(/\s+/g, ' ').trim();
   if (value && typeof value === 'object') {
@@ -65,13 +74,13 @@ function getRequirementPages(requirements: Record<string, unknown> | null): stri
   if (!requirements) return [];
   return asArray<unknown>(requirements.pages)
     .flatMap((page) => {
-      const normalized = normalizeTextValue(page);
+      const normalized = normalizePageName(page);
       if (normalized && normalized !== '[object object]') return [normalized];
       if (page && typeof page === 'object') {
         const record = page as Record<string, unknown>;
         return [record.name, record.title, record.label, record.page, record.path, record.slug, record.id, record.value]
           .filter((item): item is string | number | boolean => item !== undefined)
-          .map((item) => String(item).toLowerCase().replace(/\s+/g, ' ').trim())
+          .map((item) => normalizePageName(item))
           .filter(Boolean);
       }
       return [normalized].filter(Boolean);
@@ -150,7 +159,7 @@ export function validateProjectConsistency(input: {
 
     if (systemDesign) {
       const frontend = asRecord(systemDesign.frontend);
-      const pages = asArray<unknown>(frontend?.pages).map(normalizeTextValue).filter(Boolean);
+      const pages = asArray<unknown>(frontend?.pages).map(normalizePageName).filter(Boolean);
       const specPages = getRequirementPages(requirements);
       for (const page of specPages) {
         if (!pages.includes(page)) {
