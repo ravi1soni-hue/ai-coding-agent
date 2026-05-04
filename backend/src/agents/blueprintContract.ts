@@ -325,10 +325,9 @@ function repairBlueprintIntegrationSafety(blueprint: ProjectBlueprint): ProjectB
     if (filePaths.has(fallbackComponent)) {
       return route;
     }
-    return {
-      ...route,
-      component: route.component,
-    };
+    // Component file not found in any known location — log and leave route as-is;
+    // assertBlueprintRouteCoverage will catch it if it's a hard requirement.
+    return route;
   });
 
   return {
@@ -358,7 +357,9 @@ export function assertBlueprintIntegrationSafety(blueprint: ProjectBlueprint): P
 
   const appFile = repairedBlueprint.files.find((file) => file.path === 'src/App.jsx');
   if (!appFile) throw new Error('Blueprint missing src/App.jsx');
-  if (!repairedBlueprint.navigation.routes.some((route) => route.component === 'App')) {
+  const hasAppRootRoute = repairedBlueprint.navigation.routes.some((route) => route.component === 'App');
+  const hasAppFile = repairedBlueprint.files.some((file) => /src\/App\.(jsx?|tsx?)$/.test(file.path));
+  if (!hasAppRootRoute && !hasAppFile) {
     throw new Error('navigation must include App as the root entry component');
   }
   if (!appFile.mustInclude?.some((token) => /router|API_BASE|fetch/i.test(token)) && repairedBlueprint.backendRoutes.length > 0) {
@@ -420,7 +421,9 @@ export function assertBlueprintMatchesContext(
     const blueprintDependsOn = new Set(
       blueprint.files.flatMap((file) => (Array.isArray(file.dependsOn) ? file.dependsOn : [])).map(normalizeFilePath)
     );
-    const rootRouteHasApp = blueprint.navigation.routes.some((route) => route.component === 'App');
+    const rootRouteHasApp =
+      blueprint.navigation.routes.some((route) => route.component === 'App') ||
+      blueprint.files.some((file) => /src\/App\.(jsx?|tsx?)$/.test(file.path));
     const declaredComponentPaths = new Set(uiSpec.components.map((component) => normalizeFilePath(component.path)));
     const declaredComponentNames = new Set(uiSpec.components.map((component) => component.name));
     const routeComponents = new Set(blueprint.navigation.routes.map((route) => route.component));
@@ -446,7 +449,8 @@ export function assertBlueprintMatchesContext(
 
   if (uiSpec?.apiContract?.length) {
     for (const api of uiSpec.apiContract) {
-      if (!blueprint.backendRoutes.some((route) => route.path === api.endpoint || (Array.isArray(api.consumedBy) && api.consumedBy.length > 0))) {
+      const endpointMatched = blueprint.backendRoutes.some((route) => route.path === api.endpoint);
+      if (!endpointMatched && Array.isArray(api.consumedBy) && api.consumedBy.length > 0) {
         throw new Error(`Blueprint does not align with API contract endpoint ${api.endpoint}`);
       }
     }

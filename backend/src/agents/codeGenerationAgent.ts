@@ -156,10 +156,16 @@ function validateManifestSemantics(manifest: FrontendManifest, requirements: any
     );
     for (const requiredName of requiredNames) {
       if (!seenNames.has(requiredName)) {
-        throw new Error(`frontendManifest: missing required UI component ${requiredName}`);
+        // Warn only — a manifest name mismatch should not trigger the fallback cascade.
+        // validateAppImports enforces the authoritative component-wiring check after generation.
+        logWarn('codeGenerationAgent:manifest-missing-uispec-component', { requiredName });
       }
     }
   }
+}
+
+function normalizeImportPath(p: string): string {
+  return p.replace(/^\.\//, '').replace(/\.(jsx?|tsx?)$/, '').toLowerCase();
 }
 
 function validateAppImports(appContent: string, componentFiles: GeneratedFile[], blueprint?: ProjectBlueprint, uiSpec?: any): void {
@@ -170,14 +176,6 @@ function validateAppImports(appContent: string, componentFiles: GeneratedFile[],
     declaredImports.set(match[1], match[2]);
   }
 
-  const requiredComponentNames = new Set<string>(componentFiles.map((file) => sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')));
-  if (uiSpec?.components?.length) {
-    for (const component of uiSpec.components) {
-      const requiredName = String(component?.name || '').trim();
-      if (requiredName) requiredComponentNames.add(requiredName);
-    }
-  }
-
   for (const file of componentFiles) {
     const componentName = sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection');
     const expectedImportPath = `./${file.path.replace(/^src\//, '')}`;
@@ -185,7 +183,8 @@ function validateAppImports(appContent: string, componentFiles: GeneratedFile[],
     if (!importedPath) {
       throw new Error(`frontendApp: missing import for ${componentName}`);
     }
-    if (importedPath !== expectedImportPath) {
+    // Normalize both paths before comparing — LLM may omit .jsx extension or vary casing
+    if (normalizeImportPath(importedPath) !== normalizeImportPath(expectedImportPath)) {
       throw new Error(`frontendApp: import path mismatch for ${componentName} (expected ${expectedImportPath}, got ${importedPath})`);
     }
     const usagePattern = new RegExp(`<${componentName}(\\s|/|>)`);
@@ -194,10 +193,16 @@ function validateAppImports(appContent: string, componentFiles: GeneratedFile[],
     }
   }
 
-  for (const requiredName of requiredComponentNames) {
-    const usagePattern = new RegExp(`<${requiredName}(\\s|/|>)`);
-    if (!usagePattern.test(appContent)) {
-      throw new Error(`frontendApp: missing rendered usage for required component ${requiredName}`);
+  // uiSpec component render check: only warn — LLM may render them conditionally or compose differently
+  if (uiSpec?.components?.length) {
+    for (const component of uiSpec.components) {
+      const requiredName = String(component?.name || '').trim();
+      if (requiredName) {
+        const usagePattern = new RegExp(`<${requiredName}(\\s|/|>)`);
+        if (!usagePattern.test(appContent)) {
+          logWarn('codeGenerationAgent:app-missing-uispec-render', { requiredName });
+        }
+      }
     }
   }
 
@@ -447,11 +452,16 @@ function backendScaffold(manifest: BackendManifest, tablePrefix: string): Genera
   ];
 }
 
-async function generateFrontendManifest(systemDesign: any, requirements: any, modification: string | undefined, llmProxy: LLMProxyClient, model: string): Promise<FrontendManifest> {
+async function generateFrontendManifest(systemDesign: any, requirements: any, modification: string | undefined, llmProxy: LLMProxyClient, model: string, uiSpec?: any): Promise<FrontendManifest> {
   const userMessage = String(requirements?.userMessage || '');
   const clarificationAnswers = requirements?.clarificationAnswers || {};
   const pages = Array.isArray(requirements?.pages) ? requirements.pages : [];
   const authRequired = Boolean(requirements?.auth_required);
+
+  // If uiSpec defines exact component names, include them in the prompt so the LLM uses matching names.
+  const uiSpecComponentHint = Array.isArray(uiSpec?.components) && uiSpec.components.length > 0
+    ? `\n- The following components MUST appear in the components array with EXACTLY these names: ${(uiSpec.components as Array<{ name?: string }>).map(c => c.name).filter(Boolean).join(', ')}`
+    : '';
 
   const systemPrompt = `You are a React app architect. Generate a detailed implementation manifest for the app described by the user.
 
@@ -471,24 +481,43 @@ RULES:
 - Component paths MUST start with src/components/ and end with .jsx
 - If auth is required, include a Login/Auth component${authRequired ? ' — always include authentication UI' : ''}
 - If there are specific pages requested (${pages.join(', ')}), map each to a component
-- Base components on the user's actual description, not generic placeholders`;
+- Base components on the user's actual description, not generic placeholders${uiSpecComponentHint}`;
 
   const parsed = await generateJson(llmProxy, model, 'frontendManifest', systemPrompt, {
     userDescription: userMessage,
     requirements,
     clarificationAnswers,
     frontendDesign: systemDesign?.frontend || null,
+    uiSpecComponents: uiSpec?.components || null,
     modification: modification || null,
   }, 1800);
   const manifest = assertObject(parsed, 'frontendManifest') as FrontendManifest;
   let components = Array.isArray(manifest.components) ? manifest.components : [];
   if (components.length === 0) {
-    const fallback = fallbackFrontendManifest(requirements);
+    const fallback = fallbackFrontendManifest(requirements, uiSpec);
     components = fallback.components || [];
     if (!manifest.appName) manifest.appName = fallback.appName;
   }
   manifest.components = components.slice(0, MAX_COMPONENTS).map((component, index) => ({ ...component, path: sanitizeComponentPath(component?.path || '', index), name: sanitizeIdentifier(component?.name || `GeneratedSection${index + 1}`, `GeneratedSection${index + 1}`) }));
   manifest.dependencies = manifest.dependencies && typeof manifest.dependencies === 'object' ? manifest.dependencies : {};
+
+  // Post-reconcile: if uiSpec components were provided, ensure every uiSpec name appears in the manifest.
+  // This prevents the LLM from silently renaming a component (e.g. "Toggle" instead of "PricingToggle").
+  if (Array.isArray(uiSpec?.components) && uiSpec.components.length > 0) {
+    const manifestNames = new Set(manifest.components.map((c: any) => String(c.name || '')));
+    const missing = (uiSpec.components as Array<{ name?: string; path?: string; purpose?: string }>)
+      .filter(c => c.name && !manifestNames.has(c.name));
+    if (missing.length > 0) {
+      const extra = missing.map(c => ({
+        path: `src/components/${c.name}.jsx`,
+        name: c.name!,
+        purpose: String(c.purpose || `${c.name} component`),
+      }));
+      manifest.components = [...manifest.components, ...extra].slice(0, MAX_COMPONENTS);
+      logWarn('codeGenerationAgent:manifest-reconciled-uispec', { added: extra.map(c => c.name) });
+    }
+  }
+
   return manifest;
 }
 
@@ -700,11 +729,27 @@ function fallbackFrontendCss(): GeneratedFile {
   return { path: 'src/index.css', content: `* { box-sizing: border-box; }\nhtml, body, #root { margin: 0; min-height: 100%; }\nbody { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f8fb; color: #111827; }\nbutton, input, textarea, select { font: inherit; }\n.app-shell { min-height: 100vh; padding: 48px clamp(20px, 5vw, 72px); }\n.hero { max-width: 920px; margin: 0 auto 32px; }\n.eyebrow { margin: 0 0 10px; color: #2563eb; font-weight: 700; text-transform: uppercase; font-size: 0.78rem; }\nh1 { margin: 0; font-size: clamp(2rem, 6vw, 4.5rem); line-height: 1; }\n.hero p:last-child { color: #4b5563; font-size: 1.08rem; line-height: 1.7; max-width: 680px; }\n.content-grid { max-width: 1120px; margin: 0 auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }\n.panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; box-shadow: 0 12px 32px rgba(15, 23, 42, 0.06); }\n.panel h2 { margin: 0 0 8px; font-size: 1.08rem; }\n.panel p { margin: 0; color: #4b5563; line-height: 1.6; }\n` };
 }
 
-function fallbackFrontendManifest(requirements: any): FrontendManifest {
+function fallbackFrontendManifest(requirements: any, uiSpec?: any): FrontendManifest {
   const rawName = typeof requirements?.userMessage === 'string' ? requirements.userMessage.slice(0, 60)
     : typeof requirements?.summary === 'string' ? requirements.summary
     : typeof requirements?.app_type === 'string' ? requirements.app_type : 'Generated App';
   const appName = String(rawName).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'generated-app';
+
+  // When uiSpec components are available, use them directly — preserves component names
+  // so downstream validateAppImports checks against the same names used in generation.
+  if (Array.isArray(uiSpec?.components) && uiSpec.components.length > 0) {
+    const uiSpecComponents = (uiSpec.components as Array<{ name?: string; path?: string; purpose?: string }>)
+      .slice(0, MAX_COMPONENTS)
+      .map((c) => {
+        const name = String(c.name || '').trim() || 'Section';
+        const filePath = c.path && String(c.path).startsWith('src/components/')
+          ? String(c.path)
+          : `src/components/${name}.jsx`;
+        return { path: filePath.endsWith('.jsx') ? filePath : `${filePath}.jsx`, name, purpose: String(c.purpose || `${name} component`) };
+      });
+    return { appName, dependencies: {}, apiResources: [], components: uiSpecComponents, styleNotes: 'Clean responsive application UI.' };
+  }
+
   const authRequired = Boolean(requirements?.auth_required);
   const pages = Array.isArray(requirements?.pages) ? requirements.pages : [];
   const components = [
@@ -740,13 +785,13 @@ async function generateFrontendFiles(
   const metrics: GenerationMetrics = { fallbackCount: 0, fallbackReasons: [] };
   let manifest: FrontendManifest;
   try {
-    manifest = await generateFrontendManifest(systemDesign, requirements, modification, llmProxy, model);
+    manifest = await generateFrontendManifest(systemDesign, requirements, modification, llmProxy, model, uiSpec);
     validateManifestSemantics(manifest, requirements, projectSpec, uiSpec);
   } catch (err) {
     metrics.fallbackCount += 1;
     metrics.fallbackReasons.push(`frontend-manifest:${String((err as any)?.message || err)}`);
     logWarn('codeGenerationAgent:frontend-manifest-fallback', { error: (err as Error).message });
-    manifest = fallbackFrontendManifest(requirements);
+    manifest = fallbackFrontendManifest(requirements, uiSpec);
   }
   const projectManifest = buildProjectManifest(manifest, undefined, {
     orchestration: getModelConfigForTask('agent_orchestration').model,
@@ -1096,7 +1141,6 @@ export async function codeGenerationAgent(input: any) {
   const fileMap = new Map([...frontendFiles, ...backendFiles].map(f => [normalizeGeneratedPath(f.path), f.content]));
 
   // Targeted repair: fill missing frontend scaffold files without re-running the full lifecycle.
-  const frontendManifestForRepair = manifestOut.value;
   const repairComponents = frontendFiles.filter(f => f.path.startsWith('src/components/'));
   const repairBackendRequired = hasBackend;
 
@@ -1106,14 +1150,12 @@ export async function codeGenerationAgent(input: any) {
       events?.emit({ type: 'AGENT_THINKING', message: `Repairing missing file: ${required}` });
       if (required === 'src/App.jsx') {
         try {
-          const frontendManifest = frontendManifestForRepair?.blueprint
-            ? fallbackFrontendManifest(input.requirements)
-            : fallbackFrontendManifest(input.requirements);
+          const frontendManifest = fallbackFrontendManifest(input.requirements, uiSpec);
           const repairedApp = await generateFrontendApp(frontendManifest, input.requirements, input.systemDesign, input.modification, repairComponents, llmProxy, model, input.uiSpec);
           fileMap.set(required, repairedApp.content);
           events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Repaired ${required}`, payload: { path: required, content: repairedApp.content } });
         } catch {
-          const fallback = fallbackFrontendApp(fallbackFrontendManifest(input.requirements), repairComponents, repairBackendRequired);
+          const fallback = fallbackFrontendApp(fallbackFrontendManifest(input.requirements, uiSpec), repairComponents, repairBackendRequired);
           fileMap.set(required, fallback.content);
           events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Fallback repair for ${required}`, payload: { path: required, content: fallback.content } });
         }
