@@ -4,7 +4,7 @@ import { searchVectors } from '../db/vectorStore';
 import { LLMProxyClient } from './llmProxyClient';
 import { embeddingAgent } from './embeddingAgent';
 import { debug, error as logError, warn as logWarn } from '../utils/logger';
-import { blueprintMissingFiles, validateProjectBlueprint, type ProjectBlueprint } from './blueprintContract';
+import { assertBlueprintIntegrationSafety, blueprintMissingFiles, validateProjectBlueprint, type ProjectBlueprint } from './blueprintContract';
 import { reviewerAgent } from './reviewerAgent';
 
 type GeneratedFile = { path: string; content: string };
@@ -138,13 +138,43 @@ function validateManifestSemantics(manifest: FrontendManifest, requirements: any
   }
 }
 
-function validateAppImports(appContent: string, componentFiles: GeneratedFile[]): void {
+function validateAppImports(appContent: string, componentFiles: GeneratedFile[], blueprint?: ProjectBlueprint): void {
+  const importPattern = /^import\s+([A-Za-z_$][\w$]*)\s+from\s+['"](.+?)['"];?$/gm;
+  const declaredImports = new Map<string, string>();
+  let match: RegExpExecArray | null;
+  while ((match = importPattern.exec(appContent)) !== null) {
+    declaredImports.set(match[1], match[2]);
+  }
+
   for (const file of componentFiles) {
     const componentName = sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection');
-    if (!appContent.includes(componentName)) {
-      throw new Error(`frontendApp: missing import or usage for ${componentName}`);
+    const expectedImportPath = `./${file.path.replace(/^src\//, '')}`;
+    const importedPath = declaredImports.get(componentName);
+    if (!importedPath) {
+      throw new Error(`frontendApp: missing import for ${componentName}`);
+    }
+    if (importedPath !== expectedImportPath) {
+      throw new Error(`frontendApp: import path mismatch for ${componentName} (expected ${expectedImportPath}, got ${importedPath})`);
+    }
+    const usagePattern = new RegExp(`<${componentName}(\\s|/|>)`);
+    if (!usagePattern.test(appContent)) {
+      throw new Error(`frontendApp: missing rendered usage for ${componentName}`);
     }
   }
+
+  if (blueprint) {
+    const declaredRoutes = new Set(blueprint.navigation.routes.map((route) => route.component));
+    const rootComponentNames = new Set(componentFiles.map((file) => sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')));
+    for (const route of blueprint.navigation.routes) {
+      if (route.component !== 'App' && !rootComponentNames.has(route.component) && !declaredImports.has(route.component)) {
+        throw new Error(`frontendApp: blueprint navigation references unknown component ${route.component}`);
+      }
+    }
+    if (blueprint.navigation.routes.length > 0 && !declaredRoutes.has('App')) {
+      throw new Error('frontendApp: blueprint navigation must include App as the root route component');
+    }
+  }
+
   if (containsPlaceholderText(appContent)) {
     throw new Error('frontendApp: placeholder text detected');
   }
@@ -289,71 +319,8 @@ function sanitizeIdentifier(value: string, fallback: string): string {
   return cleaned && /^[a-zA-Z_$]/.test(cleaned) ? cleaned : fallback;
 }
 
-function fallbackFrontendComponent(component: { path: string; name?: string; purpose?: string }, index: number, manifest?: FrontendManifest, metrics?: GenerationMetrics): GeneratedFile {
-  metrics && (metrics.fallbackCount += 1, metrics.fallbackReasons.push(`component:${component.path || index}`));
-  const path_name = sanitizeComponentPath(component.path, index);
-  const componentName = sanitizeIdentifier(component.name || path.basename(path_name, '.jsx'), `GeneratedSection${index + 1}`);
-  const purpose = String(component.purpose || manifest?.appName || 'Feature').slice(0, 100);
-  
-  // Generate a more complete fallback component with actual structure
-  const content = `import React, { useState } from 'react';
-
-/**
- * ${componentName}
- * Purpose: ${purpose}
- */
-export default function ${componentName}(props = {}) {
-  const [isLoading, setIsLoading] = useState(false);
-  const [data, setData] = useState(null);
-  const [error, setError] = useState(null);
-
-  // Receive props and render meaningful content
-  const title = props.title || '${purpose}';
-  const content = props.content || 'This section is ready for customization.';
-  const items = Array.isArray(props.items) ? props.items : [];
-
-  const handleAction = (e) => {
-    setIsLoading(true);
-    // Placeholder for actual functionality
-    setTimeout(() => {
-      setIsLoading(false);
-    }, 500);
-  };
-
-  return (
-    <section className="component-section">
-      <article className="panel">
-        <header className="panel-header">
-          <h2>{title}</h2>
-        </header>
-        <div className="panel-content">
-          <p>{content}</p>
-          {items.length > 0 && (
-            <ul className="items-list">
-              {items.map((item, idx) => (
-                <li key={idx} className="item">
-                  {typeof item === 'string' ? item : JSON.stringify(item)}
-                </li>
-              ))}
-            </ul>
-          )}
-          {items.length === 0 && (
-            <p className="empty-state">No items to display</p>
-          )}
-        </div>
-        <footer className="panel-footer">
-          <button onClick={handleAction} disabled={isLoading} className="action-btn">
-            {isLoading ? 'Loading...' : 'Take Action'}
-          </button>
-        </footer>
-      </article>
-      {error && <div className="error-message">{error}</div>}
-    </section>
-  );
-}
-`;
-  
-  return { path: path_name, content };
+function failClosed(reason: string): never {
+  throw new Error(reason);
 }
 
 function sanitizeComponentPath(rawPath: string, index: number): string {
@@ -787,11 +754,7 @@ async function generateFrontendFiles(
         events?.emit({ type: 'FILE_WRITTEN', filePath: file.path, message: `Generated ${componentName} (dependency-aware)`, payload: { path: file.path, content: file.content } });
       } catch (err) {
         logWarn('codeGenerationAgent:component-generation-failed', { componentName, error: (err as Error).message });
-        const fallback = fallbackFrontendComponent(componentManifestItem, 0, manifest, metrics);
-        generatedComponents.set(componentName, fallback.content);
-        setFile(partial, fallback);
-        componentFiles.push(fallback);
-        events?.emit({ type: 'FILE_WRITTEN', filePath: fallback.path, message: `Generated fallback ${componentName}`, payload: { path: fallback.path, content: fallback.content } });
+        failClosed(`Frontend component generation failed for ${componentName}: ${(err as Error).message}`);
       }
     }
   } else {
@@ -809,11 +772,7 @@ async function generateFrontendFiles(
           return file;
         } catch (err) {
           logWarn('codeGenerationAgent:component-fallback', { path: component.path, error: (err as Error).message });
-          const fallback = fallbackFrontendComponent(component, index, manifest, metrics);
-          generatedComponents.set(component.name || `Component${index}`, fallback.content);
-          setFile(partial, fallback);
-          events?.emit({ type: 'FILE_WRITTEN', filePath: fallback.path, message: `Wrote fallback ${fallback.path}`, payload: { path: fallback.path, content: fallback.content } });
-          return fallback;
+          failClosed(`Frontend component generation failed for ${component.path}: ${(err as Error).message}`);
         }
       }
     );
@@ -825,12 +784,9 @@ async function generateFrontendFiles(
   const backendRequired = Boolean(systemDesign?.backend);
   try {
     appFile = await generateFrontendApp(manifest, requirements, systemDesign, modification, componentFiles, llmProxy, model, uiSpec);
-    validateAppImports(appFile.content, componentFiles);
+    validateAppImports(appFile.content, componentFiles, blueprint);
   } catch (err) {
-    metrics.fallbackCount += 1;
-    metrics.fallbackReasons.push(`frontend-app:${String((err as any)?.message || err)}`);
-    logWarn('codeGenerationAgent:app-fallback', { error: (err as Error).message, partialFiles: partial.size });
-    appFile = fallbackFrontendApp(manifest, componentFiles, backendRequired);
+    failClosed(`frontend App generation failed: ${(err as Error).message}`);
   }
   setFile(partial, appFile);
   events?.emit({ type: 'FILE_WRITTEN', filePath: appFile.path, message: `Wrote ${appFile.path}`, payload: { path: appFile.path, content: appFile.content } });
@@ -840,10 +796,7 @@ async function generateFrontendFiles(
   try {
     cssFile = await generateFrontendCss(manifest, requirements, appFile, componentFiles, llmProxy, model);
   } catch (err) {
-    metrics.fallbackCount += 1;
-    metrics.fallbackReasons.push(`frontend-css:${String((err as any)?.message || err)}`);
-    logWarn('codeGenerationAgent:css-fallback', { error: (err as Error).message, partialFiles: partial.size });
-    cssFile = fallbackFrontendCss();
+    failClosed(`frontend CSS generation failed: ${(err as Error).message}`);
   }
 
   if (metrics.fallbackCount > 0) {
@@ -1054,10 +1007,11 @@ export async function codeGenerationAgent(input: any) {
   if (!input) throw new Error('codeGenerationAgent: input required');
   const rawBlueprint = input.blueprint ? validateProjectBlueprint(input.blueprint) : undefined;
   if (!rawBlueprint) throw new Error('codeGenerationAgent: validated blueprint is required before code generation');
-  const blueprint = rawBlueprint.approved?.approved ? rawBlueprint : await reviewerAgent({ blueprint: rawBlueprint, reviewerName: 'Code Generation Gate' });
-  if (!blueprint.approved?.approved) {
-    throw new Error(`codeGenerationAgent: blueprint approval required before code generation${blueprint.approved?.notes?.length ? `: ${blueprint.approved.notes.join('; ')}` : ''}`);
+  const reviewedBlueprint = rawBlueprint.approved?.approved ? rawBlueprint : await reviewerAgent({ blueprint: rawBlueprint, reviewerName: 'Code Generation Gate' });
+  if (!reviewedBlueprint.approved?.approved) {
+    throw new Error(`codeGenerationAgent: blueprint approval required before code generation${reviewedBlueprint.approved?.notes?.length ? `: ${reviewedBlueprint.approved.notes.join('; ')}` : ''}`);
   }
+  const blueprint = assertBlueprintIntegrationSafety(reviewedBlueprint);
 
   const { model, apiKey } = getModelConfigForTask('code_generation');
   const llmProxy = new LLMProxyClient({ apiKey });
@@ -1163,12 +1117,17 @@ export async function codeGenerationAgent(input: any) {
     try {
       const frontendManifest = fallbackFrontendManifest(input.requirements);
       const repairedApp = await generateFrontendApp(frontendManifest, input.requirements, input.systemDesign, input.modification, repairComponents, llmProxy, model, input.uiSpec);
+      validateAppImports(repairedApp.content, repairComponents, blueprint);
       fileMap.set('src/App.jsx', repairedApp.content);
-      events?.emit({ type: 'FILE_WRITTEN', filePath: 'src/App.jsx', message: 'Repaired stub App.jsx', payload: { path: 'src/App.jsx', content: repairedApp.content } });
-    } catch {
-      const fallback = fallbackFrontendApp(fallbackFrontendManifest(input.requirements), repairComponents, repairBackendRequired);
-      fileMap.set('src/App.jsx', fallback.content);
-      events?.emit({ type: 'FILE_WRITTEN', filePath: 'src/App.jsx', message: 'Fallback repair for stub App.jsx', payload: { path: 'src/App.jsx', content: fallback.content } });
+      const repairedStubApp = await generateFrontendApp(frontendManifest, input.requirements, input.systemDesign, input.modification, repairComponents, llmProxy, model, input.uiSpec);
+      validateAppImports(repairedStubApp.content, repairComponents, blueprint);
+      fileMap.set('src/App.jsx', repairedStubApp.content);
+      events?.emit({ type: 'FILE_WRITTEN', filePath: 'src/App.jsx', message: 'Repaired stub App.jsx', payload: { path: 'src/App.jsx', content: repairedStubApp.content } });
+      } catch (err) {
+          failClosed(`Repair of src/App.jsx failed: ${(err as Error).message}`);
+        }
+    } catch (err) {
+      failClosed(`Stub App.jsx repair failed: ${(err as Error).message}`);
     }
   }
 

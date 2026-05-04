@@ -236,7 +236,7 @@ export function createSocketServer(server: http.Server) {
       session.stepRetries = {};
     }
 
-    let clarificationAnswers: Record<string, string> =
+      let clarificationAnswers: Record<string, string> =
       session.clarifications?.context?.clarificationAnswers &&
       typeof session.clarifications.context.clarificationAnswers === 'object'
         ? { ...session.clarifications.context.clarificationAnswers }
@@ -246,6 +246,12 @@ export function createSocketServer(server: http.Server) {
       Array.isArray(session.clarifications?.context?.askedQuestions)
         ? [...session.clarifications.context.askedQuestions]
         : [];
+
+    let pendingClarificationQuestions: string[] =
+      Array.isArray(session.clarifications?.questions)
+        ? [...session.clarifications.questions]
+        : [];
+    let pendingClarificationIndex = 0;
 
     // -----------------------------------------------------------------------
     // Helper: rematerialize code into workspace
@@ -445,9 +451,20 @@ export function createSocketServer(server: http.Server) {
           session.step = 'clarification';
         }
 
-        // ── Stage 2: Clarification (multi-turn) ────────────────────────────
+        // ── Stage 2: Clarification (multi-question queue) ─────────────────
         while (session.step === 'clarification') {
           sendProgress(ws, session, 'clarification', 'Clarifying requirements...');
+
+          if (pendingClarificationQuestions.length > 0 && pendingClarificationIndex < pendingClarificationQuestions.length) {
+            const questionMsg = pendingClarificationQuestions[pendingClarificationIndex];
+            pendingClarificationIndex += 1;
+            session.lastClarificationQuestion = questionMsg;
+            askedClarificationQuestions.push(questionMsg);
+            ws.send(JSON.stringify({ type: 'clarification', question: questionMsg }));
+            session.step = 'clarification_wait';
+            return;
+          }
+
           const clarInput = {
             requirements: session.requirements || {},
             clarificationAnswers: {
@@ -471,31 +488,16 @@ export function createSocketServer(server: http.Server) {
           }
 
           session.clarifications = clarResult.data;
-          debug('socket:clarification', { projectId });
+          pendingClarificationQuestions = Array.isArray(session.clarifications?.questions) ? [...session.clarifications.questions] : [];
+          pendingClarificationIndex = 0;
+          debug('socket:clarification', { projectId, questionCount: pendingClarificationQuestions.length });
 
-          if (session.clarifications?.question && !session.clarifications.confirmed) {
-            let questionMsg: string = session.clarifications.question;
-            if (typeof questionMsg === 'string' && questionMsg.trim().startsWith('{')) {
-              try {
-                const parsed = JSON.parse(questionMsg);
-                if (parsed?.question) questionMsg = parsed.question;
-              } catch {}
-            }
-            const normalizedQ = questionMsg.trim().toLowerCase();
-            if (askedClarificationQuestions.some(q => q.trim().toLowerCase() === normalizedQ)) {
-              ws.send(JSON.stringify({ type: 'stream', token: 'All clear! Moving to confirmation.' }));
-              session.step = 'confirmation';
-              continue;
-            }
-            askedClarificationQuestions.push(questionMsg);
-            session.lastClarificationQuestion = questionMsg;
-            ws.send(JSON.stringify({ type: 'clarification', question: questionMsg }));
-            session.step = 'clarification_wait';
-            return;
-          } else {
-            ws.send(JSON.stringify({ type: 'stream', token: 'Thanks for the details! Confirming your requirements...' }));
-            session.step = 'confirmation';
+          if (pendingClarificationQuestions.length > 0) {
+            continue;
           }
+
+          ws.send(JSON.stringify({ type: 'stream', token: 'Thanks for the details! Confirming your requirements...' }));
+          session.step = 'confirmation';
         }
 
         // ── Stage 3: Confirmation Gate ─────────────────────────────────────
@@ -923,6 +925,7 @@ export function createSocketServer(server: http.Server) {
         const answer = typeof msg === 'object' ? (msg.answer || msg.user_message) : msg;
         if (session.lastClarificationQuestion && typeof answer === 'string' && answer.trim()) {
           clarificationAnswers[session.lastClarificationQuestion] = answer.trim();
+          pendingClarificationQuestions = pendingClarificationQuestions.filter((question) => question !== session.lastClarificationQuestion);
         }
         session.lastClarificationQuestion = undefined;
         session.step = 'clarification';

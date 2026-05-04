@@ -1,7 +1,7 @@
 import { getModelConfigForTask } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { debug, error as logError } from '../utils/logger';
-import { validateProjectBlueprint, type ProjectBlueprint } from './blueprintContract';
+import { assertBlueprintMatchesContext, validateProjectBlueprint, type ProjectBlueprint } from './blueprintContract';
 
 type BlueprintInput = {
   requirements: any;
@@ -138,13 +138,17 @@ export async function blueprintAgent(input: BlueprintInput): Promise<ProjectBlue
     const result = tryParseBlueprint(raw);
 
     if ('blueprint' in result) {
+      const contextCheckedBlueprint = assertBlueprintMatchesContext(result.blueprint, {
+        requirements: input.requirements,
+        uiSpec: input.uiSpec,
+      });
       debug('blueprintAgent:done', {
         attempt,
-        title: result.blueprint.title,
-        fileCount: result.blueprint.files.length,
-        routeCount: result.blueprint.backendRoutes.length,
+        title: contextCheckedBlueprint.title,
+        fileCount: contextCheckedBlueprint.files.length,
+        routeCount: contextCheckedBlueprint.backendRoutes.length,
       });
-      return result.blueprint;
+      return contextCheckedBlueprint;
     }
 
     lastError = result.error;

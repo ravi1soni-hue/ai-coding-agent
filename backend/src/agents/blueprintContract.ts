@@ -266,6 +266,44 @@ export function blueprintMissingFiles(blueprint: ProjectBlueprint): string[] {
   return missing;
 }
 
+function componentNameToPath(componentName: string): string {
+  const normalized = componentName.trim();
+  if (!normalized) return '';
+  return normalized.startsWith('src/components/') ? normalizeFilePath(normalized) : `src/components/${normalized}.jsx`;
+}
+
+function routePathToComponentPath(routePath: string, componentName: string): string {
+  if (routePath === '/' || routePath === '') {
+    return componentNameToPath(componentName);
+  }
+  const slug = routePath.replace(/^\/+/, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const safeSlug = slug || 'home';
+  return componentNameToPath(componentName || `${safeSlug[0].toUpperCase()}${safeSlug.slice(1)}`);
+}
+
+function assertBlueprintRouteCoverage(blueprint: ProjectBlueprint): void {
+  const filePaths = new Set(blueprint.files.map((file) => file.path));
+  for (let i = 0; i < blueprint.navigation.routes.length; i += 1) {
+    const route = blueprint.navigation.routes[i];
+    const expectedComponentPath = routePathToComponentPath(route.path, route.component);
+    if (!filePaths.has(expectedComponentPath)) {
+      throw new Error(`navigation.routes[${i}] references missing component file: ${expectedComponentPath}`);
+    }
+  }
+}
+
+function assertBlueprintDependencyCoverage(blueprint: ProjectBlueprint): void {
+  const filePaths = new Set(blueprint.files.map((file) => file.path));
+  for (let i = 0; i < blueprint.files.length; i += 1) {
+    const file = blueprint.files[i];
+    for (const dep of file.dependsOn || []) {
+      if (!filePaths.has(dep)) {
+        throw new Error(`files[${i}].dependsOn references missing file: ${dep}`);
+      }
+    }
+  }
+}
+
 export function blueprintTopLevelPaths(blueprint: ProjectBlueprint): string[] {
   const paths = new Set<string>();
   for (const file of blueprint.files) {
@@ -275,4 +313,78 @@ export function blueprintTopLevelPaths(blueprint: ProjectBlueprint): string[] {
     if (dir && dir !== '.') paths.add(dir);
   }
   return Array.from(paths).sort();
+}
+
+export function assertBlueprintIntegrationSafety(blueprint: ProjectBlueprint): ProjectBlueprint {
+  assertBlueprintRouteCoverage(blueprint);
+  assertBlueprintDependencyCoverage(blueprint);
+
+  const appFile = blueprint.files.find((file) => file.path === 'src/App.jsx');
+  if (!appFile) throw new Error('Blueprint missing src/App.jsx');
+  if (!blueprint.navigation.routes.some((route) => route.component === 'App')) {
+    throw new Error('navigation must include App as the root entry component');
+  }
+  if (!appFile.mustInclude?.some((token) => /router|API_BASE|fetch/i.test(token)) && blueprint.backendRoutes.length > 0) {
+    throw new Error('src/App.jsx must declare API_BASE or fetch usage when backend routes exist');
+  }
+
+  return blueprint;
+}
+
+function assertStringArrayContainsAll(haystack: string[], needles: string[], label: string): void {
+  const set = new Set(haystack);
+  for (const needle of needles) {
+    if (!set.has(needle)) {
+      throw new Error(`${label} is missing required entry: ${needle}`);
+    }
+  }
+}
+
+export function assertBlueprintMatchesContext(
+  blueprint: ProjectBlueprint,
+  context: {
+    requirements?: { backend_required?: boolean; auth_required?: boolean; pages?: string[]; website_type?: string };
+    uiSpec?: { components?: Array<{ name: string; path: string }>; apiContract?: Array<{ endpoint: string; consumedBy: string[] }> };
+  }
+): ProjectBlueprint {
+  const requirements = context.requirements || {};
+  const uiSpec = context.uiSpec;
+
+  if (Array.isArray(requirements.pages) && requirements.pages.length > 0) {
+    const blueprintPaths = blueprint.navigation.routes.map((route) => route.path);
+    const pageHints = requirements.pages.map((page) => `/${String(page).toLowerCase().replace(/[^a-z0-9]+/g, '-')}`).filter((item) => item !== '/');
+    if (!blueprintPaths.includes('/') && !blueprintPaths.some((routePath) => pageHints.includes(routePath))) {
+      throw new Error('Blueprint navigation does not reflect the requested pages');
+    }
+  }
+
+  if (requirements.auth_required) {
+    const hasAuthRoute = blueprint.files.some((file) => /login|auth/i.test(file.path)) || blueprint.navigation.routes.some((route) => /login|auth/i.test(route.path) || /login|auth/i.test(route.component));
+    if (!hasAuthRoute) {
+      throw new Error('Blueprint is missing auth-related files or navigation for an auth-required request');
+    }
+  }
+
+  if (requirements.backend_required && !blueprint.backendRoutes.some((route) => route.path.startsWith('/api/'))) {
+    throw new Error('Blueprint is missing backend API routes for a backend-required request');
+  }
+
+  if (uiSpec?.components?.length) {
+    const blueprintComponentNames = new Set(blueprint.navigation.routes.map((route) => route.component));
+    for (const component of uiSpec.components) {
+      if (!blueprintComponentNames.has(component.name) && !blueprint.files.some((file) => file.path === component.path)) {
+        throw new Error(`Blueprint is missing UI spec component wiring for ${component.name}`);
+      }
+    }
+  }
+
+  if (uiSpec?.apiContract?.length) {
+    for (const api of uiSpec.apiContract) {
+      if (!blueprint.backendRoutes.some((route) => route.path === api.endpoint || (Array.isArray(api.consumedBy) && api.consumedBy.length > 0))) {
+        throw new Error(`Blueprint does not align with API contract endpoint ${api.endpoint}`);
+      }
+    }
+  }
+
+  return blueprint;
 }

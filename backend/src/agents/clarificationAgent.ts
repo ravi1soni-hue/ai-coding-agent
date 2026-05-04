@@ -1,89 +1,155 @@
-// Clarification Agent
-
 import { getModelConfigForTask } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { debug, error as logError } from '../utils/logger';
 
-/**
- * Step-by-step clarification agent: only one question at a time, context-aware, supports iterative modifications.
- * input: {
- *   requirements: object, // structured requirements
- *   clarificationAnswers?: Record<string, string>, // previous answers
- *   askedQuestions?: string[], // previously asked clarification questions
- *   lastQuestion?: string, // last question asked
- *   lastAnswer?: string, // last answer given
- *   modification?: string // if user is requesting a modification
- * }
- * returns: { question: string | null, confirmed: boolean, done: boolean, context: any }
- */
-export async function clarificationAgent(input: any) {
-  debug('clarificationAgent', { input });
+export type ClarificationContext = {
+  clarificationAnswers: Record<string, string>;
+  askedQuestions: string[];
+  modification?: string;
+  lastQuestion?: string;
+  lastAnswer?: string;
+};
+
+export type ClarificationOutput = {
+  questions: string[];
+  confirmed: boolean;
+  done: boolean;
+  context: ClarificationContext;
+};
+
+const MAX_QUESTIONS = 3;
+const MAX_ATTEMPTS = 3;
+
+function stripCodeFences(content: string): string {
+  return content.replace(/```[a-zA-Z]*\s*/g, '').replace(/```/g, '').trim();
+}
+
+function parseJsonObject(content: string): any {
+  const cleaned = stripCodeFences(content);
   try {
-    if (!input || !input.requirements) throw new Error('Input with requirements required');
-    const { model, apiKey } = getModelConfigForTask('clarification');
-
-    const clarificationAnswers = input.clarificationAnswers || {};
-    const askedQuestions = Array.isArray(input.askedQuestions) ? input.askedQuestions : [];
-    const modification = input.modification;
-    const lastQuestion = input.lastQuestion;
-    const lastAnswer = input.lastAnswer;
-
-    // Compose context for LLM
-    let userPrompt = {
-      requirements: input.requirements,
-      clarificationAnswers,
-      askedQuestions,
-      modification,
-      lastQuestion,
-      lastAnswer
-    };
-
-    const systemPrompt = `You are a requirements clarification agent.\nAsk ONLY one blocking clarification question at a time (no scope expansion, no lists).\nNever repeat a question that is already present in askedQuestions or already answered in clarificationAnswers.\nIf all clarifications are resolved, set confirmed=true and question=null.\nIf user requests a modification, ask for only the next blocking clarification needed for that modification.\nRespond ONLY in JSON: { question: string | null, confirmed: boolean }.`;
-
-    const llmProxy = new LLMProxyClient({ apiKey });
-
-    const completion = await llmProxy.chatCompletion([
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: JSON.stringify(userPrompt) }
-    ], model, 0.8, 0.9, 1000);
-
-    debug('clarificationAgent:completion', { completion });
-    let content = completion.choices?.[0]?.message?.content || '{}';
-    debug('LLM_RAW_CONTENT_CLARIFICATION', { content });
-    // Always remove all Markdown code block markers (handles ```json, ``` etc.)
-    content = content.replace(/```[a-zA-Z]*\s*|```/g, '').trim();
-    // Now extract the first JSON object
-    const jsonMatch = content.match(/{[\s\S]*}/);
-    if (!jsonMatch) {
-      logError('clarificationAgent:no-json', { content });
-      throw new Error('Malformed LLM output: No JSON object found');
+    return JSON.parse(cleaned);
+  } catch {
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      return JSON.parse(cleaned.slice(start, end + 1));
     }
-    let result;
-    try {
-      result = JSON.parse(jsonMatch[0]);
-    } catch (e) {
-      logError('clarificationAgent:parse-error', { e, content: jsonMatch[0] });
-      throw new Error('Malformed LLM output: ' + jsonMatch[0]);
-    }
-    // Defensive: always return a single question or null, never a list
-    if (!('question' in result) || !('confirmed' in result)) {
-      throw new Error('Malformed clarificationAgent output');
-    }
-    // If question is null and confirmed, we're done
-    return {
-      question: result.question || null,
-      confirmed: !!result.confirmed,
-      done: !!result.confirmed && !result.question,
-      context: {
-        clarificationAnswers,
-        askedQuestions,
-        modification,
-        lastQuestion,
-        lastAnswer
-      }
-    };
-  } catch (err) {
-    logError('clarificationAgent', err);
-    throw err;
+    throw new Error('Malformed LLM output: no JSON object found');
   }
+}
+
+function normalizeQuestionList(value: unknown): string[] {
+  if (typeof value === 'string' && value.trim()) return [value.trim()];
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean)
+    .slice(0, MAX_QUESTIONS);
+}
+
+function filterAskedQuestions(questions: string[], askedQuestions: string[], clarificationAnswers: Record<string, string>): string[] {
+  const askedSet = new Set(askedQuestions.map((q) => q.trim().toLowerCase()));
+  const answeredSet = new Set(Object.keys(clarificationAnswers).map((q) => q.trim().toLowerCase()));
+  return questions.filter((question) => {
+    const normalized = question.trim().toLowerCase();
+    return normalized.length > 0 && !askedSet.has(normalized) && !answeredSet.has(normalized);
+  });
+}
+
+export async function clarificationAgent(input: any): Promise<ClarificationOutput> {
+  debug('clarificationAgent', { input });
+  if (!input?.requirements) throw new Error('Input with requirements required');
+
+  const { model, apiKey } = getModelConfigForTask('clarification');
+  const llmProxy = new LLMProxyClient({ apiKey });
+
+  const clarificationAnswers: Record<string, string> = input.clarificationAnswers || {};
+  const askedQuestions: string[] = Array.isArray(input.askedQuestions) ? input.askedQuestions : [];
+  const context: ClarificationContext = {
+    clarificationAnswers,
+    askedQuestions,
+    modification: input.modification,
+    lastQuestion: input.lastQuestion,
+    lastAnswer: input.lastAnswer,
+  };
+
+  const systemPrompt = `You are a senior requirements clarification agent.
+
+Goal:
+- Extract the missing product decisions needed to design and generate the app safely.
+- Ask 2 to 3 blocking clarification questions at once when the request is incomplete or ambiguous.
+- Ask fewer questions only if the requirements are already specific enough.
+- Never repeat already asked or already answered questions.
+- Focus on decisions that materially affect UI, data model, navigation, authentication, roles, CRUD flows, integrations, and deployment behavior.
+- Do not ask generic filler questions.
+- If enough detail exists to proceed, return confirmed=true with an empty questions array.
+
+Return ONLY valid JSON with this exact shape:
+{
+  "questions": ["string"],
+  "confirmed": boolean
+}
+
+Rules:
+- questions must be an array of 0 to 3 strings
+- every question must be specific and answerable
+- if questions.length > 0 then confirmed must be false
+- if confirmed is true then questions must be []
+- no markdown, no prose`;
+
+  const userPrompt = JSON.stringify({
+    requirements: input.requirements,
+    clarificationAnswers,
+    askedQuestions,
+    modification: input.modification || null,
+    lastQuestion: input.lastQuestion || null,
+    lastAnswer: input.lastAnswer || null,
+    questionBudget: MAX_QUESTIONS,
+  });
+
+  let lastError = 'Unknown clarification error';
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const completion = await llmProxy.chatCompletion(
+        [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        model,
+        0.4,
+        0.9,
+        1400
+      );
+
+      const raw = completion.choices?.[0]?.message?.content || '{}';
+      debug('LLM_RAW_CONTENT_CLARIFICATION', { raw });
+
+      const parsed = parseJsonObject(raw);
+      const confirmed = Boolean(parsed?.confirmed);
+      const questions = filterAskedQuestions(normalizeQuestionList(parsed?.questions), askedQuestions, clarificationAnswers);
+
+      if (confirmed && questions.length > 0) {
+        throw new Error('clarificationAgent: confirmed=true cannot include questions');
+      }
+
+      const resolvedConfirmed = confirmed && questions.length === 0;
+      const done = resolvedConfirmed || questions.length === 0;
+
+      return {
+        questions,
+        confirmed: resolvedConfirmed,
+        done,
+        context,
+      };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      logError('clarificationAgent:attempt-failed', { attempt, error: lastError });
+      if (attempt < MAX_ATTEMPTS) {
+        continue;
+      }
+    }
+  }
+
+  throw new Error(`Clarification generation failed after ${MAX_ATTEMPTS} attempts. Last error: ${lastError}`);
 }
