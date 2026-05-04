@@ -149,10 +149,10 @@ function validateManifestSemantics(manifest: FrontendManifest, requirements: any
   }
 
   if (uiSpec?.components?.length) {
-    const requiredNames = new Set(
+    const requiredNames = new Set<string>(
       uiSpec.components
         .map((component: { name?: string }) => String(component?.name || '').trim())
-        .filter((name: string): name is string => Boolean(name))
+        .filter((name: string) => name.length > 0)
     );
     for (const requiredName of requiredNames) {
       if (!seenNames.has(requiredName)) {
