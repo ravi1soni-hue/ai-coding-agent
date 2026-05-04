@@ -52,6 +52,13 @@ function normalizeTextValue(value: unknown): string {
   return String(value ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+function getRequirementPages(requirements: Record<string, unknown> | null): string[] {
+  if (!requirements) return [];
+  return asArray<unknown>(requirements.pages)
+    .map(normalizeTextValue)
+    .filter(Boolean);
+}
+
 function getBlueprintComponentNames(blueprint: unknown): string[] {
   const record = asRecord(blueprint);
   if (!record) return [];
@@ -124,7 +131,7 @@ export function validateProjectConsistency(input: {
     if (systemDesign) {
       const frontend = asRecord(systemDesign.frontend);
       const pages = asArray<unknown>(frontend?.pages).map(normalizeTextValue).filter(Boolean);
-      const specPages = asArray<unknown>(asRecord(requirements)?.pages).map(normalizeTextValue).filter(Boolean);
+      const specPages = getRequirementPages(requirements);
       for (const page of specPages) {
         if (!pages.includes(page)) {
           addIssue(issues, 'systemDesign', `missing page from requirements: ${page}`);
