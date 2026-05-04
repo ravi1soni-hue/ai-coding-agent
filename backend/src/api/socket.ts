@@ -207,6 +207,7 @@ export function createSocketServer(server: http.Server) {
       systemDesign: any;
       uiSpec?: any;
       blueprint?: any;
+      projectSpec?: any;
       codeGen: any;
       testResult: any;
       deployment: any;
@@ -234,6 +235,7 @@ export function createSocketServer(server: http.Server) {
       systemDesign: snapshot?.system_design,
       uiSpec: snapshot?.ui_spec,
       blueprint: undefined,
+      projectSpec: undefined,
       codeGen: snapshot?.code_gen,
       testResult: snapshot?.test_result,
       deployment: snapshot?.deployment,
@@ -292,7 +294,9 @@ export function createSocketServer(server: http.Server) {
         blueprint: overrides.blueprint ?? session.blueprint,
         modification: overrides.modification ?? session.modification,
       });
-      return validateProjectSpec(spec);
+      const validated = validateProjectSpec(spec);
+      session.projectSpec = validated;
+      return validated;
     }
 
     function assertConsistencyOrThrow(projectSpec: any, context: { systemDesign?: any; uiSpec?: any; blueprint?: any; codeGen?: any }) {
@@ -535,7 +539,7 @@ export function createSocketServer(server: http.Server) {
             projectId,
           };
 
-          const clarResult = await handleClarification(clarInput);
+          const clarResult = await handleClarification({ ...clarInput, projectSpec: buildProjectSpec() });
 
           if (!clarResult.success) {
             debug('socket:clarification-fallback', { projectId, error: clarResult.error });
@@ -610,6 +614,7 @@ export function createSocketServer(server: http.Server) {
             systemDesign: session.systemDesign,
             requirements: session.requirements,
             modification: session.modification,
+            projectSpec: session.projectSpec || buildProjectSpec({ systemDesign: session.systemDesign }),
             projectId,
             userId: authedUser.id,
           });
@@ -633,6 +638,7 @@ export function createSocketServer(server: http.Server) {
             requirements: session.requirements,
             systemDesign: session.systemDesign,
             uiSpec: session.uiSpec,
+            projectSpec: session.projectSpec || buildProjectSpec({ systemDesign: session.systemDesign, uiSpec: session.uiSpec }),
             projectId,
           });
           if (!bpResult.success) {
@@ -653,6 +659,7 @@ export function createSocketServer(server: http.Server) {
           sendProgress(ws, session, 'codeGen', 'Generating code...', 0);
           const cgResult = await handleCodeGeneration({
             systemDesign: session.systemDesign,
+            projectSpec: session.projectSpec || buildProjectSpec({ systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint }),
             requirements: {
               ...session.requirements,
               clarificationAnswers: Object.keys(clarificationAnswers).length > 0 ? clarificationAnswers : undefined,

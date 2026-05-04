@@ -4,6 +4,7 @@ import { debug, error } from '../../utils/logger';
 
 export interface ClarificationInput {
   requirements: any;
+  projectSpec?: any;
   clarificationAnswers: Record<string, string>;
   askedQuestions: string[];
   modification?: string;
@@ -31,6 +32,7 @@ export async function handleClarification(
       const result = await withTimeout(
         clarificationAgent({
           requirements: input.requirements,
+          projectSpec: input.projectSpec,
           clarificationAnswers: input.clarificationAnswers,
           askedQuestions: input.askedQuestions,
           modification: input.modification,

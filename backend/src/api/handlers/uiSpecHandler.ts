@@ -5,6 +5,7 @@ import { debug, error } from '../../utils/logger';
 export interface UISpecInput {
   systemDesign: any;
   requirements: any;
+  projectSpec?: any;
   modification?: string;
   projectId: string;
   userId: string;
@@ -25,6 +26,7 @@ export async function handleUISpec(input: UISpecInput): Promise<HandlerResult> {
       uiSpecAgent({
         systemDesign: input.systemDesign,
         requirements: input.requirements,
+        projectSpec: input.projectSpec,
         modification: input.modification,
         projectId: input.projectId,
         userId: input.userId,

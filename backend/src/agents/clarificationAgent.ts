@@ -56,33 +56,29 @@ function filterAskedQuestions(questions: string[], askedQuestions: string[], cla
   });
 }
 
-export async function clarificationAgent(input: any): Promise<ClarificationOutput> {
-  debug('clarificationAgent', { input });
-  if (!input?.requirements) throw new Error('Input with requirements required');
+function shouldAskMoreQuestions(requirements: any, projectSpec: any): boolean {
+  const text = JSON.stringify({ requirements, projectSpec }).toLowerCase();
+  const hasFrontendScope = /pricing page|landing page|dashboard|admin|checkout|auth|billing|table|accordion|toggle/.test(text);
+  const hasBackendScope = /backend|api|database|postgres|railway|crud|auth/.test(text);
+  return hasFrontendScope || hasBackendScope;
+}
 
-  const { model, apiKey } = getModelConfigForTask('clarification');
-  const llmProxy = new LLMProxyClient({ apiKey });
-
-  const clarificationAnswers: Record<string, string> = input.clarificationAnswers || {};
-  const askedQuestions: string[] = Array.isArray(input.askedQuestions) ? input.askedQuestions : [];
-  const context: ClarificationContext = {
-    clarificationAnswers,
-    askedQuestions,
-    modification: input.modification,
-    lastQuestion: input.lastQuestion,
-    lastAnswer: input.lastAnswer,
-  };
-
-  const systemPrompt = `You are a senior requirements clarification agent.
+function buildClarificationPrompt(input: any, projectSpec: any): string {
+  return `You are a senior requirements clarification agent.
 
 Goal:
 - Extract the missing product decisions needed to design and generate the app safely.
 - Ask 2 to 3 blocking clarification questions at once when the request is incomplete or ambiguous.
 - Ask fewer questions only if the requirements are already specific enough.
 - Never repeat already asked or already answered questions.
-- Focus on decisions that materially affect UI, data model, navigation, authentication, roles, CRUD flows, integrations, and deployment behavior.
+- Focus on decisions that materially affect UI, data model, navigation, authentication, roles, CRUD flows, integrations, deployment behavior, and any file or API contracts implied by the canonical project spec.
+- Use the canonical project spec as the source of truth when present.
+- Ask questions only if they are necessary to remove ambiguity in the spec.
 - Do not ask generic filler questions.
 - If enough detail exists to proceed, return confirmed=true with an empty questions array.
+
+Canonical project spec (if present):
+${JSON.stringify(projectSpec, null, 2)}
 
 Return ONLY valid JSON with this exact shape:
 {
@@ -96,15 +92,38 @@ Rules:
 - if questions.length > 0 then confirmed must be false
 - if confirmed is true then questions must be []
 - no markdown, no prose`;
+}
+
+export async function clarificationAgent(input: any): Promise<ClarificationOutput> {
+  debug('clarificationAgent', { input });
+  if (!input?.requirements) throw new Error('Input with requirements required');
+
+  const { model, apiKey } = getModelConfigForTask('clarification');
+  const llmProxy = new LLMProxyClient({ apiKey });
+
+  const clarificationAnswers: Record<string, string> = input.clarificationAnswers || {};
+  const askedQuestions: string[] = Array.isArray(input.askedQuestions) ? input.askedQuestions : [];
+  const projectSpec = input.projectSpec || null;
+  const context: ClarificationContext = {
+    clarificationAnswers,
+    askedQuestions,
+    modification: input.modification,
+    lastQuestion: input.lastQuestion,
+    lastAnswer: input.lastAnswer,
+  };
+
+  const systemPrompt = buildClarificationPrompt(input, projectSpec);
 
   const userPrompt = JSON.stringify({
     requirements: input.requirements,
+    projectSpec,
     clarificationAnswers,
     askedQuestions,
     modification: input.modification || null,
     lastQuestion: input.lastQuestion || null,
     lastAnswer: input.lastAnswer || null,
     questionBudget: MAX_QUESTIONS,
+    askMoreQuestions: shouldAskMoreQuestions(input.requirements, projectSpec),
   });
 
   let lastError = 'Unknown clarification error';
@@ -133,13 +152,14 @@ Rules:
         throw new Error('clarificationAgent: confirmed=true cannot include questions');
       }
 
-      const resolvedConfirmed = confirmed && questions.length === 0;
-      const done = resolvedConfirmed || questions.length === 0;
+      const shouldContinue = shouldAskMoreQuestions(input.requirements, projectSpec);
+      const resolvedQuestions = shouldContinue ? questions : [];
+      const resolvedConfirmed = resolvedQuestions.length === 0;
 
       return {
-        questions,
+        questions: resolvedQuestions,
         confirmed: resolvedConfirmed,
-        done,
+        done: resolvedConfirmed,
         context,
       };
     } catch (err) {

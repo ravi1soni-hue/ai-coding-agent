@@ -6,6 +6,7 @@ export interface BlueprintInput {
   requirements: any;
   systemDesign?: any;
   uiSpec?: any;
+  projectSpec?: any;
   modification?: string;
   projectId?: string;
 }
@@ -26,6 +27,7 @@ export async function handleBlueprint(input: BlueprintInput): Promise<BlueprintH
         requirements: input.requirements,
         systemDesign: input.systemDesign,
         uiSpec: input.uiSpec,
+        projectSpec: input.projectSpec,
         modification: input.modification,
         projectId: input.projectId,
       }),

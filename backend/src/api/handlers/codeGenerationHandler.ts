@@ -40,7 +40,7 @@ export async function handleCodeGeneration(
       // PLANNING_COMPLETE / FILE_WRITTEN sequences when the first attempt fails.
       const emitEvent = attempt === 1 ? input.emitEvent : undefined;
       const result = await withTimeout(
-        codeGenerationAgent({
+          codeGenerationAgent({
           systemDesign: input.systemDesign,
           projectSpec: input.projectSpec,
           requirements: input.requirements,
