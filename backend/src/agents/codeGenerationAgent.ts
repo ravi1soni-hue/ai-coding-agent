@@ -799,7 +799,7 @@ async function generateFrontendFiles(
     review: getModelConfigForTask('clarification').model,
   });
   if (!blueprint) throw new Error('codeGenerationAgent: validated blueprint is required before code generation');
-  const missingBlueprintFiles = blueprintMissingFiles(blueprint);
+  const missingBlueprintFiles = blueprintMissingFiles(blueprint, { requirements });
   if (missingBlueprintFiles.length > 0) {
     throw new Error(`Validated blueprint is missing required files: ${missingBlueprintFiles.join(', ')}`);
   }
@@ -1090,7 +1090,7 @@ async function generateBackendFiles(systemDesign: any, requirements: any, projec
 export async function codeGenerationAgent(input: any) {
   debug('codeGenerationAgent:start', { projectId: input?.projectId });
   if (!input) throw new Error('codeGenerationAgent: input required');
-  const rawBlueprint = input.blueprint ? validateProjectBlueprint(input.blueprint) : undefined;
+  const rawBlueprint = input.blueprint ? validateProjectBlueprint(input.blueprint, { requirements: input.requirements }) : undefined;
   if (!rawBlueprint) throw new Error('codeGenerationAgent: validated blueprint is required before code generation');
   const reviewedBlueprint = rawBlueprint.approved?.approved ? rawBlueprint : await reviewerAgent({ blueprint: rawBlueprint, reviewerName: 'Code Generation Gate' });
   if (!reviewedBlueprint.approved?.approved) {

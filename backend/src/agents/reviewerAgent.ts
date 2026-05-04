@@ -14,8 +14,10 @@ function buildApprovalNotes(blueprint: ProjectBlueprint): string[] {
   }
 
   const hasBackendEntrypoints = Array.isArray(blueprint.entrypoints?.backend) && blueprint.entrypoints.backend.length > 0;
-  if (hasBackendEntrypoints && (!Array.isArray(blueprint.backendRoutes) || blueprint.backendRoutes.length === 0)) {
-    notes.push('Blueprint has no backend routes.');
+  const hasBackendRoutes = Array.isArray(blueprint.backendRoutes) && blueprint.backendRoutes.length > 0;
+
+  if (hasBackendEntrypoints && !hasBackendRoutes) {
+    notes.push('Blueprint has backend entrypoints but no backend routes.');
   }
 
   if (!blueprint.invariants.some((rule) => /project_id/i.test(rule))) {

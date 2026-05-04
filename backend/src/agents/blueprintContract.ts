@@ -120,7 +120,11 @@ function validateBlueprintFile(file: BlueprintFile, index: number): BlueprintFil
   };
 }
 
-export function validateProjectBlueprint(raw: unknown): ProjectBlueprint {
+function requiresBackendArchitecture(requirements?: { backend_required?: boolean; auth_required?: boolean }): boolean {
+  return Boolean(requirements?.backend_required || requirements?.auth_required);
+}
+
+export function validateProjectBlueprint(raw: unknown, context?: { requirements?: { backend_required?: boolean; auth_required?: boolean } }): ProjectBlueprint {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error('Blueprint must be a JSON object');
   }
@@ -179,13 +183,21 @@ export function validateProjectBlueprint(raw: unknown): ProjectBlueprint {
       throw new Error(`Blueprint missing required frontend file: ${required}`);
     }
   }
-  for (const required of REQUIRED_BACKEND_FILES) {
-    if (!files.some((file) => file.path === required)) {
-      throw new Error(`Blueprint missing required backend file: ${required}`);
+
+  const backendRequired = requiresBackendArchitecture(context?.requirements);
+  if (backendRequired) {
+    for (const required of REQUIRED_BACKEND_FILES) {
+      if (!files.some((file) => file.path === required)) {
+        throw new Error(`Blueprint missing required backend file: ${required}`);
+      }
     }
   }
 
   const backendRoutes = Array.isArray(blueprint.backendRoutes) ? blueprint.backendRoutes : [];
+
+  if (backendRequired && backendRoutes.length === 0) {
+    throw new Error('backendRoutes cannot be empty when backend is required');
+  }
 
   for (let i = 0; i < backendRoutes.length; i += 1) {
     const route = backendRoutes[i] as Record<string, unknown>;
@@ -251,14 +263,20 @@ export function isBlueprintFileEntry(filePath: string): boolean {
   return REQUIRED_BUILD_FILES.has(normalized) || REQUIRED_BACKEND_FILES.has(normalized) || normalized.startsWith('src/components/') || normalized.startsWith('backend/routes/');
 }
 
-export function blueprintMissingFiles(blueprint: ProjectBlueprint): string[] {
+export function blueprintMissingFiles(
+  blueprint: ProjectBlueprint,
+  options?: { requirements?: { backend_required?: boolean; auth_required?: boolean } }
+): string[] {
   const filePaths = new Set(blueprint.files.map((file) => file.path));
   const missing: string[] = [];
   for (const required of REQUIRED_BUILD_FILES) {
     if (!filePaths.has(required)) missing.push(required);
   }
-  for (const required of REQUIRED_BACKEND_FILES) {
-    if (!filePaths.has(required)) missing.push(required);
+  const backendRequired = requiresBackendArchitecture(options?.requirements);
+  if (backendRequired) {
+    for (const required of REQUIRED_BACKEND_FILES) {
+      if (!filePaths.has(required)) missing.push(required);
+    }
   }
   return missing;
 }
