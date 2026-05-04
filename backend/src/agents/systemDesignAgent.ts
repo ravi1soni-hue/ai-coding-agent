@@ -9,10 +9,14 @@ export async function systemDesignAgent(input: any) {
     const { model, apiKey } = getModelConfigForTask('core_reasoning');
     const llmProxy = new LLMProxyClient({ apiKey });
 
-    const backendRequired = Boolean(input?.requirements?.backend_required ?? input?.backend_required);
-    const authRequired = Boolean(input?.requirements?.auth_required ?? input?.auth_required);
+    const projectSpec = input.projectSpec || null;
+    const backendRequired = Boolean(input?.requirements?.backend_required ?? input?.backend_required ?? projectSpec?.requirements?.backend_required);
+    const authRequired = Boolean(input?.requirements?.auth_required ?? input?.auth_required ?? projectSpec?.requirements?.auth_required);
 
     const systemPrompt = `You are a software architect. Design a complete technical architecture for the given requirements.
+
+Canonical project spec (authoritative, if present):
+${JSON.stringify(projectSpec, null, 2)}
 
 Respond ONLY in JSON with this exact shape (no markdown fences):
 {
@@ -64,6 +68,7 @@ RULES:
 
     const userInput = JSON.stringify({
       requirements: input.requirements || input,
+      projectSpec,
       backend_required: backendRequired,
       auth_required: authRequired,
       modification: input.modification || null,

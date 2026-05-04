@@ -113,7 +113,7 @@ function containsPlaceholderText(value: string): boolean {
   return /(?:\bTODO\b|\bplaceholder\b|\breplace\b|\bgeneric text\b)/i.test(value);
 }
 
-function validateManifestSemantics(manifest: FrontendManifest, requirements: any): void {
+function validateManifestSemantics(manifest: FrontendManifest, requirements: any, projectSpec?: any): void {
   const components = Array.isArray(manifest.components) ? manifest.components : [];
   if (components.length === 0) throw new Error('frontendManifest: components array is empty');
   for (const component of components) {
@@ -133,6 +133,9 @@ function validateManifestSemantics(manifest: FrontendManifest, requirements: any
     }
   }
   const appName = String(manifest.appName || requirements?.userMessage || '').trim();
+  if (projectSpec?.requirements?.website_type && !appName) {
+    throw new Error('frontendManifest: invalid appName from projectSpec');
+  }
   if (!appName || containsPlaceholderText(appName)) {
     throw new Error('frontendManifest: invalid appName');
   }
@@ -694,14 +697,15 @@ async function generateFrontendFiles(
   events?: EventSink,
   manifestOut?: { value?: ProjectManifest },
   uiSpec?: any,
-  blueprint?: ProjectBlueprint
+  blueprint?: ProjectBlueprint,
+  projectSpec?: any
 ): Promise<GeneratedFile[]> {
   const partial = new Map<string, string>();
   const metrics: GenerationMetrics = { fallbackCount: 0, fallbackReasons: [] };
   let manifest: FrontendManifest;
   try {
     manifest = await generateFrontendManifest(systemDesign, requirements, modification, llmProxy, model);
-    validateManifestSemantics(manifest, requirements);
+    validateManifestSemantics(manifest, requirements, projectSpec);
   } catch (err) {
     metrics.fallbackCount += 1;
     metrics.fallbackReasons.push(`frontend-manifest:${String((err as any)?.message || err)}`);
@@ -1034,7 +1038,7 @@ export async function codeGenerationAgent(input: any) {
   debug('codeGenerationAgent:parallel-start', { projectId, hasBackend, hasUISpec: !!uiSpec });
   const manifestOut: { value?: ProjectManifest } = {};
   const [frontendResult, backendResult] = await Promise.allSettled([
-    generateFrontendFiles(input.systemDesign, input.requirements, input.modification, llmProxy, model, events, manifestOut, uiSpec, blueprint),
+    generateFrontendFiles(input.systemDesign, input.requirements, input.modification, llmProxy, model, events, manifestOut, uiSpec, blueprint, input.projectSpec),
     hasBackend ? generateBackendFiles(input.systemDesign, input.requirements, projectId, input.modification, llmProxy, model, events, blueprint) : Promise.resolve([] as GeneratedFile[]),
   ]);
 

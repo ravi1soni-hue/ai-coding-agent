@@ -166,6 +166,7 @@ export async function uiSpecAgent(input: any): Promise<UISpec> {
     if (!input || !input.systemDesign) {
       throw new Error('System design required as input');
     }
+    const projectSpec = input.projectSpec || null;
 
     const { model, apiKey } = getModelConfigForTask('code_generation');
     const llmProxy = new LLMProxyClient({ apiKey });
@@ -175,10 +176,16 @@ export async function uiSpecAgent(input: any): Promise<UISpec> {
     const modification = input.modification || null;
 
     // Step 1: Generate component interfaces
-    const componentInterfacePrompt = `You are a React component architect. Based on the system design and requirements, define detailed component interfaces.
+    const componentInterfacePrompt = `You are a React component architect. Based on the system design, canonical project spec, and requirements, define detailed component interfaces.
+
+Canonical project spec (authoritative, if present):
+${JSON.stringify(projectSpec, null, 2)}
 
 System Design:
 ${JSON.stringify(systemDesign, null, 2)}
+
+Canonical Project Spec:
+${JSON.stringify(projectSpec, null, 2)}
 
 Requirements:
 ${JSON.stringify(requirements, null, 2)}
@@ -238,7 +245,10 @@ RULES:
     debug('uiSpecAgent:componentInterfaces', { components });
 
     // Step 2: Generate data flow
-    const dataFlowPrompt = `You are a React data architecture expert. Define the data flow between components.
+    const dataFlowPrompt = `You are a React data architecture expert. Define the data flow between components using the canonical project spec as the source of truth.
+
+Canonical project spec (authoritative, if present):
+${JSON.stringify(projectSpec, null, 2)}
 
 Components:
 ${JSON.stringify(components.map(c => ({ name: c.name, purpose: c.purpose, props: Object.keys(c.props) })), null, 2)}

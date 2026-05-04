@@ -3,6 +3,7 @@ import { withTimeout } from '../../utils/timeout';
 import { debug, error } from '../../utils/logger';
 
 export interface SystemDesignInput {
+  projectSpec?: any;
   requirements: any;
   projectId: string;
   modification?: string;
@@ -22,6 +23,7 @@ export async function handleSystemDesign(input: SystemDesignInput): Promise<Hand
   try {
     const agentInput = {
       requirements: input.requirements,
+      projectSpec: input.projectSpec,
       modification: input.modification,
     };
     const result = await withTimeout(

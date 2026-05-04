@@ -4,6 +4,7 @@ import { debug, error, warn } from '../../utils/logger';
 
 export interface CodeGenerationInput {
   systemDesign: any;
+  projectSpec?: any;
   requirements: any;
   blueprint?: any;
   uiSpec?: any;
@@ -41,6 +42,7 @@ export async function handleCodeGeneration(
       const result = await withTimeout(
         codeGenerationAgent({
           systemDesign: input.systemDesign,
+          projectSpec: input.projectSpec,
           requirements: input.requirements,
           blueprint: input.blueprint,
           uiSpec: input.uiSpec,

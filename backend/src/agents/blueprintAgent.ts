@@ -7,6 +7,7 @@ type BlueprintInput = {
   requirements: any;
   systemDesign?: any;
   uiSpec?: any;
+  projectSpec?: any;
   projectId?: string;
   modification?: string;
 };
@@ -20,7 +21,11 @@ const SYSTEM_PROMPT = `You are a principal full-stack architect. Return ONLY val
 Rules:
 - The blueprint must be machine-validatable with no prose, markdown fences, or comments outside the JSON.
 - Every backend route must set requiresProjectId to true and describe project_id filtering.
-- Include exact file paths, purposes, dependencies, entrypoints, navigation, state, invariants, and backend routes.
+- Include exact file paths, purposes, dependencies, entrypoints, navigation, state, invariants, backend routes, and UI spec component wiring.
+- Treat projectSpec as authoritative if present. Do not invent files, routes, components, or pages outside of projectSpec, systemDesign, or uiSpec.
+- If uiSpec.components is provided, every component must be represented in either navigation.routes, files, or as an explicit dependency chain from App.
+- Always include App in navigation.routes as the root entry component when uiSpec is present.
+- Reconcile the blueprint against projectSpec before returning JSON.
 
 Required shape (all fields are mandatory):
 {
@@ -114,8 +119,10 @@ export async function blueprintAgent(input: BlueprintInput): Promise<ProjectBlue
   const { model, apiKey } = getModelConfigForTask('core_reasoning');
   const llmProxy = new LLMProxyClient({ apiKey });
 
+  const projectSpec = input.projectSpec || null;
   const userContent = JSON.stringify({
     requirements: input.requirements,
+    projectSpec,
     systemDesign: input.systemDesign || null,
     uiSpec: input.uiSpec || null,
     modification: input.modification || null,
@@ -155,7 +162,6 @@ export async function blueprintAgent(input: BlueprintInput): Promise<ProjectBlue
     logError('blueprintAgent:validation-error', { attempt, error: lastError });
 
     if (attempt < MAX_RETRIES) {
-      // Feed the broken output and exact error back to the LLM so it can self-correct
       messages.push({ role: 'assistant', content: raw });
       messages.push({
         role: 'user',

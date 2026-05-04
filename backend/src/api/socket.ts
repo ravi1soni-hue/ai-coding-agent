@@ -31,6 +31,8 @@ import {
   upsertProjectBlackboard,
 } from '../db/projectStore';
 import { materializeProjectWorkspace } from '../factory/projectFactory';
+import { consolidateProjectSpec, validateProjectSpec } from '../agents/projectSpec';
+import { formatConsistencyIssues, validateProjectConsistency } from '../agents/projectConsistency';
 import { config } from '../config/env';
 import { debug, error as logError } from '../utils/logger';
 import { toClientErrorMessage } from '../utils/errors';
@@ -252,6 +254,39 @@ export function createSocketServer(server: http.Server) {
         ? [...session.clarifications.questions]
         : [];
     let pendingClarificationIndex = 0;
+
+    function buildProjectSpec(overrides: { systemDesign?: any; uiSpec?: any; blueprint?: any; modification?: string; confirmations?: any } = {}) {
+      if (!session.requirements || !session.clarifications) {
+        return undefined;
+      }
+      const spec = consolidateProjectSpec({
+        projectId,
+        userMessage: session.requirements?.userMessage || '',
+        requirements: session.requirements,
+        clarifications: session.clarifications,
+        clarificationAnswers,
+        systemDesign: overrides.systemDesign ?? session.systemDesign,
+        uiSpec: overrides.uiSpec ?? session.uiSpec,
+        blueprint: overrides.blueprint ?? session.blueprint,
+        modification: overrides.modification ?? session.modification,
+      });
+      return validateProjectSpec(spec);
+    }
+
+    function assertConsistencyOrThrow(projectSpec: any, context: { systemDesign?: any; uiSpec?: any; blueprint?: any; codeGen?: any }) {
+      const report = validateProjectConsistency({
+        projectSpec,
+        requirementAnalysis: session.requirements,
+        clarifications: session.clarifications,
+        systemDesign: context.systemDesign ?? session.systemDesign,
+        uiSpec: context.uiSpec ?? session.uiSpec,
+        blueprint: context.blueprint ?? session.blueprint,
+        codeGen: context.codeGen ?? session.codeGen,
+      });
+      if (!report.ok) {
+        throw new Error(`Cross-stage consistency validation failed:\n${formatConsistencyIssues(report)}`);
+      }
+    }
 
     // -----------------------------------------------------------------------
     // Helper: rematerialize code into workspace
@@ -527,7 +562,8 @@ export function createSocketServer(server: http.Server) {
         // ── Stage 4: System Design ─────────────────────────────────────────
         if (session.step === 'systemDesign') {
           sendProgress(ws, session, 'systemDesign', 'Designing system architecture...');
-          const sdResult = await handleSystemDesign({ requirements: session.requirements, projectId });
+          const projectSpec = buildProjectSpec();
+          const sdResult = await handleSystemDesign({ requirements: session.requirements, projectSpec, projectId });
           if (!sdResult.success) {
             session.step = 'systemDesign'; // stay, allow retry
             sendError(ws, session, toClientErrorMessage(sdResult.error, 'System design failed. Reply to retry.'));
@@ -732,7 +768,8 @@ export function createSocketServer(server: http.Server) {
 
         // Step 2: Re-run system design if modification is architectural
         sendProgress(ws, session, 'systemDesign', 'Re-evaluating architecture for your changes...');
-        const sdResult = await handleSystemDesign({ requirements: session.requirements, modification, projectId });
+        const projectSpec = buildProjectSpec({ modification });
+        const sdResult = await handleSystemDesign({ requirements: session.requirements, projectSpec, modification, projectId });
         if (sdResult.success) {
           session.systemDesign = sdResult.data;
         }
