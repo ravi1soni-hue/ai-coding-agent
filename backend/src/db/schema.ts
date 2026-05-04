@@ -50,8 +50,6 @@ export async function ensureCoreTables() {
     )
   `);
 
-  await pgQuery(`CREATE UNIQUE INDEX IF NOT EXISTS idx_project_sessions_one_active_revision ON project_sessions(active_revision_id) WHERE active_revision_id IS NOT NULL`);
-
   await pgQuery(`
     CREATE TABLE IF NOT EXISTS project_blackboards (
       id TEXT PRIMARY KEY,
