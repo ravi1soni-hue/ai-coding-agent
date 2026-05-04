@@ -55,7 +55,6 @@ export function validateProjectSpec(spec: ProjectSpec): ProjectSpec {
   if (!spec.requirements?.website_type) errors.push('requirements.website_type is required');
   if (!Array.isArray(spec.requirements?.pages) || spec.requirements.pages.length === 0) errors.push('requirements.pages cannot be empty');
   if (!spec.clarifications || typeof spec.clarifications !== 'object') errors.push('clarifications are required');
-  if (!spec.clarifications.confirmed) errors.push('clarifications must be confirmed before code generation');
 
   if (spec.requirements?.backend_required && !spec.systemDesign) {
     errors.push('systemDesign is required when backend_required is true');
@@ -70,7 +69,7 @@ export function validateProjectSpec(spec: ProjectSpec): ProjectSpec {
   }
 
   const hasAnyClarification = Object.keys(spec.clarificationAnswers || {}).length > 0;
-  if (spec.clarifications?.confirmed === false && !hasAnyClarification) {
+  if (spec.clarifications?.confirmed === false && spec.askedQuestions.length > 0 && !hasAnyClarification) {
     errors.push('clarification answers are required when clarification stage is not confirmed');
   }
 
