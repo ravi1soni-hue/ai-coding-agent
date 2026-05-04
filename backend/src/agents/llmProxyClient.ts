@@ -57,6 +57,38 @@ export class LLMProxyClient {
     return message.includes('404') && message.includes('model not found');
   }
 
+  private parseResponseBody(raw: string, response: Response, context: string): { data: any; isHtml: boolean; snippet: string } {
+    const contentType = response.headers.get('content-type');
+    const trimmed = raw.trim();
+    const lower = trimmed.toLowerCase();
+    const looksLikeHtml =
+      /text\/html|application\/xhtml\+xml/i.test(contentType || '') ||
+      lower.startsWith('<') ||
+      lower.includes('<!doctype html') ||
+      lower.includes('<html');
+
+    const snippet = raw.replace(/\s+/g, ' ').slice(0, 240);
+
+    if (looksLikeHtml) {
+      throw new Error(this.describeHtmlResponse(response.status, response.statusText, raw, contentType));
+    }
+
+    try {
+      return { data: JSON.parse(raw), isHtml: looksLikeHtml, snippet };
+    } catch (parseErr) {
+      this.log(`${context} invalid JSON response`, {
+        status: response.status,
+        statusText: response.statusText,
+        contentType,
+        isHtmlResponse: looksLikeHtml,
+        raw: raw.slice(0, 800),
+        snippet,
+        parseError: String(parseErr),
+      });
+      throw new Error(`LLM Proxy ${context} returned invalid JSON response (${response.status} ${response.statusText}). ${snippet}`);
+    }
+  }
+
 
 
   private formatHttpError(operation: string, status: number, statusText?: string, detail?: string): string {
@@ -155,6 +187,7 @@ export class LLMProxyClient {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
+              'Accept': 'application/json',
               'X-API-KEY': this.apiKey,
             },
             body: JSON.stringify(requestPayload),
@@ -164,34 +197,20 @@ export class LLMProxyClient {
           const raw = await response.text();
           let data: any;
           try {
-            data = JSON.parse(raw);
-          } catch (parseErr) {
-            const snippet = raw.replace(/\s+/g, ' ').slice(0, 240);
-            const isHtml = raw.trim().toLowerCase().startsWith('<');
-            const contentType = response.headers.get('content-type');
-            this.log('chatCompletion invalid JSON response', {
-              status: response.status,
-              statusText: response.statusText,
-              model: modelCandidate,
-              contentType,
-              isHtmlResponse: isHtml,
-              raw: raw.slice(0, 800),
-              snippet,
-              parseError: String(parseErr),
-              chatUrl: this.chatUrl,
-              apiKeyLength: this.apiKey?.length || 0,
-            });
-            if (!response.ok || isHtml) {
-              if (this.shouldRetryStatus(response.status) && attempt < 2) {
-                await this.sleep(750 * (attempt + 1));
-                continue;
-              }
-              if (isHtml) {
-                throw new Error(this.describeHtmlResponse(response.status, response.statusText, raw, contentType));
-              }
-              throw new Error(`LLM Proxy chatCompletion returned invalid non-JSON response (${response.status} ${response.statusText}). ${snippet}`);
+            ({ data } = this.parseResponseBody(raw, response, 'chatCompletion'));
+          } catch (parseError: any) {
+            if (!response.ok && this.shouldRetryStatus(response.status) && attempt < 2) {
+              this.log('chatCompletion retrying after invalid upstream response', {
+                modelCandidate,
+                attempt: attempt + 1,
+                status: response.status,
+                statusText: response.statusText,
+                contentType: response.headers.get('content-type'),
+              });
+              await this.sleep(750 * (attempt + 1));
+              continue;
             }
-            throw new Error(`LLM Proxy returned invalid JSON response: ${snippet}`);
+            throw parseError;
           }
           this.log('chatCompletion response', { status: response.status, model: modelCandidate, data });
           if (!response.ok) {
@@ -243,7 +262,13 @@ export class LLMProxyClient {
         },
         body: JSON.stringify({ texts, dimensions }),
       });
-      const data = await response.json();
+      const raw = await response.text();
+      let data: any;
+      try {
+        ({ data } = this.parseResponseBody(raw, response, 'embedding'));
+      } catch (parseError) {
+        throw parseError;
+      }
       this.log('embedding response', { status: response.status, data });
       if (!response.ok) {
         this.log('embedding error', { status: response.status, data });
