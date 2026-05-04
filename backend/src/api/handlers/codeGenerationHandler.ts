@@ -5,6 +5,7 @@ import { debug, error } from '../../utils/logger';
 export interface CodeGenerationInput {
   systemDesign: any;
   requirements: any;
+  blueprint?: any;
   uiSpec?: any;
   modification?: string;
   context?: any;
@@ -31,6 +32,7 @@ export async function handleCodeGeneration(
       codeGenerationAgent({
         systemDesign: input.systemDesign,
         requirements: input.requirements,
+        blueprint: input.blueprint,
         modification: input.modification,
         context: input.context,
         projectId: input.projectId,

@@ -6,6 +6,7 @@ import { handleClarification } from './handlers/clarificationHandler';
 import { handleConfirmation } from './handlers/confirmationHandler';
 import { handleSystemDesign } from './handlers/systemDesignHandler';
 import { handleUISpec } from './handlers/uiSpecHandler';
+import { handleBlueprint } from './handlers/blueprintHandler';
 import { handleCodeGeneration } from './handlers/codeGenerationHandler';
 import { handleTestFix } from './handlers/testFixHandler';
 import { handleDeployment } from './handlers/deploymentHandler';
@@ -48,8 +49,9 @@ export function createSocketServer(server: http.Server) {
     clarification: 0.10,
     confirmation: 0.05,
     systemDesign: 0.08,
-    uiSpec: 0.06,
-    codeGen: 0.28,
+    uiSpec: 0.05,
+    blueprint: 0.06,
+    codeGen: 0.22,
     testFix: 0.18,
     deploy: 0.17,
     codeGen_modification: 0.20,
@@ -178,6 +180,7 @@ export function createSocketServer(server: http.Server) {
       confirmation: any;
       systemDesign: any;
       uiSpec?: any;
+      blueprint?: any;
       codeGen: any;
       testResult: any;
       deployment: any;
@@ -204,6 +207,7 @@ export function createSocketServer(server: http.Server) {
       confirmation: snapshot?.confirmation,
       systemDesign: snapshot?.system_design,
       uiSpec: snapshot?.ui_spec,
+      blueprint: undefined,
       codeGen: snapshot?.code_gen,
       testResult: snapshot?.test_result,
       deployment: snapshot?.deployment,
@@ -334,6 +338,7 @@ export function createSocketServer(server: http.Server) {
               ...session.requirements,
               clarificationAnswers: Object.keys(clarificationAnswers).length > 0 ? clarificationAnswers : undefined,
             },
+            blueprint: session.blueprint,
             modification: `Fix these build errors and produce corrected complete files:\n${normalizedLogs.slice(-2000)}`,
             projectId,
             userId: authedUser.id,
@@ -550,7 +555,28 @@ export function createSocketServer(server: http.Server) {
           await persistBlackboardState();
           session.stepRetries['uiSpec'] = 0;
           debug('socket:uiSpec', { projectId, componentCount: session.uiSpec?.components?.length });
-          ws.send(JSON.stringify({ type: 'stream', token: 'UI structure designed! Generating your code now...' }));
+          ws.send(JSON.stringify({ type: 'stream', token: 'UI structure designed! Planning file architecture...' }));
+          session.step = 'blueprint';
+        }
+
+        // ── Stage 4.75: Blueprint ──────────────────────────────────────────
+        if (session.step === 'blueprint') {
+          sendProgress(ws, session, 'blueprint', 'Planning file architecture and API contracts...');
+          const bpResult = await handleBlueprint({
+            requirements: session.requirements,
+            systemDesign: session.systemDesign,
+            uiSpec: session.uiSpec,
+            projectId,
+          });
+          if (!bpResult.success) {
+            session.step = 'blueprint';
+            sendError(ws, session, toClientErrorMessage(bpResult.error, 'Blueprint generation failed. Reply to retry.'));
+            return;
+          }
+          session.blueprint = bpResult.data;
+          session.stepRetries['blueprint'] = 0;
+          debug('socket:blueprint', { projectId, title: session.blueprint?.title, fileCount: session.blueprint?.files?.length });
+          ws.send(JSON.stringify({ type: 'stream', token: 'Architecture blueprint ready! Generating your code now...' }));
           session.step = 'codeGen';
         }
 
@@ -563,6 +589,7 @@ export function createSocketServer(server: http.Server) {
               ...session.requirements,
               clarificationAnswers: Object.keys(clarificationAnswers).length > 0 ? clarificationAnswers : undefined,
             },
+            blueprint: session.blueprint,
             uiSpec: session.uiSpec,
             projectId,
             userId: authedUser.id,
@@ -719,6 +746,19 @@ export function createSocketServer(server: http.Server) {
           session.uiSpec = uiSpecResult.data;
         }
 
+        // Step 2.75: Re-generate blueprint for modifications
+        sendProgress(ws, session, 'blueprint', 'Re-planning architecture for your changes...');
+        const bpModResult = await handleBlueprint({
+          requirements: session.requirements,
+          systemDesign: session.systemDesign,
+          uiSpec: session.uiSpec,
+          modification,
+          projectId,
+        });
+        if (bpModResult.success) {
+          session.blueprint = bpModResult.data;
+        }
+
         session.step = 'codeGen_modification';
 
         // Step 3: Code generation
@@ -726,6 +766,7 @@ export function createSocketServer(server: http.Server) {
         const cgResult = await handleCodeGeneration({
           systemDesign: session.systemDesign,
           requirements: session.requirements,
+          blueprint: session.blueprint,
           modification,
           uiSpec: session.uiSpec,
           context: session.modificationContext,
@@ -917,6 +958,8 @@ export function createSocketServer(server: http.Server) {
           session.clarifications = undefined;
           session.confirmation = undefined;
           session.systemDesign = undefined;
+          session.uiSpec = undefined;
+          session.blueprint = undefined;
           session.codeGen = undefined;
           session.testResult = undefined;
           session.deployment = undefined;
