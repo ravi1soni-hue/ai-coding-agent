@@ -279,7 +279,7 @@ export function createSocketServer(server: http.Server) {
         : [];
     let pendingClarificationIndex = 0;
 
-    function buildProjectSpec(overrides: { systemDesign?: any; uiSpec?: any; blueprint?: any; modification?: string; confirmations?: any } = {}) {
+    function buildProjectSpec(overrides: { systemDesign?: any; uiSpec?: any; blueprint?: any; modification?: string; confirmations?: any } = {}, options?: { partial?: boolean }) {
       if (!session.requirements || !session.clarifications) {
         return undefined;
       }
@@ -294,7 +294,7 @@ export function createSocketServer(server: http.Server) {
         blueprint: overrides.blueprint ?? session.blueprint,
         modification: overrides.modification ?? session.modification,
       });
-      const validated = validateProjectSpec(spec);
+      const validated = validateProjectSpec(spec, options);
       session.projectSpec = validated;
       return validated;
     }
@@ -609,7 +609,7 @@ export function createSocketServer(server: http.Server) {
         } else {
           session.systemDesign = buildFrontendOnlySystemDesign(session.requirements);
         }
-        const specAfterSystemDesign = buildProjectSpec({ systemDesign: session.systemDesign });
+        const specAfterSystemDesign = buildProjectSpec({ systemDesign: session.systemDesign }, { partial: true });
         if (specAfterSystemDesign) {
           assertConsistencyOrThrow(specAfterSystemDesign, { systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint, codeGen: session.codeGen });
         }
@@ -627,7 +627,7 @@ export function createSocketServer(server: http.Server) {
             systemDesign: session.systemDesign,
             requirements: session.requirements,
             modification: session.modification,
-            projectSpec: session.projectSpec || buildProjectSpec({ systemDesign: session.systemDesign }),
+            projectSpec: session.projectSpec || buildProjectSpec({ systemDesign: session.systemDesign }, { partial: true }),
             projectId,
             userId: authedUser.id,
           });
@@ -637,7 +637,7 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.uiSpec = uiSpecResult.data;
-          const specAfterUiSpec = buildProjectSpec({ systemDesign: session.systemDesign, uiSpec: session.uiSpec });
+          const specAfterUiSpec = buildProjectSpec({ systemDesign: session.systemDesign, uiSpec: session.uiSpec }, { partial: true });
           if (specAfterUiSpec) {
             assertConsistencyOrThrow(specAfterUiSpec, { systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint, codeGen: session.codeGen });
           }
@@ -655,7 +655,7 @@ export function createSocketServer(server: http.Server) {
             requirements: session.requirements,
             systemDesign: session.systemDesign,
             uiSpec: session.uiSpec,
-            projectSpec: session.projectSpec || buildProjectSpec({ systemDesign: session.systemDesign, uiSpec: session.uiSpec }),
+            projectSpec: session.projectSpec || buildProjectSpec({ systemDesign: session.systemDesign, uiSpec: session.uiSpec }, { partial: true }),
             projectId,
           });
           if (!bpResult.success) {
@@ -826,7 +826,7 @@ export function createSocketServer(server: http.Server) {
 
         // Step 2: Re-run system design if modification is architectural
         sendProgress(ws, session, 'systemDesign', 'Re-evaluating architecture for your changes...');
-        const projectSpec = buildProjectSpec({ modification });
+        const projectSpec = buildProjectSpec({ modification }, { partial: true });
         const sdResult = await handleSystemDesign({ requirements: session.requirements, projectSpec, modification, projectId });
         if (sdResult.success) {
           session.systemDesign = sdResult.data;

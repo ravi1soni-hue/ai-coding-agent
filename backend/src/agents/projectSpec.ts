@@ -48,7 +48,7 @@ export function consolidateProjectSpec(input: {
   };
 }
 
-export function validateProjectSpec(spec: ProjectSpec): ProjectSpec {
+export function validateProjectSpec(spec: ProjectSpec, options?: { partial?: boolean }): ProjectSpec {
   const errors: string[] = [];
 
   if (!spec.userMessage?.trim()) errors.push('userMessage is required');
@@ -60,12 +60,17 @@ export function validateProjectSpec(spec: ProjectSpec): ProjectSpec {
     errors.push('systemDesign is required when backend_required is true');
   }
 
-  if (spec.systemDesign && !spec.uiSpec) {
-    errors.push('uiSpec is required after systemDesign');
-  }
+  // Sequential stage checks are only enforced for complete (non-partial) specs.
+  // Intermediate pipeline builds pass partial=true to avoid premature failures before
+  // downstream stages (uiSpec, blueprint) have been generated.
+  if (!options?.partial) {
+    if (spec.systemDesign && !spec.uiSpec) {
+      errors.push('uiSpec is required after systemDesign');
+    }
 
-  if (spec.uiSpec && !spec.blueprint) {
-    errors.push('blueprint is required after uiSpec');
+    if (spec.uiSpec && !spec.blueprint) {
+      errors.push('blueprint is required after uiSpec');
+    }
   }
 
   const hasAnyClarification = Object.keys(spec.clarificationAnswers || {}).length > 0;
