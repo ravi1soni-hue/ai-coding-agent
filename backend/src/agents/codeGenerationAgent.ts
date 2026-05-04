@@ -1116,16 +1116,10 @@ export async function codeGenerationAgent(input: any) {
     events?.emit({ type: 'AGENT_THINKING', message: 'App.jsx appears to be a stub — repairing without restarting...' });
     try {
       const frontendManifest = fallbackFrontendManifest(input.requirements);
-      const repairedApp = await generateFrontendApp(frontendManifest, input.requirements, input.systemDesign, input.modification, repairComponents, llmProxy, model, input.uiSpec);
-      validateAppImports(repairedApp.content, repairComponents, blueprint);
-      fileMap.set('src/App.jsx', repairedApp.content);
       const repairedStubApp = await generateFrontendApp(frontendManifest, input.requirements, input.systemDesign, input.modification, repairComponents, llmProxy, model, input.uiSpec);
       validateAppImports(repairedStubApp.content, repairComponents, blueprint);
       fileMap.set('src/App.jsx', repairedStubApp.content);
       events?.emit({ type: 'FILE_WRITTEN', filePath: 'src/App.jsx', message: 'Repaired stub App.jsx', payload: { path: 'src/App.jsx', content: repairedStubApp.content } });
-      } catch (err) {
-          failClosed(`Repair of src/App.jsx failed: ${(err as Error).message}`);
-        }
     } catch (err) {
       failClosed(`Stub App.jsx repair failed: ${(err as Error).message}`);
     }
