@@ -109,8 +109,8 @@ export function validateProjectConsistency(input: {
 
   if (systemDesign) {
     const frontend = asRecord(systemDesign.frontend);
-    const pages = asArray<string>(frontend?.pages).map((page) => page.trim()).filter(Boolean);
-    const specPages = asArray<string>(asRecord(requirements)?.pages).map((page) => page.trim()).filter(Boolean);
+    const pages = asArray<unknown>(frontend?.pages).map((page) => String(page ?? '').trim()).filter(Boolean);
+    const specPages = asArray<unknown>(asRecord(requirements)?.pages).map((page) => String(page ?? '').trim()).filter(Boolean);
     for (const page of specPages) {
       if (!pages.includes(page)) {
         addIssue(issues, 'systemDesign', `missing page from requirements: ${page}`);
