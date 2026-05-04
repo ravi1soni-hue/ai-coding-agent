@@ -21,7 +21,7 @@ export interface HandlerResult<T = any> {
   fallback?: any;
 }
 
-const TIMEOUT_MS = 300_000;
+const TIMEOUT_MS = 600_000;
 // Keep to 2: targeted failures are repaired inside codeGenerationAgent itself.
 // This outer retry only covers true unexpected crashes (network blip, OOM, etc.).
 const MAX_ATTEMPTS = 2;

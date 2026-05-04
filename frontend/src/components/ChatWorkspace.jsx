@@ -53,6 +53,9 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
   const [copyState, setCopyState] = useState('Copy logs');
   const [generatedFiles, setGeneratedFiles] = useState([]);
   const [viewerFile, setViewerFile] = useState(null);
+  const [currentActivity, setCurrentActivity] = useState('');
+  const [pipelineActive, setPipelineActive] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   const wsRef = useRef(null);
   const msgEndRef = useRef(null);
@@ -67,6 +70,8 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
     setStageStatus('');
     setStatusText('Initializing');
     setInput('');
+    setCurrentActivity('');
+    setElapsedSeconds(0);
 
     async function loadProjectEvents() {
       if (!projectId) return;
@@ -97,6 +102,17 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
     const options = { weekday: 'long', month: 'long', day: 'numeric' };
     setTodayText(new Date().toLocaleDateString('en-US', options));
   }, []);
+
+  useEffect(() => {
+    if (!pipelineActive) {
+      setElapsedSeconds(0);
+      return undefined;
+    }
+    const interval = setInterval(() => {
+      setElapsedSeconds((s) => s + 1);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [pipelineActive]);
 
   function pushMessage(role, text) {
     setMessages((prev) => [...prev, { role, text }]);
@@ -144,19 +160,24 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
         case 'info':
           pushMessage('system', payload.message || 'Info received.');
           break;
-        case 'progress':
-          setProgress(Math.max(0, Math.min(1, Number(payload.progress) || 0)));
+        case 'progress': {
+          const p = Math.max(0, Math.min(1, Number(payload.progress) || 0));
+          setProgress(p);
           setStatusText(payload.status || 'Working');
           if (typeof payload.stageProgress === 'number') {
             setStageStatus(`${payload.stage || 'Stage'} ${Math.round(payload.stageProgress * 100)}%`);
           } else {
             setStageStatus('');
           }
+          if (p > 0 && p < 1) setPipelineActive(true);
+          else if (p >= 1) setPipelineActive(false);
           break;
+        }
         case 'stream':
           pushMessage('assistant', payload.token || '');
           break;
         case 'AGENT_THINKING':
+          setCurrentActivity(payload.message || 'Agent thinking...');
           pushMessage('system', payload.message || 'Agent thinking...');
           break;
         case 'FILE_WRITTEN':
@@ -164,6 +185,7 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
           if (payload.payload?.path && payload.payload?.content) {
             upsertGeneratedFile({ path: payload.payload.path, content: payload.payload.content });
           }
+          if (payload.filePath) setCurrentActivity(`Writing ${payload.filePath}...`);
           pushMessage(
             'system',
             payload.filePath
@@ -183,6 +205,8 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
         case 'done':
           setProgress(1);
           setStatusText('Complete');
+          setPipelineActive(false);
+          setCurrentActivity('');
           pushMessage('system', payload.message || 'Flow finished.');
           if (payload.frontend_url) pushMessage('system', `🔗 Your deployed app: ${payload.frontend_url}`);
           if (payload.backend_url) pushMessage('system', `🛠 Backend URL: ${payload.backend_url}`);
@@ -285,9 +309,10 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
           <div className="socketStatus socketStatusCentered">
             <span className={`socketChip socket-${connection}`}>{connection}</span>
             <span className="socketText" title={statusText}>{statusText}</span>
-            <span className="socketPct">{Math.round(progress * 100)}%</span>
+            <span className="socketPct">{Math.round(progress * 100)}%{pipelineActive && elapsedSeconds > 0 ? ` • ${elapsedSeconds}s` : ''}</span>
           </div>
           {stageStatus ? <div className="socketSubStatus" title={stageStatus}>{stageStatus}</div> : null}
+          {currentActivity ? <div className="currentActivityRow">Currently: {currentActivity}</div> : null}
 
           <div className="buildHint">Describe what to build and follow live progress below.</div>
 

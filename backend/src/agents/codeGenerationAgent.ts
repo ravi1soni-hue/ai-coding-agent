@@ -212,7 +212,7 @@ async function generateJson(
       messages.push({ role: 'user', content: 'Return ONLY a valid JSON object. If you included prose or code fences, remove them. Do not wrap in markdown.' });
     }
     try {
-      lastRaw = await callWithRetry(llmProxy, messages, model, maxTokens, 120_000, 2, label);
+      lastRaw = await callWithRetry(llmProxy, messages, model, maxTokens, 60_000, 2, label);
       return parseJsonSafe(lastRaw);
     } catch (err) {
       const message = (err as Error).message;
@@ -784,14 +784,14 @@ async function generateFrontendFiles(
         generatedComponents.set(componentName, file.content);
         setFile(partial, file);
         componentFiles.push(file);
-        events?.emit({ type: 'FILE_WRITTEN', filePath: file.path, message: `Generated ${componentName} (dependency-aware)` });
+        events?.emit({ type: 'FILE_WRITTEN', filePath: file.path, message: `Generated ${componentName} (dependency-aware)`, payload: { path: file.path, content: file.content } });
       } catch (err) {
         logWarn('codeGenerationAgent:component-generation-failed', { componentName, error: (err as Error).message });
         const fallback = fallbackFrontendComponent(componentManifestItem, 0, manifest, metrics);
         generatedComponents.set(componentName, fallback.content);
         setFile(partial, fallback);
         componentFiles.push(fallback);
-        events?.emit({ type: 'FILE_WRITTEN', filePath: fallback.path, message: `Generated fallback ${componentName}` });
+        events?.emit({ type: 'FILE_WRITTEN', filePath: fallback.path, message: `Generated fallback ${componentName}`, payload: { path: fallback.path, content: fallback.content } });
       }
     }
   } else {
@@ -805,14 +805,14 @@ async function generateFrontendFiles(
           const file = await generateFrontendComponent(component, manifest, requirements, llmProxy, model, uiSpec, generatedComponents);
           generatedComponents.set(component.name || `Component${index}`, file.content);
           setFile(partial, file);
-          events?.emit({ type: 'FILE_WRITTEN', filePath: file.path, message: `Wrote ${file.path}` });
+          events?.emit({ type: 'FILE_WRITTEN', filePath: file.path, message: `Wrote ${file.path}`, payload: { path: file.path, content: file.content } });
           return file;
         } catch (err) {
           logWarn('codeGenerationAgent:component-fallback', { path: component.path, error: (err as Error).message });
           const fallback = fallbackFrontendComponent(component, index, manifest, metrics);
           generatedComponents.set(component.name || `Component${index}`, fallback.content);
           setFile(partial, fallback);
-          events?.emit({ type: 'FILE_WRITTEN', filePath: fallback.path, message: `Wrote fallback ${fallback.path}` });
+          events?.emit({ type: 'FILE_WRITTEN', filePath: fallback.path, message: `Wrote fallback ${fallback.path}`, payload: { path: fallback.path, content: fallback.content } });
           return fallback;
         }
       }
@@ -833,7 +833,7 @@ async function generateFrontendFiles(
     appFile = fallbackFrontendApp(manifest, componentFiles, backendRequired);
   }
   setFile(partial, appFile);
-  events?.emit({ type: 'FILE_WRITTEN', filePath: appFile.path, message: `Wrote ${appFile.path}` });
+  events?.emit({ type: 'FILE_WRITTEN', filePath: appFile.path, message: `Wrote ${appFile.path}`, payload: { path: appFile.path, content: appFile.content } });
 
   // Generate CSS
   let cssFile: GeneratedFile;
@@ -850,7 +850,7 @@ async function generateFrontendFiles(
     logWarn('codeGenerationAgent:frontend-fallbacks', { fallbackCount: metrics.fallbackCount, reasons: metrics.fallbackReasons });
   }
   setFile(partial, cssFile);
-  events?.emit({ type: 'FILE_WRITTEN', filePath: cssFile.path, message: `Wrote ${cssFile.path}` });
+  events?.emit({ type: 'FILE_WRITTEN', filePath: cssFile.path, message: `Wrote ${cssFile.path}`, payload: { path: cssFile.path, content: cssFile.content } });
 
   return Array.from(partial.entries()).map(([filePath, content]) => ({ path: filePath, content }));
 }
@@ -991,22 +991,25 @@ async function generateBackendFiles(systemDesign: any, requirements: any, projec
       setFile(partial, file);
     }
   });
-  events?.emit({ type: 'FILE_WRITTEN', filePath: 'backend/package.json', message: 'Generated backend scaffold: package.json' });
-  events?.emit({ type: 'FILE_WRITTEN', filePath: 'backend/index.js', message: 'Generated backend scaffold: index.js' });
-  events?.emit({ type: 'FILE_WRITTEN', filePath: 'backend/db/database.js', message: 'Generated backend scaffold: db/database.js' });
+  const _bpkg = partial.get('backend/package.json') ?? '';
+  const _bidx = partial.get('backend/index.js') ?? '';
+  const _bdb = partial.get('backend/db/database.js') ?? '';
+  events?.emit({ type: 'FILE_WRITTEN', filePath: 'backend/package.json', message: 'Generated backend scaffold: package.json', payload: { path: 'backend/package.json', content: _bpkg } });
+  events?.emit({ type: 'FILE_WRITTEN', filePath: 'backend/index.js', message: 'Generated backend scaffold: index.js', payload: { path: 'backend/index.js', content: _bidx } });
+  events?.emit({ type: 'FILE_WRITTEN', filePath: 'backend/db/database.js', message: 'Generated backend scaffold: db/database.js', payload: { path: 'backend/db/database.js', content: _bdb } });
 
   const artifactResults = await Promise.all([
     (async () => {
       try {
         const f = await generateBackendInitSql(manifest, tablePrefix, requirements, llmProxy, model);
         setFile(partial, f);
-        events?.emit({ type: 'FILE_WRITTEN', filePath: f.path, message: `Wrote ${f.path}` });
+        events?.emit({ type: 'FILE_WRITTEN', filePath: f.path, message: `Wrote ${f.path}`, payload: { path: f.path, content: f.content } });
         return { kind: 'sql', ok: true, path: f.path };
       } catch (err) {
         logWarn('codeGenerationAgent:init-sql-fallback', { error: (err as Error).message });
         const f = backendFallback.find(file => file.path === 'backend/db/init.sql') || fallbackInitSql(manifest, tablePrefix);
         setFile(partial, f);
-        events?.emit({ type: 'FILE_WRITTEN', filePath: f.path, message: `Wrote fallback ${f.path}` });
+        events?.emit({ type: 'FILE_WRITTEN', filePath: f.path, message: `Wrote fallback ${f.path}`, payload: { path: f.path, content: f.content } });
         return { kind: 'sql', ok: false, path: f.path, error: (err as Error).message };
       }
     })(),
@@ -1015,13 +1018,13 @@ async function generateBackendFiles(systemDesign: any, requirements: any, projec
       try {
         const route = await generateBackendRoute(resource, resource.routePath || '/', tablePrefix, requirements, llmProxy, model);
         setFile(partial, route);
-        events?.emit({ type: 'FILE_WRITTEN', filePath: route.path, message: `Wrote ${route.path}` });
+        events?.emit({ type: 'FILE_WRITTEN', filePath: route.path, message: `Wrote ${route.path}`, payload: { path: route.path, content: route.content } });
         return { kind: 'route', ok: true, path: route.path, resource: resource.name, expectedPath };
       } catch (err) {
         logWarn('codeGenerationAgent:route-fallback', { resource: resource.name, expectedPath, error: (err as Error).message });
         const route = backendFallback.find(file => file.path === expectedPath) || fallbackRoute(resource, tablePrefix);
         setFile(partial, route);
-        events?.emit({ type: 'FILE_WRITTEN', filePath: route.path, message: `Wrote fallback ${route.path}` });
+        events?.emit({ type: 'FILE_WRITTEN', filePath: route.path, message: `Wrote fallback ${route.path}`, payload: { path: route.path, content: route.content } });
         return { kind: 'route', ok: false, path: route.path, resource: resource.name, expectedPath, error: (err as Error).message };
       }
     })()),
@@ -1114,22 +1117,22 @@ export async function codeGenerationAgent(input: any) {
             : fallbackFrontendManifest(input.requirements);
           const repairedApp = await generateFrontendApp(frontendManifest, input.requirements, input.systemDesign, input.modification, repairComponents, llmProxy, model, input.uiSpec);
           fileMap.set(required, repairedApp.content);
-          events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Repaired ${required}` });
+          events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Repaired ${required}`, payload: { path: required, content: repairedApp.content } });
         } catch {
           const fallback = fallbackFrontendApp(fallbackFrontendManifest(input.requirements), repairComponents, repairBackendRequired);
           fileMap.set(required, fallback.content);
-          events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Fallback repair for ${required}` });
+          events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Fallback repair for ${required}`, payload: { path: required, content: fallback.content } });
         }
       } else if (required === 'src/index.css') {
         const fallback = fallbackFrontendCss();
         fileMap.set(required, fallback.content);
-        events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Fallback repair for ${required}` });
+        events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Fallback repair for ${required}`, payload: { path: required, content: fallback.content } });
       } else if (required === 'package.json') {
         const scaffoldFiles = frontendScaffold(fallbackFrontendManifest(input.requirements));
         const pkgFile = scaffoldFiles.find(f => f.path === 'package.json');
         if (pkgFile) {
           fileMap.set(required, pkgFile.content);
-          events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Fallback repair for ${required}` });
+          events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Fallback repair for ${required}`, payload: { path: required, content: pkgFile.content } });
         }
       }
     }
@@ -1146,7 +1149,7 @@ export async function codeGenerationAgent(input: any) {
         const fallback = backendFallbackFiles.find(f => f.path === required);
         if (fallback) {
           fileMap.set(required, fallback.content);
-          events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Repaired missing backend file: ${required}` });
+          events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Repaired missing backend file: ${required}`, payload: { path: required, content: fallback.content } });
         }
       }
     }
@@ -1161,11 +1164,11 @@ export async function codeGenerationAgent(input: any) {
       const frontendManifest = fallbackFrontendManifest(input.requirements);
       const repairedApp = await generateFrontendApp(frontendManifest, input.requirements, input.systemDesign, input.modification, repairComponents, llmProxy, model, input.uiSpec);
       fileMap.set('src/App.jsx', repairedApp.content);
-      events?.emit({ type: 'FILE_WRITTEN', filePath: 'src/App.jsx', message: 'Repaired stub App.jsx' });
+      events?.emit({ type: 'FILE_WRITTEN', filePath: 'src/App.jsx', message: 'Repaired stub App.jsx', payload: { path: 'src/App.jsx', content: repairedApp.content } });
     } catch {
       const fallback = fallbackFrontendApp(fallbackFrontendManifest(input.requirements), repairComponents, repairBackendRequired);
       fileMap.set('src/App.jsx', fallback.content);
-      events?.emit({ type: 'FILE_WRITTEN', filePath: 'src/App.jsx', message: 'Fallback repair for stub App.jsx' });
+      events?.emit({ type: 'FILE_WRITTEN', filePath: 'src/App.jsx', message: 'Fallback repair for stub App.jsx', payload: { path: 'src/App.jsx', content: fallback.content } });
     }
   }
 
