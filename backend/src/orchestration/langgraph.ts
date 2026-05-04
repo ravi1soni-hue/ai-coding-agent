@@ -3,6 +3,7 @@ import { requirementAnalysisAgent } from '../agents/requirementAnalysisAgent';
 import { clarificationAgent } from '../agents/clarificationAgent';
 import { confirmationGate } from '../agents/confirmationGate';
 import { systemDesignAgent } from '../agents/systemDesignAgent';
+import { uiSpecAgent } from '../agents/uiSpecAgent';
 import { blueprintAgent } from '../agents/blueprintAgent';
 import { codeGenerationAgent } from '../agents/codeGenerationAgent';
 import { insertVector } from '../db/vectorStore';
@@ -80,7 +81,7 @@ export async function runOrchestration(ctx: OrchestrationContext) {
       })
     );
 
-    // Build canonical projectSpec immediately after clarification
+    // Build canonical projectSpec after clarification (partial — later stages not yet run)
     ctx.projectSpec = validateProjectSpec(
       consolidateProjectSpec({
         projectId,
@@ -91,7 +92,8 @@ export async function runOrchestration(ctx: OrchestrationContext) {
         systemDesign: ctx.systemDesign,
         uiSpec: ctx.uiSpec,
         blueprint: ctx.blueprint,
-      })
+      }),
+      { partial: true }
     );
 
     // Step 3: Confirmation Gate
@@ -133,20 +135,31 @@ export async function runOrchestration(ctx: OrchestrationContext) {
       });
     }
 
-    // Step 5: Blueprint Validation
+    // Step 5: UI Spec
+    ctx.uiSpec = await runStage('uiSpec', ctx.projectSpec, async () =>
+      uiSpecAgent({
+        requirements: ctx.requirements,
+        systemDesign: ctx.systemDesign,
+        projectSpec: ctx.projectSpec,
+      })
+    );
+
+    // Step 6: Blueprint
     ctx.blueprint = await runStage('blueprint', ctx.projectSpec, async () =>
       blueprintAgent({
         requirements: ctx.requirements,
         systemDesign: ctx.systemDesign,
+        uiSpec: ctx.uiSpec,
         projectSpec: ctx.projectSpec,
         projectId,
       })
     );
 
-    // Step 6: Code Generation
+    // Step 7: Code Generation
     ctx.codeGen = await runStage('codeGeneration', ctx.blueprint, async () =>
       codeGenerationAgent({
         systemDesign: ctx.systemDesign,
+        uiSpec: ctx.uiSpec,
         blueprint: ctx.blueprint,
         requirements: ctx.requirements,
         projectSpec: ctx.projectSpec,
@@ -174,13 +187,14 @@ export async function runOrchestration(ctx: OrchestrationContext) {
       });
     }
 
-    // Step 6: Test & Fix
+    // Step 8: Test & Fix
     ctx.testResult = await runStage('testFix', ctx.codeGen, async () =>
       testFixAgent({
         buildFn: () => runBuildWorker({ workspaceDir: ctx.materializedRevision?.workspaceDir }),
         fixFn: async (logs: string) => {
           const repair = await codeGenerationAgent({
             systemDesign: ctx.systemDesign,
+            uiSpec: ctx.uiSpec,
             requirements: ctx.requirements,
             modification: `Fix the build errors below and regenerate complete files:\n${String(logs).slice(-4000)}`,
             projectSpec: ctx.projectSpec,
@@ -216,7 +230,7 @@ export async function runOrchestration(ctx: OrchestrationContext) {
       );
     }
 
-    // Step 7: Deployment
+    // Step 9: Deployment
     const revisionId = ctx.revisionId || ctx.materializedRevision?.revisionId || `rev-${Date.now().toString(36)}`;
     ctx.deployment = await runStage('deployment', ctx.testResult, async () =>
       deploymentAgent({
