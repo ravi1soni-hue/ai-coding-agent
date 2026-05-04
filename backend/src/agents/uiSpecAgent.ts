@@ -166,13 +166,30 @@ export async function uiSpecAgent(input: any): Promise<UISpec> {
     if (!input || !input.systemDesign) {
       throw new Error('System design required as input');
     }
-    const projectSpec = input.projectSpec || null;
+    if (!input.projectSpec) {
+      throw new Error('Canonical projectSpec required for UI spec generation');
+    }
+    const projectSpec = input.projectSpec;
+    const specRequirements = projectSpec?.requirements || {};
+    if (input.requirements?.website_type && specRequirements.website_type && input.requirements.website_type !== specRequirements.website_type) {
+      throw new Error('UI spec input does not match canonical projectSpec requirements');
+    }
+    if (Array.isArray(specRequirements.pages) && Array.isArray(input.requirements?.pages)) {
+      const specPages = specRequirements.pages.map((page: string) => String(page).trim()).filter(Boolean);
+      const inputPages = input.requirements.pages.map((page: string) => String(page).trim()).filter(Boolean);
+      for (const page of specPages) {
+        if (!inputPages.includes(page)) {
+          throw new Error(`UI spec input is missing canonical page: ${page}`);
+        }
+      }
+    }
 
     const { model, apiKey } = getModelConfigForTask('code_generation');
     const llmProxy = new LLMProxyClient({ apiKey });
 
     const systemDesign = input.systemDesign;
     const requirements = input.requirements || {};
+    const canonicalRequirements = projectSpec.requirements || {};
     const modification = input.modification || null;
 
     // Step 1: Generate component interfaces

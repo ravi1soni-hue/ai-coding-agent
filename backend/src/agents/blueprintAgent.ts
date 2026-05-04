@@ -119,7 +119,23 @@ export async function blueprintAgent(input: BlueprintInput): Promise<ProjectBlue
   const { model, apiKey } = getModelConfigForTask('core_reasoning');
   const llmProxy = new LLMProxyClient({ apiKey });
 
-  const projectSpec = input.projectSpec || null;
+  if (!input.projectSpec) {
+    throw new Error('Canonical projectSpec required for blueprint generation');
+  }
+  const projectSpec = input.projectSpec;
+  const specRequirements = projectSpec?.requirements || {};
+  if (input.requirements?.website_type && specRequirements.website_type && input.requirements.website_type !== specRequirements.website_type) {
+    throw new Error('Blueprint input does not match canonical projectSpec requirements');
+  }
+  if (Array.isArray(specRequirements.pages) && Array.isArray(input.requirements?.pages)) {
+    const specPages = specRequirements.pages.map((page: string) => String(page).trim()).filter(Boolean);
+    const inputPages = input.requirements.pages.map((page: string) => String(page).trim()).filter(Boolean);
+    for (const page of specPages) {
+      if (!inputPages.includes(page)) {
+        throw new Error(`Blueprint input is missing canonical page: ${page}`);
+      }
+    }
+  }
   const userContent = JSON.stringify({
     requirements: input.requirements,
     projectSpec,
@@ -149,6 +165,13 @@ export async function blueprintAgent(input: BlueprintInput): Promise<ProjectBlue
         requirements: input.requirements,
         uiSpec: input.uiSpec,
       });
+      const specBackendRequired = Boolean(projectSpec?.requirements?.backend_required);
+      if (!specBackendRequired && contextCheckedBlueprint.backendRoutes.length > 0) {
+        throw new Error('Blueprint contains backend routes for a frontend-only canonical projectSpec');
+      }
+      if (specBackendRequired && contextCheckedBlueprint.backendRoutes.length === 0) {
+        throw new Error('Blueprint is missing backend routes required by the canonical projectSpec');
+      }
       debug('blueprintAgent:done', {
         attempt,
         title: contextCheckedBlueprint.title,

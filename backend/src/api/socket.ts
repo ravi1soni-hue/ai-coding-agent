@@ -328,7 +328,7 @@ export function createSocketServer(server: http.Server) {
             backendUrl: session.deployment?.backend_url || null,
             dbStatus: 'ready',
           },
-          blueprint: session.systemDesign || null,
+          blueprint: session.blueprint || null,
           taskQueue: await listProjectTasks({ projectId, userId: authedUser.id }).catch(() => []),
           terminalLogs: [],
           currentStage: session.step,
@@ -557,6 +557,11 @@ export function createSocketServer(server: http.Server) {
             continue;
           }
 
+          const clarificationSpec = buildProjectSpec();
+          if (clarificationSpec) {
+            assertConsistencyOrThrow(clarificationSpec, { systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint, codeGen: session.codeGen });
+          }
+
           ws.send(JSON.stringify({ type: 'stream', token: 'Thanks for the details! Confirming your requirements...' }));
           session.step = 'confirmation';
         }
@@ -579,6 +584,10 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.confirmation = confResult.data;
+          const projectSpecAfterConfirmation = buildProjectSpec();
+          if (projectSpecAfterConfirmation) {
+            assertConsistencyOrThrow(projectSpecAfterConfirmation, { systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint, codeGen: session.codeGen });
+          }
           await persistBlackboardState();
           debug('socket:confirmation', { projectId });
           ws.send(JSON.stringify({ type: 'stream', token: 'Requirements confirmed! Designing the system now...' }));
@@ -596,11 +605,15 @@ export function createSocketServer(server: http.Server) {
               sendError(ws, session, toClientErrorMessage(sdResult.error, 'System design failed. Reply to retry.'));
               return;
             }
-            session.systemDesign = sdResult.data;
-          } else {
-            session.systemDesign = buildFrontendOnlySystemDesign(session.requirements);
-          }
-          await persistBlackboardState();
+          session.systemDesign = sdResult.data;
+        } else {
+          session.systemDesign = buildFrontendOnlySystemDesign(session.requirements);
+        }
+        const specAfterSystemDesign = buildProjectSpec({ systemDesign: session.systemDesign });
+        if (specAfterSystemDesign) {
+          assertConsistencyOrThrow(specAfterSystemDesign, { systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint, codeGen: session.codeGen });
+        }
+        await persistBlackboardState();
           session.stepRetries['systemDesign'] = 0;
           debug('socket:systemDesign', { projectId });
           ws.send(JSON.stringify({ type: 'stream', token: 'Architecture ready! Designing UI structure...' }));
@@ -624,6 +637,10 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.uiSpec = uiSpecResult.data;
+          const specAfterUiSpec = buildProjectSpec({ systemDesign: session.systemDesign, uiSpec: session.uiSpec });
+          if (specAfterUiSpec) {
+            assertConsistencyOrThrow(specAfterUiSpec, { systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint, codeGen: session.codeGen });
+          }
           await persistBlackboardState();
           session.stepRetries['uiSpec'] = 0;
           debug('socket:uiSpec', { projectId, componentCount: session.uiSpec?.components?.length });
@@ -647,6 +664,10 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.blueprint = bpResult.data;
+          const specAfterBlueprint = buildProjectSpec({ systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint });
+          if (specAfterBlueprint) {
+            assertConsistencyOrThrow(specAfterBlueprint, { systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint, codeGen: session.codeGen });
+          }
           await persistBlackboardState();
           session.stepRetries['blueprint'] = 0;
           debug('socket:blueprint', { projectId, title: session.blueprint?.title, fileCount: session.blueprint?.files?.length });
@@ -682,6 +703,10 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.codeGen = cgResult.data;
+          const specAfterCodeGen = buildProjectSpec({ systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint });
+          if (specAfterCodeGen) {
+            assertConsistencyOrThrow(specAfterCodeGen, { systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint, codeGen: session.codeGen });
+          }
           await rematerializeAndStore(cgResult.data);
           session.stepRetries['codeGen'] = 0;
           debug('socket:codeGen', { projectId, fileCount: session.codeGen?.files?.length });

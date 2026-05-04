@@ -11,6 +11,7 @@ import { deploymentAgent } from '../agents/deploymentAgent';
 import { runBuildWorker } from '../workers/buildWorker';
 import { logOrchestrationStep } from '../db/auditLog';
 import { materializeProjectWorkspace } from '../factory/projectFactory';
+import { consolidateProjectSpec, validateProjectSpec } from '../agents/projectSpec';
 import { debug, error } from '../utils/logger';
 
 export type OrchestrationContext = {
@@ -21,7 +22,9 @@ export type OrchestrationContext = {
 	clarifications?: any;
 	confirmation?: any;
 	systemDesign?: any;
+	uiSpec?: any;
 	blueprint?: any;
+	projectSpec?: any;
 	codeGen?: any;
 	testResult?: any;
 	deployment?: any;
@@ -69,22 +72,41 @@ export async function runOrchestration(ctx: OrchestrationContext) {
 
     // Step 2: Clarification
     ctx.clarifications = await runStage('clarification', ctx.requirements, async () =>
-      clarificationAgent(ctx.requirements)
+      clarificationAgent({
+        requirements: ctx.requirements,
+        projectSpec: ctx.projectSpec,
+        clarificationAnswers: ctx.clarifications?.context?.clarificationAnswers || {},
+        askedQuestions: ctx.clarifications?.context?.askedQuestions || [],
+      })
+    );
+
+    // Build canonical projectSpec immediately after clarification
+    ctx.projectSpec = validateProjectSpec(
+      consolidateProjectSpec({
+        projectId,
+        userMessage: ctx.user_message,
+        requirements: ctx.requirements,
+        clarifications: ctx.clarifications,
+        clarificationAnswers: ctx.clarifications?.context?.clarificationAnswers || {},
+        systemDesign: ctx.systemDesign,
+        uiSpec: ctx.uiSpec,
+        blueprint: ctx.blueprint,
+      })
     );
 
     // Step 3: Confirmation Gate
     ctx.confirmation = await runStage('confirmation', ctx.clarifications, async () =>
       confirmationGate({
         confirmed: ctx.clarifications?.confirmed,
-        clarifications: ctx.clarifications?.clarifications || ctx.clarifications?.questions,
+        clarifications: ctx.clarifications?.questions,
         questions: ctx.clarifications?.questions,
       })
     );
 
     // Step 4: System Design
     if (requiresBackendArchitecture(ctx.requirements)) {
-      ctx.systemDesign = await runStage('systemDesign', ctx.requirements, async () =>
-        systemDesignAgent(ctx.requirements)
+      ctx.systemDesign = await runStage('systemDesign', ctx.projectSpec, async () =>
+        systemDesignAgent({ requirements: ctx.requirements, projectSpec: ctx.projectSpec })
       );
     } else {
       ctx.systemDesign = {
@@ -112,10 +134,11 @@ export async function runOrchestration(ctx: OrchestrationContext) {
     }
 
     // Step 5: Blueprint Validation
-    ctx.blueprint = await runStage('blueprint', ctx.systemDesign, async () =>
+    ctx.blueprint = await runStage('blueprint', ctx.projectSpec, async () =>
       blueprintAgent({
         requirements: ctx.requirements,
         systemDesign: ctx.systemDesign,
+        projectSpec: ctx.projectSpec,
         projectId,
       })
     );
@@ -126,6 +149,7 @@ export async function runOrchestration(ctx: OrchestrationContext) {
         systemDesign: ctx.systemDesign,
         blueprint: ctx.blueprint,
         requirements: ctx.requirements,
+        projectSpec: ctx.projectSpec,
         user_id,
       })
     );
@@ -159,6 +183,7 @@ export async function runOrchestration(ctx: OrchestrationContext) {
             systemDesign: ctx.systemDesign,
             requirements: ctx.requirements,
             modification: `Fix the build errors below and regenerate complete files:\n${String(logs).slice(-4000)}`,
+            projectSpec: ctx.projectSpec,
             user_id,
             projectId,
           });

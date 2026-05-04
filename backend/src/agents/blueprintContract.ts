@@ -186,9 +186,6 @@ export function validateProjectBlueprint(raw: unknown): ProjectBlueprint {
   }
 
   const backendRoutes = Array.isArray(blueprint.backendRoutes) ? blueprint.backendRoutes : [];
-  if (backendRoutes.length === 0) {
-    throw new Error('backendRoutes cannot be empty');
-  }
 
   for (let i = 0; i < backendRoutes.length; i += 1) {
     const route = backendRoutes[i] as Record<string, unknown>;

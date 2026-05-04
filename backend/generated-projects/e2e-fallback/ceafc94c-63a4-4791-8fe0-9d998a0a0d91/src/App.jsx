@@ -1,0 +1,1 @@
+export default function App(){ return <main>TODO placeholder replace generic text</main>; }

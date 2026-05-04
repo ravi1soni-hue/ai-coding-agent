@@ -59,9 +59,8 @@ function filterAskedQuestions(questions: string[], askedQuestions: string[], cla
 function shouldAskMoreQuestions(requirements: any, projectSpec: any): boolean {
   const text = JSON.stringify({ requirements, projectSpec }).toLowerCase();
 
-  // Ask more questions only when the request is genuinely underspecified.
-  // A broad website-builder must handle all kinds of inputs without forcing
-  // clarification on valid, already-specific briefs.
+  // Ask more questions when the request is specific enough to support follow-up
+  // product decisions, but still lacks a fully consolidated spec.
   const ambiguitySignals = [
     /\b(maybe|some|various|several|etc|and\/or|whatever|something)\b/,
     /\b(soon|later|flexible|optional|possibly|ideally)\b/,
@@ -75,8 +74,13 @@ function shouldAskMoreQuestions(requirements: any, projectSpec: any): boolean {
     /\b(monthly|yearly|toggle|accordion|cards|table|faq|cta|theme|dark mode|light mode|responsive)\b/.test(text) ||
     /\b(react|vite|frontend|backend|api|database|auth|postg(res|re)|express)\b/.test(text);
 
-  if (hasStrongDirectionalSignals) {
-    return ambiguitySignals.some((pattern) => pattern.test(text));
+  const askedQuestions = Array.isArray(projectSpec?.askedQuestions) ? projectSpec.askedQuestions.length : 0;
+  const clarificationAnswers = projectSpec?.clarificationAnswers && typeof projectSpec.clarificationAnswers === 'object'
+    ? Object.keys(projectSpec.clarificationAnswers).length
+    : 0;
+
+  if (hasStrongDirectionalSignals && askedQuestions === 0 && clarificationAnswers === 0) {
+    return true;
   }
 
   return ambiguitySignals.some((pattern) => pattern.test(text));

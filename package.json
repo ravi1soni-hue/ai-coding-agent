@@ -1,0 +1,12 @@
+{
+  "name": "ai-coding-agent-root",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "start": "npm --prefix backend run dev",
+    "dev": "npm --prefix backend run dev",
+    "build": "npm --prefix backend run build",
+    "frontend:dev": "npm --prefix frontend run dev",
+    "frontend:build": "npm --prefix frontend run build"
+  }
+}
