@@ -308,6 +308,7 @@ export function createSocketServer(server: http.Server) {
         uiSpec: context.uiSpec ?? session.uiSpec,
         blueprint: context.blueprint ?? session.blueprint,
         codeGen: context.codeGen ?? session.codeGen,
+        activeStage: session.step,
       });
       if (!report.ok) {
         throw new Error(`Cross-stage consistency validation failed:\n${formatConsistencyIssues(report)}`);
@@ -597,7 +598,7 @@ export function createSocketServer(server: http.Server) {
         // ── Stage 4: System Design ─────────────────────────────────────────
         if (session.step === 'systemDesign') {
           sendProgress(ws, session, 'systemDesign', 'Designing system architecture...');
-          const projectSpec = buildProjectSpec();
+          const projectSpec = buildProjectSpec({}, { partial: true });
           if (requiresBackendArchitecture(session.requirements)) {
             const sdResult = await handleSystemDesign({ requirements: session.requirements, projectSpec, projectId });
             if (!sdResult.success) {
@@ -840,6 +841,7 @@ export function createSocketServer(server: http.Server) {
           systemDesign: session.systemDesign,
           requirements: session.requirements,
           modification,
+          projectSpec: buildProjectSpec({ systemDesign: session.systemDesign }, { partial: true }),
           projectId,
           userId: authedUser.id,
         });
@@ -854,6 +856,7 @@ export function createSocketServer(server: http.Server) {
           systemDesign: session.systemDesign,
           uiSpec: session.uiSpec,
           modification,
+          projectSpec: buildProjectSpec({ systemDesign: session.systemDesign, uiSpec: session.uiSpec }, { partial: true }),
           projectId,
         });
         if (bpModResult.success) {

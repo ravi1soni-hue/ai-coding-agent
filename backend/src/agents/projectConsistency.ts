@@ -61,6 +61,41 @@ function getAppMustInclude(blueprint: unknown): string[] {
   return asArray<string>(appFile?.mustInclude);
 }
 
+// Pipeline stage order — each check only fires at/after its stage.
+// Must stay in sync with session.step values in socket.ts.
+const STAGE_ORDER = [
+  'init',
+  'requirementAnalysis',
+  'clarification',
+  'clarification_wait',
+  'clarification_wait_modification',
+  'confirmation',
+  'confirmation_wait',
+  'systemDesign',
+  'uiSpec',
+  'uiSpec_modification',
+  'blueprint',
+  'codeGen',
+  'codeGen_modification',
+  'testFix',
+  'testFix_modification',
+  'deploy',
+  'deploy_modification',
+  'done',
+  'done_modification',
+] as const;
+
+type PipelineStage = typeof STAGE_ORDER[number];
+
+function stageIndex(stage: string): number {
+  const idx = STAGE_ORDER.indexOf(stage as PipelineStage);
+  return idx === -1 ? STAGE_ORDER.length : idx;
+}
+
+function atOrAfter(activeStage: string, targetStage: PipelineStage): boolean {
+  return stageIndex(activeStage) >= stageIndex(targetStage);
+}
+
 export function validateProjectConsistency(input: {
   projectSpec: ProjectSpec;
   requirementAnalysis?: unknown;
@@ -69,9 +104,11 @@ export function validateProjectConsistency(input: {
   uiSpec?: unknown;
   blueprint?: unknown;
   codeGen?: unknown;
+  activeStage?: string;
 }): ConsistencyReport {
   const issues: ConsistencyIssue[] = [];
   const { projectSpec } = input;
+  const activeStage = input.activeStage || 'done'; // default: enforce everything
 
   const clarificationAnswers = projectSpec.clarificationAnswers || {};
   const clarifications = asRecord(input.clarifications) || asRecord(projectSpec.clarifications);
@@ -97,68 +134,75 @@ export function validateProjectConsistency(input: {
   const answerCount = Object.keys(clarificationAnswers).length;
   const clarificationConfirmed = Boolean(clarifications?.confirmed);
 
-  // Clarifications may be unconfirmed during the clarification phase.
-  // Only require answers when there are unresolved questions that still need responses.
   if (!clarificationConfirmed && askedQuestions.length > 0 && answerCount === 0) {
     addIssue(issues, 'clarification', 'clarification answers are missing for unresolved questions');
   }
 
-  if (requirements?.backend_required && !systemDesign) {
-    addIssue(issues, 'systemDesign', 'required backend architecture is missing');
+  // systemDesign checks: only after systemDesign stage has run
+  if (atOrAfter(activeStage, 'uiSpec')) {
+    if (requirements?.backend_required && !systemDesign) {
+      addIssue(issues, 'systemDesign', 'required backend architecture is missing');
+    }
+
+    if (systemDesign) {
+      const frontend = asRecord(systemDesign.frontend);
+      const pages = asArray<unknown>(frontend?.pages).map((page) => String(page ?? '').trim()).filter(Boolean);
+      const specPages = asArray<unknown>(asRecord(requirements)?.pages).map((page) => String(page ?? '').trim()).filter(Boolean);
+      for (const page of specPages) {
+        if (!pages.includes(page)) {
+          addIssue(issues, 'systemDesign', `missing page from requirements: ${page}`);
+        }
+      }
+    }
+
+    if (systemDesign && !uiSpec) {
+      addIssue(issues, 'uiSpec', 'UI spec is missing after system design');
+    }
   }
 
-  if (systemDesign) {
-    const frontend = asRecord(systemDesign.frontend);
-    const pages = asArray<unknown>(frontend?.pages).map((page) => String(page ?? '').trim()).filter(Boolean);
-    const specPages = asArray<unknown>(asRecord(requirements)?.pages).map((page) => String(page ?? '').trim()).filter(Boolean);
-    for (const page of specPages) {
-      if (!pages.includes(page)) {
-        addIssue(issues, 'systemDesign', `missing page from requirements: ${page}`);
+  // blueprint checks: only after blueprint stage has run
+  if (atOrAfter(activeStage, 'codeGen')) {
+    if (uiSpec) {
+      const componentNames = getComponentNamesFromUiSpec(uiSpec);
+      const blueprintNames = blueprint ? getBlueprintComponentNames(blueprint) : [];
+      const blueprintPaths = blueprint ? getBlueprintPaths(blueprint) : [];
+
+      for (const componentName of componentNames) {
+        if (!blueprintNames.includes(componentName) && !blueprintPaths.some((filePath) => filePath.includes(componentName))) {
+          addIssue(issues, 'blueprint', `missing wiring for UI component: ${componentName}`);
+        }
+      }
+    }
+
+    if (blueprint) {
+      const blueprintAppIncludes = getAppMustInclude(blueprint);
+      if (!blueprintAppIncludes.some((token) => /router|API_BASE|fetch/i.test(token))) {
+        addIssue(issues, 'blueprint', 'src/App.jsx blueprint is missing API_BASE/router/fetch wiring');
       }
     }
   }
 
-  if (systemDesign && !uiSpec) {
-    addIssue(issues, 'uiSpec', 'UI spec is missing after system design');
-  }
+  // codeGen checks: only after codeGeneration stage has run
+  if (atOrAfter(activeStage, 'testFix')) {
+    if (codeGen) {
+      const files = asArray<{ path?: string; content?: string }>(codeGen.files);
+      const expectedPaths = new Set<string>([
+        'src/App.jsx',
+        'src/index.css',
+        ...getComponentPathsFromUiSpec(uiSpec),
+      ]);
 
-  if (uiSpec) {
-    const componentNames = getComponentNamesFromUiSpec(uiSpec);
-    const blueprintNames = blueprint ? getBlueprintComponentNames(blueprint) : [];
-    const blueprintPaths = blueprint ? getBlueprintPaths(blueprint) : [];
-
-    for (const componentName of componentNames) {
-      if (!blueprintNames.includes(componentName) && !blueprintPaths.some((filePath) => filePath.includes(componentName))) {
-        addIssue(issues, 'blueprint', `missing wiring for UI component: ${componentName}`);
+      for (const expectedPath of expectedPaths) {
+        if (expectedPath && !files.some((file) => String(file?.path || '').replace(/\\/g, '/').replace(/^\/+/, '') === expectedPath)) {
+          addIssue(issues, 'codeGen', `missing generated file for expected path: ${expectedPath}`);
+        }
       }
-    }
-  }
 
-  if (blueprint) {
-    const blueprintAppIncludes = getAppMustInclude(blueprint);
-    if (!blueprintAppIncludes.some((token) => /router|API_BASE|fetch/i.test(token))) {
-      addIssue(issues, 'blueprint', 'src/App.jsx blueprint is missing API_BASE/router/fetch wiring');
-    }
-  }
-
-  if (codeGen) {
-    const files = asArray<{ path?: string; content?: string }>(codeGen.files);
-    const expectedPaths = new Set<string>([
-      'src/App.jsx',
-      'src/index.css',
-      ...getComponentPathsFromUiSpec(uiSpec),
-    ]);
-
-    for (const expectedPath of expectedPaths) {
-      if (expectedPath && !files.some((file) => String(file?.path || '').replace(/\\/g, '/').replace(/^\/+/, '') === expectedPath)) {
-        addIssue(issues, 'codeGen', `missing generated file for expected path: ${expectedPath}`);
-      }
-    }
-
-    for (const file of files) {
-      const normalized = String(file?.path || '').replace(/\\/g, '/').replace(/^\/+/, '');
-      if (normalized === 'src/App.jsx' && !String(file?.content || '').includes('export default function App')) {
-        addIssue(issues, 'codeGen', 'generated App.jsx is missing default App export');
+      for (const file of files) {
+        const normalized = String(file?.path || '').replace(/\\/g, '/').replace(/^\/+/, '');
+        if (normalized === 'src/App.jsx' && !String(file?.content || '').includes('export default function App')) {
+          addIssue(issues, 'codeGen', 'generated App.jsx is missing default App export');
+        }
       }
     }
   }
