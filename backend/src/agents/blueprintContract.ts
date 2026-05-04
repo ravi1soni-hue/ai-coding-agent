@@ -304,12 +304,12 @@ function assertBlueprintRouteCoverage(blueprint: ProjectBlueprint): void {
   const filePaths = new Set(blueprint.files.map((file) => file.path));
   for (let i = 0; i < blueprint.navigation.routes.length; i += 1) {
     const route = blueprint.navigation.routes[i];
-    const expectedComponentPath = routePathToComponentPath(route.path, route.component);
-    if (!filePaths.has(expectedComponentPath)) {
-      if (route.component === 'App' && filePaths.has('src/App.jsx')) {
-        continue;
-      }
-      throw new Error(`navigation.routes[${i}] references missing component file: ${expectedComponentPath}`);
+    if (!route.component || typeof route.component !== 'string' || !route.component.trim()) {
+      throw new Error(`navigation.routes[${i}] must declare a component name`);
+    }
+
+    if (route.component === 'App' && !filePaths.has('src/App.jsx')) {
+      throw new Error('navigation.routes references App but src/App.jsx is missing');
     }
   }
 }

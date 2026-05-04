@@ -498,24 +498,39 @@ RULES:
     components = fallback.components || [];
     if (!manifest.appName) manifest.appName = fallback.appName;
   }
-  manifest.components = components.slice(0, MAX_COMPONENTS).map((component, index) => ({ ...component, path: sanitizeComponentPath(component?.path || '', index), name: sanitizeIdentifier(component?.name || `GeneratedSection${index + 1}`, `GeneratedSection${index + 1}`) }));
+  const normalizedComponents = (Array.isArray(manifest.components) ? manifest.components : [])
+    .map((component, index) => {
+      const fallbackName = `GeneratedSection${index + 1}`;
+      const safeName = sanitizeIdentifier(component?.name || fallbackName, fallbackName);
+      return {
+        ...component,
+        path: sanitizeComponentPath(component?.path || '', index),
+        name: safeName,
+      };
+    });
+
+  manifest.components = normalizedComponents;
   manifest.dependencies = manifest.dependencies && typeof manifest.dependencies === 'object' ? manifest.dependencies : {};
 
   // Post-reconcile: if uiSpec components were provided, ensure every uiSpec name appears in the manifest.
-  // This prevents the LLM from silently renaming a component (e.g. "Toggle" instead of "PricingToggle").
+  // Do not silently truncate these additions; missing UI-spec components cause downstream App/blueprint drift.
   if (Array.isArray(uiSpec?.components) && uiSpec.components.length > 0) {
     const manifestNames = new Set(manifest.components.map((c: any) => String(c.name || '')));
     const missing = (uiSpec.components as Array<{ name?: string; path?: string; purpose?: string }>)
-      .filter(c => c.name && !manifestNames.has(c.name));
+      .filter((c) => c.name && !manifestNames.has(c.name));
     if (missing.length > 0) {
-      const extra = missing.map(c => ({
+      const extra = missing.map((c) => ({
         path: `src/components/${c.name}.jsx`,
         name: c.name!,
         purpose: String(c.purpose || `${c.name} component`),
       }));
-      manifest.components = [...manifest.components, ...extra].slice(0, MAX_COMPONENTS);
-      logWarn('codeGenerationAgent:manifest-reconciled-uispec', { added: extra.map(c => c.name) });
+      manifest.components = [...manifest.components, ...extra];
+      logWarn('codeGenerationAgent:manifest-reconciled-uispec', { added: extra.map((c) => c.name) });
     }
+  }
+
+  if (manifest.components.length > MAX_COMPONENTS && !Array.isArray(uiSpec?.components)) {
+    manifest.components = manifest.components.slice(0, MAX_COMPONENTS);
   }
 
   return manifest;

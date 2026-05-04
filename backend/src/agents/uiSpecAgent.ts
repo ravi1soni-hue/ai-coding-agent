@@ -419,19 +419,46 @@ RULES:
     const layoutObj = parseJsonFromResponse(layoutRaw);
 
     // Compile final UI spec
+    const componentNames = new Set(components.map((component) => component.name));
+    const sanitizedGenerationOrder = generationOrder.filter((name) => componentNames.has(name));
+    const ensuredGenerationOrder = sanitizedGenerationOrder.length > 0 ? sanitizedGenerationOrder : components.map((component) => component.name);
+    const hasAppComponent = components.some((component) => component.name === 'App');
+    if (!hasAppComponent) {
+      components.unshift({
+        name: 'App',
+        path: 'src/App.jsx',
+        purpose: 'Root application shell that composes all generated UI sections.',
+        props: {},
+        state: [],
+        effects: [],
+        dependencies: [],
+        renderLogic: 'Renders the application shell and composes generated child components.',
+      });
+    }
+    if (!componentNames.has('App')) {
+      ensuredGenerationOrder.push('App');
+    }
+
+    const normalizedApiContract = apiContract.filter((entry) => {
+      const endpoint = String(entry.endpoint || '').trim();
+      return endpoint.startsWith('/api/');
+    });
+
     const uiSpec: UISpec = {
-      appName: systemDesign.frontend?.appName || requirements.appName || 'GeneratedApp',
+      appName: String(systemDesign.frontend?.appName || requirements.appName || projectSpec?.userMessage || 'GeneratedApp').trim() || 'GeneratedApp',
       components,
       dataFlow,
       layoutStructure: {
-        appRoot: layoutObj.appRoot || 'App component wrapping all sections',
-        compositionOrder: Array.isArray(layoutObj.compositionOrder) ? layoutObj.compositionOrder : components.map(c => c.name),
-        stateManagement: layoutObj.stateManagement || 'Props drilling for simplicity',
+        appRoot: String(layoutObj.appRoot || 'App component wrapping all sections'),
+        compositionOrder: Array.isArray(layoutObj.compositionOrder)
+          ? layoutObj.compositionOrder.filter((name: string) => componentNames.has(name))
+          : components.map((component) => component.name),
+        stateManagement: String(layoutObj.stateManagement || 'Props drilling for simplicity'),
       },
-      apiContract,
-      generationOrder,
-      navigationStrategy: layoutObj.navigationStrategy || 'Single page with conditional rendering',
-      stateManagementStrategy: layoutObj.stateManagementStrategy || 'useState for local state, props for passing data',
+      apiContract: normalizedApiContract,
+      generationOrder: ensuredGenerationOrder,
+      navigationStrategy: String(layoutObj.navigationStrategy || 'Single page with conditional rendering'),
+      stateManagementStrategy: String(layoutObj.stateManagementStrategy || 'useState for local state, props for passing data'),
     };
 
     debug('uiSpecAgent:final', { uiSpec });

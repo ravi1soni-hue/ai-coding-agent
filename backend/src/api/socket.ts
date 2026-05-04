@@ -48,11 +48,13 @@ function requiresBackendArchitecture(requirements: any): boolean {
 }
 
 function buildFrontendOnlySystemDesign(requirements: any) {
+  const pages = Array.isArray(requirements?.pages) ? requirements.pages.filter((page: any) => typeof page === 'string' && page.trim()).map((page: string) => page.trim()) : [];
+  const uniquePages = Array.from(new Set(pages));
   return {
     frontend: {
       framework: 'react-vite',
-      pages: Array.isArray(requirements?.pages) ? requirements.pages : [],
-      components: [],
+      pages: uniquePages,
+      components: uniquePages,
       styling: 'css',
     },
     backend: null,
