@@ -46,8 +46,17 @@ function normalizeTextValue(value: unknown): string {
   if (typeof value === 'string') return value.toLowerCase().replace(/\s+/g, ' ').trim();
   if (value && typeof value === 'object') {
     const record = value as Record<string, unknown>;
-    const candidate = record.name ?? record.title ?? record.label ?? record.page ?? record.path;
+    const candidate =
+      record.name ??
+      record.title ??
+      record.label ??
+      record.page ??
+      record.path ??
+      record.slug ??
+      record.id ??
+      record.value;
     if (typeof candidate === 'string') return candidate.toLowerCase().replace(/\s+/g, ' ').trim();
+    if (typeof candidate === 'number' || typeof candidate === 'boolean') return String(candidate).toLowerCase().trim();
   }
   return String(value ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
@@ -55,7 +64,18 @@ function normalizeTextValue(value: unknown): string {
 function getRequirementPages(requirements: Record<string, unknown> | null): string[] {
   if (!requirements) return [];
   return asArray<unknown>(requirements.pages)
-    .map(normalizeTextValue)
+    .flatMap((page) => {
+      const normalized = normalizeTextValue(page);
+      if (normalized && normalized !== '[object object]') return [normalized];
+      if (page && typeof page === 'object') {
+        const record = page as Record<string, unknown>;
+        return [record.name, record.title, record.label, record.page, record.path, record.slug, record.id, record.value]
+          .filter((item): item is string | number | boolean => item !== undefined)
+          .map((item) => String(item).toLowerCase().replace(/\s+/g, ' ').trim())
+          .filter(Boolean);
+      }
+      return [normalized].filter(Boolean);
+    })
     .filter(Boolean);
 }
 
