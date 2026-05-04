@@ -380,6 +380,14 @@ function assertStringArrayContainsAll(haystack: string[], needles: string[], lab
   }
 }
 
+function componentNameToFilePath(componentName: string): string {
+  const normalized = componentName.trim();
+  if (!normalized) return '';
+  if (normalized === 'App') return 'src/App.jsx';
+  if (normalized.startsWith('src/')) return normalizeFilePath(normalized);
+  return `src/components/${normalized}.jsx`;
+}
+
 export function assertBlueprintMatchesContext(
   blueprint: ProjectBlueprint,
   context: {
@@ -412,16 +420,24 @@ export function assertBlueprintMatchesContext(
   if (uiSpec?.components?.length) {
     const blueprintComponentNames = new Set(blueprint.navigation.routes.map((route) => route.component));
     const blueprintFilePaths = new Set(blueprint.files.map((file) => file.path));
+    const blueprintDependsOn = new Set(
+      blueprint.files.flatMap((file) => (Array.isArray(file.dependsOn) ? file.dependsOn : [])).map(normalizeFilePath)
+    );
     const rootRouteHasApp = blueprint.navigation.routes.some((route) => route.component === 'App');
+    const declaredComponentPaths = new Set(uiSpec.components.map((component) => normalizeFilePath(component.path)));
+    const declaredComponentNames = new Set(uiSpec.components.map((component) => component.name));
+    const routeComponents = new Set(blueprint.navigation.routes.map((route) => route.component));
 
     for (const component of uiSpec.components) {
-      const componentPath = component.path.replace(/\\/g, '/').replace(/^\/+/, '');
-      const componentNameWired = blueprintComponentNames.has(component.name);
-      const componentFileWired = blueprintFilePaths.has(componentPath);
+      const componentPath = normalizeFilePath(component.path);
+      const expectedPath = componentNameToFilePath(component.name);
+      const componentNameWired = routeComponents.has(component.name) || declaredComponentNames.has(component.name);
+      const componentFileWired = blueprintFilePaths.has(componentPath) || blueprintFilePaths.has(expectedPath);
       const componentReferencedByRoute = blueprint.navigation.routes.some((route) => route.component === component.name);
-      const componentReferencedByFile = blueprint.files.some((file) => Array.isArray(file.dependsOn) && file.dependsOn.includes(componentPath));
+      const componentReferencedByFile = blueprintDependsOn.has(componentPath) || blueprintDependsOn.has(expectedPath);
+      const componentReferencedByDeclaredPath = declaredComponentPaths.has(componentPath) || declaredComponentPaths.has(expectedPath);
 
-      if (!componentNameWired && !componentFileWired && !componentReferencedByRoute && !componentReferencedByFile) {
+      if (!componentNameWired && !componentFileWired && !componentReferencedByRoute && !componentReferencedByFile && !componentReferencedByDeclaredPath) {
         throw new Error(`Blueprint is missing UI spec component wiring for ${component.name}`);
       }
     }
