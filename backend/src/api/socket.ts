@@ -33,6 +33,7 @@ import {
 import { materializeProjectWorkspace } from '../factory/projectFactory';
 import { consolidateProjectSpec, validateProjectSpec } from '../agents/projectSpec';
 import { formatConsistencyIssues, validateProjectConsistency } from '../agents/projectConsistency';
+import { normalizePipelineStage, nextStage, stageGroup, type PipelineStage } from '../orchestration/pipelineStateMachine';
 import { config } from '../config/env';
 import { debug, error as logError } from '../utils/logger';
 import { toClientErrorMessage } from '../utils/errors';
@@ -71,16 +72,22 @@ export function createSocketServer(server: http.Server) {
   const stageWeights: Record<string, number> = {
     requirementAnalysis: 0.08,
     clarification: 0.10,
+    clarification_wait: 0.02,
+    clarification_wait_modification: 0.02,
     confirmation: 0.05,
+    confirmation_wait: 0.02,
     systemDesign: 0.08,
     uiSpec: 0.05,
+    uiSpec_modification: 0.05,
     blueprint: 0.06,
     codeGen: 0.22,
-    testFix: 0.18,
-    deploy: 0.17,
     codeGen_modification: 0.20,
+    testFix: 0.18,
     testFix_modification: 0.15,
+    deploy: 0.17,
     deploy_modification: 0.17,
+    done: 0.0,
+    done_modification: 0.0,
   };
 
   function applyStageProgress(session: any, stage: string) {
@@ -200,7 +207,7 @@ export function createSocketServer(server: http.Server) {
     // Session state
     type Session = {
       progress: number;
-      step: string;
+      step: PipelineStage;
       requirements: any;
       clarifications: any;
       confirmation: any;
@@ -228,7 +235,7 @@ export function createSocketServer(server: http.Server) {
 
     const session: Session = {
       progress: Number(snapshot?.progress || blackboardSnapshot?.progress) || 0,
-      step: snapshot?.current_step || blackboardSnapshot?.currentStage || 'init',
+      step: normalizePipelineStage(snapshot?.current_step || blackboardSnapshot?.currentStage || 'init'),
       requirements: snapshot?.requirements,
       clarifications: snapshot?.clarifications,
       confirmation: snapshot?.confirmation,
@@ -256,10 +263,30 @@ export function createSocketServer(server: http.Server) {
 
     // Reset completed projects so a new message starts fresh
     if (session.step === 'done' || session.step === 'done_modification') {
-      session.step = 'init';
+      setStep('init');
       session.progress = 0;
       session.progressStages = {};
       session.stepRetries = {};
+    }
+
+    function setStep(next: PipelineStage) {
+      session.step = next;
+      void persistBlackboardState();
+    }
+
+    function advanceStep(expected: PipelineStage, next: PipelineStage) {
+      if (session.step === expected) {
+        setStep(next);
+      }
+    }
+
+    function pauseStep(next: PipelineStage) {
+      setStep(next);
+    }
+
+    function resumeFromCurrentStep() {
+      const normalized = normalizePipelineStage(session.step);
+      setStep(normalized);
     }
 
       let clarificationAnswers: Record<string, string> =
@@ -523,7 +550,7 @@ export function createSocketServer(server: http.Server) {
             session.lastClarificationQuestion = questionMsg;
             askedClarificationQuestions.push(questionMsg);
             ws.send(JSON.stringify({ type: 'clarification', question: questionMsg }));
-            session.step = 'clarification_wait';
+            pauseStep('clarification_wait');
             return;
           }
 
@@ -581,7 +608,7 @@ export function createSocketServer(server: http.Server) {
           const confResult = await handleConfirmation({ clarifications: session.clarifications, projectId });
           if (!confResult.success) {
             ws.send(JSON.stringify({ type: 'confirmation', message: confResult.error, context: session.clarifications }));
-            session.step = 'confirmation_wait';
+            pauseStep('confirmation_wait');
             return;
           }
           session.confirmation = confResult.data;
@@ -602,7 +629,7 @@ export function createSocketServer(server: http.Server) {
           if (requiresBackendArchitecture(session.requirements)) {
             const sdResult = await handleSystemDesign({ requirements: session.requirements, projectSpec, projectId });
             if (!sdResult.success) {
-              session.step = 'systemDesign'; // stay, allow retry
+              pauseStep('systemDesign'); // stay, allow retry
               sendError(ws, session, toClientErrorMessage(sdResult.error, 'System design failed. Reply to retry.'));
               return;
             }
@@ -618,7 +645,7 @@ export function createSocketServer(server: http.Server) {
           session.stepRetries['systemDesign'] = 0;
           debug('socket:systemDesign', { projectId });
           ws.send(JSON.stringify({ type: 'stream', token: 'Architecture ready! Designing UI structure...' }));
-          session.step = 'uiSpec';
+          advanceStep('systemDesign', 'uiSpec');
         }
 
         // ── Stage 4.5: UI Specification ────────────────────────────────────
@@ -633,7 +660,7 @@ export function createSocketServer(server: http.Server) {
             userId: authedUser.id,
           });
           if (!uiSpecResult.success) {
-            session.step = 'uiSpec'; // stay, allow retry
+            pauseStep('uiSpec'); // stay, allow retry
             sendError(ws, session, toClientErrorMessage(uiSpecResult.error, 'UI specification failed. Reply to retry.'));
             return;
           }
@@ -646,7 +673,7 @@ export function createSocketServer(server: http.Server) {
           session.stepRetries['uiSpec'] = 0;
           debug('socket:uiSpec', { projectId, componentCount: session.uiSpec?.components?.length });
           ws.send(JSON.stringify({ type: 'stream', token: 'UI structure designed! Planning file architecture...' }));
-          session.step = 'blueprint';
+          advanceStep('uiSpec', 'blueprint');
         }
 
         // ── Stage 4.75: Blueprint ──────────────────────────────────────────
@@ -660,7 +687,7 @@ export function createSocketServer(server: http.Server) {
             projectId,
           });
           if (!bpResult.success) {
-            session.step = 'blueprint';
+            pauseStep('blueprint');
             sendError(ws, session, toClientErrorMessage(bpResult.error, 'Blueprint generation failed. Reply to retry.'));
             return;
           }
@@ -673,7 +700,7 @@ export function createSocketServer(server: http.Server) {
           session.stepRetries['blueprint'] = 0;
           debug('socket:blueprint', { projectId, title: session.blueprint?.title, fileCount: session.blueprint?.files?.length });
           ws.send(JSON.stringify({ type: 'stream', token: 'Architecture blueprint ready! Generating your code now...' }));
-          session.step = 'codeGen';
+          advanceStep('blueprint', 'codeGen');
         }
 
         // ── Stage 5: Code Generation ───────────────────────────────────────
@@ -699,7 +726,7 @@ export function createSocketServer(server: http.Server) {
             })),
           });
           if (!cgResult.success) {
-            session.step = 'codeGen'; // stay, allow retry
+            pauseStep('codeGen'); // stay, allow retry
             sendError(ws, session, toClientErrorMessage(cgResult.error, 'Code generation failed. Reply to retry.'));
             return;
           }
@@ -722,7 +749,7 @@ export function createSocketServer(server: http.Server) {
               (previewPaths.length ? `\nFiles: ${previewPaths.join(', ')}${fileCount > previewPaths.length ? ', …' : ''}` : '') +
               `\nBuilding and testing...`,
           }));
-          session.step = 'testFix';
+          advanceStep('codeGen', 'testFix');
         }
 
         // ── Stage 6: Test & Fix ────────────────────────────────────────────
@@ -731,7 +758,7 @@ export function createSocketServer(server: http.Server) {
           if (!buildPassed) return; // error already sent, step set back to codeGen
           debug('socket:testFix', { projectId });
           ws.send(JSON.stringify({ type: 'stream', token: 'Build passed! Deploying your project...' }));
-          session.step = 'deploy';
+          advanceStep('testFix', 'deploy');
         }
 
         // ── Stage 7: Deployment ────────────────────────────────────────────
@@ -753,7 +780,7 @@ export function createSocketServer(server: http.Server) {
           });
 
           if (!deployResult.success) {
-            session.step = 'deploy'; // stay, allow retry
+            pauseStep('deploy'); // stay, allow retry
             sendError(ws, session, toClientErrorMessage(deployResult.error, 'Deployment failed. Reply to retry.'));
             return;
           }
@@ -771,7 +798,7 @@ export function createSocketServer(server: http.Server) {
           }
           if (session.workspaceDir) void cleanupWorkspace(session.workspaceDir);
           sendProgress(ws, session, 'deploy', 'Deployment complete!', 1);
-          session.step = 'done';
+          advanceStep('deploy', 'done');
         }
 
         if (session.step === 'done') {

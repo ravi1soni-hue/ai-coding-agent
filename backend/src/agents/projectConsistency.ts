@@ -1,4 +1,5 @@
 import type { ProjectSpec } from './projectSpec';
+import { atOrAfterStage, normalizePipelineStage, type PipelineStage } from '../orchestration/pipelineStateMachine';
 
 export type ConsistencyIssue = {
   stage: string;
@@ -61,40 +62,6 @@ function getAppMustInclude(blueprint: unknown): string[] {
   return asArray<string>(appFile?.mustInclude);
 }
 
-// Pipeline stage order — each check only fires at/after its stage.
-// Must stay in sync with session.step values in socket.ts.
-const STAGE_ORDER = [
-  'init',
-  'requirementAnalysis',
-  'clarification',
-  'clarification_wait',
-  'clarification_wait_modification',
-  'confirmation',
-  'confirmation_wait',
-  'systemDesign',
-  'uiSpec',
-  'uiSpec_modification',
-  'blueprint',
-  'codeGen',
-  'codeGen_modification',
-  'testFix',
-  'testFix_modification',
-  'deploy',
-  'deploy_modification',
-  'done',
-  'done_modification',
-] as const;
-
-type PipelineStage = typeof STAGE_ORDER[number];
-
-function stageIndex(stage: string): number {
-  const idx = STAGE_ORDER.indexOf(stage as PipelineStage);
-  return idx === -1 ? STAGE_ORDER.length : idx;
-}
-
-function atOrAfter(activeStage: string, targetStage: PipelineStage): boolean {
-  return stageIndex(activeStage) >= stageIndex(targetStage);
-}
 
 export function validateProjectConsistency(input: {
   projectSpec: ProjectSpec;
@@ -108,7 +75,7 @@ export function validateProjectConsistency(input: {
 }): ConsistencyReport {
   const issues: ConsistencyIssue[] = [];
   const { projectSpec } = input;
-  const activeStage = input.activeStage || 'done'; // default: enforce everything
+  const activeStage = normalizePipelineStage(input.activeStage || 'done');
 
   const clarificationAnswers = projectSpec.clarificationAnswers || {};
   const clarifications = asRecord(input.clarifications) || asRecord(projectSpec.clarifications);
@@ -139,7 +106,7 @@ export function validateProjectConsistency(input: {
   }
 
   // systemDesign checks: only after systemDesign stage has run
-  if (atOrAfter(activeStage, 'uiSpec')) {
+  if (atOrAfterStage(activeStage, 'uiSpec')) {
     if (requirements?.backend_required && !systemDesign) {
       addIssue(issues, 'systemDesign', 'required backend architecture is missing');
     }
@@ -162,7 +129,7 @@ export function validateProjectConsistency(input: {
   }
 
   // blueprint checks: only after blueprint stage has run
-  if (atOrAfter(activeStage, 'codeGen')) {
+  if (atOrAfterStage(activeStage, 'codeGen')) {
     if (uiSpec) {
       const componentNames = getComponentNamesFromUiSpec(uiSpec);
       const blueprintNames = blueprint ? getBlueprintComponentNames(blueprint) : [];
@@ -184,7 +151,7 @@ export function validateProjectConsistency(input: {
   }
 
   // codeGen checks: only after codeGeneration stage has run
-  if (atOrAfter(activeStage, 'testFix')) {
+  if (atOrAfterStage(activeStage, 'testFix')) {
     if (codeGen) {
       const files = asArray<{ path?: string; content?: string }>(codeGen.files);
       const expectedPaths = new Set<string>([

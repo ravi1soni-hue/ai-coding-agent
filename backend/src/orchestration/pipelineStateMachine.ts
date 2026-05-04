@@ -1,0 +1,77 @@
+export const PIPELINE_STAGES = [
+  'init',
+  'requirementAnalysis',
+  'clarification',
+  'clarification_wait',
+  'clarification_wait_modification',
+  'confirmation',
+  'confirmation_wait',
+  'systemDesign',
+  'uiSpec',
+  'uiSpec_modification',
+  'blueprint',
+  'codeGen',
+  'codeGen_modification',
+  'testFix',
+  'testFix_modification',
+  'deploy',
+  'deploy_modification',
+  'done',
+  'done_modification',
+] as const;
+
+export type PipelineStage = typeof PIPELINE_STAGES[number];
+
+export const STAGE_ALIASES: Record<string, PipelineStage> = {
+  codeGeneration: 'codeGen',
+  deployment: 'deploy',
+  start: 'init',
+  complete: 'done',
+};
+
+export function normalizePipelineStage(stage: string | undefined | null): PipelineStage {
+  const raw = String(stage || 'init').trim();
+  if (PIPELINE_STAGES.includes(raw as PipelineStage)) {
+    return raw as PipelineStage;
+  }
+  return STAGE_ALIASES[raw] || 'init';
+}
+
+export function stageIndex(stage: string | undefined | null): number {
+  const normalized = normalizePipelineStage(stage);
+  return PIPELINE_STAGES.indexOf(normalized);
+}
+
+export function atOrAfterStage(activeStage: string | undefined | null, targetStage: PipelineStage): boolean {
+  return stageIndex(activeStage) >= stageIndex(targetStage);
+}
+
+export function nextStage(stage: PipelineStage): PipelineStage {
+  const index = PIPELINE_STAGES.indexOf(stage);
+  return PIPELINE_STAGES[Math.min(index + 1, PIPELINE_STAGES.length - 1)];
+}
+
+export function isModificationStage(stage: string | undefined | null): boolean {
+  return /_modification$/.test(normalizePipelineStage(stage));
+}
+
+export function isWaitStage(stage: string | undefined | null): boolean {
+  return /_wait$/.test(normalizePipelineStage(stage));
+}
+
+export function stageGroup(stage: string | undefined | null): 'analysis' | 'design' | 'generation' | 'delivery' | 'terminal' {
+  const normalized = normalizePipelineStage(stage);
+  if (['init', 'requirementAnalysis', 'clarification', 'clarification_wait', 'clarification_wait_modification', 'confirmation', 'confirmation_wait'].includes(normalized)) {
+    return 'analysis';
+  }
+  if (['systemDesign', 'uiSpec', 'uiSpec_modification', 'blueprint'].includes(normalized)) {
+    return 'design';
+  }
+  if (['codeGen', 'codeGen_modification', 'testFix', 'testFix_modification'].includes(normalized)) {
+    return 'generation';
+  }
+  if (['deploy', 'deploy_modification'].includes(normalized)) {
+    return 'delivery';
+  }
+  return 'terminal';
+}
