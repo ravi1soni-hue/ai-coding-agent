@@ -113,9 +113,11 @@ function containsPlaceholderText(value: string): boolean {
   return /(?:\bTODO\b|\bplaceholder\b|\breplace\b|\bgeneric text\b)/i.test(value);
 }
 
-function validateManifestSemantics(manifest: FrontendManifest, requirements: any, projectSpec?: any): void {
+function validateManifestSemantics(manifest: FrontendManifest, requirements: any, projectSpec?: any, uiSpec?: any): void {
   const components = Array.isArray(manifest.components) ? manifest.components : [];
   if (components.length === 0) throw new Error('frontendManifest: components array is empty');
+
+  const seenNames = new Set<string>();
   for (const component of components) {
     if (!component?.path || !component?.path.startsWith('src/components/') || !component.path.endsWith('.jsx')) {
       throw new Error(`frontendManifest: invalid component path ${component?.path || '(missing)'}`);
@@ -125,13 +127,19 @@ function validateManifestSemantics(manifest: FrontendManifest, requirements: any
     if (!purpose.trim() || containsPlaceholderText(purpose) || containsPlaceholderText(name)) {
       throw new Error(`frontendManifest: invalid component metadata for ${component.path}`);
     }
+    if (seenNames.has(name)) {
+      throw new Error(`frontendManifest: duplicate component name ${name}`);
+    }
+    seenNames.add(name);
   }
+
   const resources = Array.isArray(manifest.apiResources) ? manifest.apiResources : [];
   for (const resource of resources) {
     if (!resource?.name || !resource?.path || !String(resource.path).startsWith('/api/')) {
       throw new Error(`frontendManifest: invalid apiResource ${resource?.name || '(missing)'}`);
     }
   }
+
   const appName = String(manifest.appName || requirements?.userMessage || '').trim();
   if (projectSpec?.requirements?.website_type && !appName) {
     throw new Error('frontendManifest: invalid appName from projectSpec');
@@ -139,14 +147,35 @@ function validateManifestSemantics(manifest: FrontendManifest, requirements: any
   if (!appName || containsPlaceholderText(appName)) {
     throw new Error('frontendManifest: invalid appName');
   }
+
+  if (uiSpec?.components?.length) {
+    const requiredNames = new Set(
+      uiSpec.components
+        .map((component: { name?: string }) => String(component?.name || '').trim())
+        .filter((name: string): name is string => Boolean(name))
+    );
+    for (const requiredName of requiredNames) {
+      if (!seenNames.has(requiredName)) {
+        throw new Error(`frontendManifest: missing required UI component ${requiredName}`);
+      }
+    }
+  }
 }
 
-function validateAppImports(appContent: string, componentFiles: GeneratedFile[], blueprint?: ProjectBlueprint): void {
+function validateAppImports(appContent: string, componentFiles: GeneratedFile[], blueprint?: ProjectBlueprint, uiSpec?: any): void {
   const importPattern = /^import\s+([A-Za-z_$][\w$]*)\s+from\s+['"](.+?)['"];?$/gm;
   const declaredImports = new Map<string, string>();
   let match: RegExpExecArray | null;
   while ((match = importPattern.exec(appContent)) !== null) {
     declaredImports.set(match[1], match[2]);
+  }
+
+  const requiredComponentNames = new Set<string>(componentFiles.map((file) => sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')));
+  if (uiSpec?.components?.length) {
+    for (const component of uiSpec.components) {
+      const requiredName = String(component?.name || '').trim();
+      if (requiredName) requiredComponentNames.add(requiredName);
+    }
   }
 
   for (const file of componentFiles) {
@@ -162,6 +191,13 @@ function validateAppImports(appContent: string, componentFiles: GeneratedFile[],
     const usagePattern = new RegExp(`<${componentName}(\\s|/|>)`);
     if (!usagePattern.test(appContent)) {
       throw new Error(`frontendApp: missing rendered usage for ${componentName}`);
+    }
+  }
+
+  for (const requiredName of requiredComponentNames) {
+    const usagePattern = new RegExp(`<${requiredName}(\\s|/|>)`);
+    if (!usagePattern.test(appContent)) {
+      throw new Error(`frontendApp: missing rendered usage for required component ${requiredName}`);
     }
   }
 
@@ -705,7 +741,7 @@ async function generateFrontendFiles(
   let manifest: FrontendManifest;
   try {
     manifest = await generateFrontendManifest(systemDesign, requirements, modification, llmProxy, model);
-    validateManifestSemantics(manifest, requirements, projectSpec);
+    validateManifestSemantics(manifest, requirements, projectSpec, uiSpec);
   } catch (err) {
     metrics.fallbackCount += 1;
     metrics.fallbackReasons.push(`frontend-manifest:${String((err as any)?.message || err)}`);
@@ -788,7 +824,7 @@ async function generateFrontendFiles(
   const backendRequired = Boolean(systemDesign?.backend);
   try {
     appFile = await generateFrontendApp(manifest, requirements, systemDesign, modification, componentFiles, llmProxy, model, uiSpec);
-    validateAppImports(appFile.content, componentFiles, blueprint);
+    validateAppImports(appFile.content, componentFiles, blueprint, uiSpec);
   } catch (err) {
     failClosed(`frontend App generation failed: ${(err as Error).message}`);
   }
@@ -1121,7 +1157,7 @@ export async function codeGenerationAgent(input: any) {
     try {
       const frontendManifest = fallbackFrontendManifest(input.requirements);
       const repairedStubApp = await generateFrontendApp(frontendManifest, input.requirements, input.systemDesign, input.modification, repairComponents, llmProxy, model, input.uiSpec);
-      validateAppImports(repairedStubApp.content, repairComponents, blueprint);
+      validateAppImports(repairedStubApp.content, repairComponents, blueprint, input.uiSpec);
       fileMap.set('src/App.jsx', repairedStubApp.content);
       events?.emit({ type: 'FILE_WRITTEN', filePath: 'src/App.jsx', message: 'Repaired stub App.jsx', payload: { path: 'src/App.jsx', content: repairedStubApp.content } });
     } catch (err) {

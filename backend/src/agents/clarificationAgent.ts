@@ -58,9 +58,28 @@ function filterAskedQuestions(questions: string[], askedQuestions: string[], cla
 
 function shouldAskMoreQuestions(requirements: any, projectSpec: any): boolean {
   const text = JSON.stringify({ requirements, projectSpec }).toLowerCase();
-  const hasFrontendScope = /pricing page|landing page|dashboard|admin|checkout|auth|billing|table|accordion|toggle/.test(text);
-  const hasBackendScope = /backend|api|database|postgres|railway|crud|auth/.test(text);
-  return hasFrontendScope || hasBackendScope;
+
+  // Ask more questions only when the request is genuinely underspecified.
+  // A broad website-builder must handle all kinds of inputs without forcing
+  // clarification on valid, already-specific briefs.
+  const ambiguitySignals = [
+    /\b(maybe|some|various|several|etc|and\/or|whatever|something)\b/,
+    /\b(soon|later|flexible|optional|possibly|ideally)\b/,
+    /\b(tbd|todo|placeholder|unspecified|unknown)\b/,
+    /\b(what should|which should|how many|how much|which style|what kind)\b/,
+    /\b(need help deciding|open to suggestions|not sure)\b/,
+  ];
+
+  const hasStrongDirectionalSignals =
+    /\b(pricing page|landing page|dashboard|admin panel|checkout|portfolio|blog|store|saas|ecommerce|marketing site|single page|multi page)\b/.test(text) ||
+    /\b(monthly|yearly|toggle|accordion|cards|table|faq|cta|theme|dark mode|light mode|responsive)\b/.test(text) ||
+    /\b(react|vite|frontend|backend|api|database|auth|postg(res|re)|express)\b/.test(text);
+
+  if (hasStrongDirectionalSignals) {
+    return ambiguitySignals.some((pattern) => pattern.test(text));
+  }
+
+  return ambiguitySignals.some((pattern) => pattern.test(text));
 }
 
 function buildClarificationPrompt(input: any, projectSpec: any): string {

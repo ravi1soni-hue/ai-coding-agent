@@ -97,8 +97,14 @@ export function validateProjectConsistency(input: {
     addIssue(issues, 'clarification', 'clarifications are not confirmed');
   }
 
-  if (projectSpec.askedQuestions.length === 0 && Object.keys(clarificationAnswers).length === 0) {
-    addIssue(issues, 'clarification', 'no clarification answers were merged into the canonical spec');
+  const askedQuestions = Array.isArray(projectSpec.askedQuestions) ? projectSpec.askedQuestions : [];
+  const answerCount = Object.keys(clarificationAnswers).length;
+  const clarificationConfirmed = Boolean(clarifications?.confirmed);
+
+  // A valid request may need zero clarification questions. In that case we should
+  // not require fabricated answers just to satisfy the pipeline.
+  if (!clarificationConfirmed && askedQuestions.length > 0 && answerCount === 0) {
+    addIssue(issues, 'clarification', 'clarification answers are missing for unresolved questions');
   }
 
   if (requirements?.backend_required && !systemDesign) {
