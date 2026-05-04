@@ -42,6 +42,16 @@ function getComponentPathsFromUiSpec(uiSpec: unknown): string[] {
     .filter(Boolean);
 }
 
+function normalizeTextValue(value: unknown): string {
+  if (typeof value === 'string') return value.toLowerCase().replace(/\s+/g, ' ').trim();
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const candidate = record.name ?? record.title ?? record.label ?? record.page ?? record.path;
+    if (typeof candidate === 'string') return candidate.toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+  return String(value ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
 function getBlueprintComponentNames(blueprint: unknown): string[] {
   const record = asRecord(blueprint);
   if (!record) return [];
@@ -113,9 +123,8 @@ export function validateProjectConsistency(input: {
 
     if (systemDesign) {
       const frontend = asRecord(systemDesign.frontend);
-      const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
-      const pages = asArray<unknown>(frontend?.pages).map((page) => normalize(String(page ?? ''))).filter(Boolean);
-      const specPages = asArray<unknown>(asRecord(requirements)?.pages).map((page) => normalize(String(page ?? ''))).filter(Boolean);
+      const pages = asArray<unknown>(frontend?.pages).map(normalizeTextValue).filter(Boolean);
+      const specPages = asArray<unknown>(asRecord(requirements)?.pages).map(normalizeTextValue).filter(Boolean);
       for (const page of specPages) {
         if (!pages.includes(page)) {
           addIssue(issues, 'systemDesign', `missing page from requirements: ${page}`);
