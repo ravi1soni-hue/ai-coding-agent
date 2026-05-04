@@ -273,12 +273,16 @@ function componentNameToPath(componentName: string): string {
 }
 
 function routePathToComponentPath(routePath: string, componentName: string): string {
+  const normalizedName = componentName.trim();
+  if (normalizedName === 'App') {
+    return 'src/App.jsx';
+  }
   if (routePath === '/' || routePath === '') {
-    return componentNameToPath(componentName);
+    return componentNameToPath(normalizedName);
   }
   const slug = routePath.replace(/^\/+/, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   const safeSlug = slug || 'home';
-  return componentNameToPath(componentName || `${safeSlug[0].toUpperCase()}${safeSlug.slice(1)}`);
+  return componentNameToPath(normalizedName || `${safeSlug[0].toUpperCase()}${safeSlug.slice(1)}`);
 }
 
 function assertBlueprintRouteCoverage(blueprint: ProjectBlueprint): void {
@@ -287,6 +291,9 @@ function assertBlueprintRouteCoverage(blueprint: ProjectBlueprint): void {
     const route = blueprint.navigation.routes[i];
     const expectedComponentPath = routePathToComponentPath(route.path, route.component);
     if (!filePaths.has(expectedComponentPath)) {
+      if (route.component === 'App' && filePaths.has('src/App.jsx')) {
+        continue;
+      }
       throw new Error(`navigation.routes[${i}] references missing component file: ${expectedComponentPath}`);
     }
   }
@@ -304,6 +311,38 @@ function assertBlueprintDependencyCoverage(blueprint: ProjectBlueprint): void {
   }
 }
 
+function repairBlueprintIntegrationSafety(blueprint: ProjectBlueprint): ProjectBlueprint {
+  const filePaths = new Set(blueprint.files.map((file) => file.path));
+  const routes = blueprint.navigation.routes.map((route) => {
+    if (route.component === 'App') {
+      return route;
+    }
+    const expectedPath = routePathToComponentPath(route.path, route.component);
+    if (filePaths.has(expectedPath)) {
+      return route;
+    }
+    if (filePaths.has(`src/components/${route.component}.jsx`)) {
+      return route;
+    }
+    const fallbackComponent = componentNameToPath(route.component);
+    if (filePaths.has(fallbackComponent)) {
+      return route;
+    }
+    return {
+      ...route,
+      component: route.component,
+    };
+  });
+
+  return {
+    ...blueprint,
+    navigation: {
+      ...blueprint.navigation,
+      routes,
+    },
+  };
+}
+
 export function blueprintTopLevelPaths(blueprint: ProjectBlueprint): string[] {
   const paths = new Set<string>();
   for (const file of blueprint.files) {
@@ -316,19 +355,20 @@ export function blueprintTopLevelPaths(blueprint: ProjectBlueprint): string[] {
 }
 
 export function assertBlueprintIntegrationSafety(blueprint: ProjectBlueprint): ProjectBlueprint {
-  assertBlueprintRouteCoverage(blueprint);
-  assertBlueprintDependencyCoverage(blueprint);
+  const repairedBlueprint = repairBlueprintIntegrationSafety(blueprint);
+  assertBlueprintRouteCoverage(repairedBlueprint);
+  assertBlueprintDependencyCoverage(repairedBlueprint);
 
-  const appFile = blueprint.files.find((file) => file.path === 'src/App.jsx');
+  const appFile = repairedBlueprint.files.find((file) => file.path === 'src/App.jsx');
   if (!appFile) throw new Error('Blueprint missing src/App.jsx');
-  if (!blueprint.navigation.routes.some((route) => route.component === 'App')) {
+  if (!repairedBlueprint.navigation.routes.some((route) => route.component === 'App')) {
     throw new Error('navigation must include App as the root entry component');
   }
-  if (!appFile.mustInclude?.some((token) => /router|API_BASE|fetch/i.test(token)) && blueprint.backendRoutes.length > 0) {
+  if (!appFile.mustInclude?.some((token) => /router|API_BASE|fetch/i.test(token)) && repairedBlueprint.backendRoutes.length > 0) {
     throw new Error('src/App.jsx must declare API_BASE or fetch usage when backend routes exist');
   }
 
-  return blueprint;
+  return repairedBlueprint;
 }
 
 function assertStringArrayContainsAll(haystack: string[], needles: string[], label: string): void {
