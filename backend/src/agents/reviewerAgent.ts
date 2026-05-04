@@ -8,15 +8,20 @@ type ReviewerInput = {
 
 function buildApprovalNotes(blueprint: ProjectBlueprint): string[] {
   const notes: string[] = [];
+  const files = Array.isArray(blueprint.files) ? blueprint.files : [];
+  const invariants = Array.isArray(blueprint.invariants) ? blueprint.invariants : [];
+  const navigationRoutes = blueprint.navigation?.routes || [];
 
-  if (!Array.isArray(blueprint.files) || blueprint.files.length === 0) {
+  if (files.length === 0) {
     notes.push('Blueprint has no files.');
   }
 
-  const hasBackendRoutes = Array.isArray(blueprint.backendRoutes) && blueprint.backendRoutes.length > 0;
-
-  if (!blueprint.invariants.some((rule) => /project_id/i.test(rule))) {
+  if (!invariants.some((rule: string) => /project_id/i.test(rule))) {
     notes.push('Blueprint is missing a project_id isolation invariant.');
+  }
+
+  if (navigationRoutes.length > 0 && !navigationRoutes.some((route) => route.component === 'App')) {
+    notes.push('Blueprint navigation is missing the App root route.');
   }
 
   return notes;

@@ -225,6 +225,7 @@ export function createSocketServer(server: http.Server) {
       modificationContext?: any;
       lastClarificationQuestion?: string;
       activeRevisionId?: string;
+      workspaceRoot?: string;
       workspaceDir?: string;
       sourceArchivePath?: string;
       sourceHash?: string;
@@ -253,7 +254,7 @@ export function createSocketServer(server: http.Server) {
       modificationContext: undefined,
       lastClarificationQuestion: undefined,
       activeRevisionId: undefined,
-      workspaceDir: undefined,
+      workspaceRoot: undefined,
       sourceArchivePath: undefined,
       sourceHash: undefined,
       buildDir: undefined,
@@ -372,7 +373,7 @@ export function createSocketServer(server: http.Server) {
     async function rematerializeAndStore(codeGenData: any): Promise<void> {
       const mat = await materializeProjectWorkspace({ projectId, codeGen: codeGenData });
       session.activeRevisionId = mat.revisionId;
-      session.workspaceDir = mat.workspaceDir;
+      session.workspaceRoot = mat.workspaceDir;
       session.sourceArchivePath = mat.archivePath;
       session.sourceHash = mat.sourceHash;
       session.codeRevisionDbId = await createProjectCodeRevision({
@@ -396,7 +397,7 @@ export function createSocketServer(server: http.Server) {
       sendProgress(ws, session, flowLabel, 'Building and testing...', 0);
       const tfResult = await handleTestFix({
         buildFn: async () => {
-          const result = await runBuildWorker({ workspaceDir: session.workspaceDir });
+          const result = await runBuildWorker({ workspaceRoot: session.workspaceRoot, workspaceDir: session.workspaceRoot });
           if (result.success) {
             session.buildDir = result.buildDir;
             session.backendDir = result.backendDir;
@@ -776,6 +777,7 @@ export function createSocketServer(server: http.Server) {
             revisionId: session.activeRevisionId,
             buildDir: session.buildDir,
             backendDir: session.backendDir,
+            workspaceRoot: session.workspaceRoot,
             frontendProjectName: `proj-${projectId.slice(0, 10)}`,
             backendService: 'backend',
             hasBackend: Boolean(session.systemDesign?.backend),
@@ -798,7 +800,7 @@ export function createSocketServer(server: http.Server) {
           if (session.deployment?.frontend_access_warning) {
             ws.send(JSON.stringify({ type: 'stream', token: `⚠️ ${session.deployment.frontend_access_warning}` }));
           }
-          if (session.workspaceDir) void cleanupWorkspace(session.workspaceDir);
+          if (session.workspaceRoot) void cleanupWorkspace(session.workspaceRoot);
           sendProgress(ws, session, 'deploy', 'Deployment complete!', 1);
           advanceStep('deploy', 'done');
         }
@@ -954,7 +956,8 @@ export function createSocketServer(server: http.Server) {
           projectId,
           revisionId: session.activeRevisionId,
           buildDir: session.buildDir,
-          backendDir: session.backendDir,
+            backendDir: session.backendDir,
+            workspaceRoot: session.workspaceRoot,
           frontendProjectName: `proj-${projectId.slice(0, 10)}`,
           backendService: 'backend',
           hasBackend: Boolean(session.systemDesign?.backend),
@@ -976,7 +979,7 @@ export function createSocketServer(server: http.Server) {
         if (session.deployment?.frontend_access_warning) {
           ws.send(JSON.stringify({ type: 'stream', token: `⚠️ ${session.deployment.frontend_access_warning}` }));
         }
-        if (session.workspaceDir) void cleanupWorkspace(session.workspaceDir);
+        if (session.workspaceRoot) void cleanupWorkspace(session.workspaceRoot);
         sendProgress(ws, session, 'deploy_modification', 'Deployed!', 1);
         session.step = 'done_modification';
 

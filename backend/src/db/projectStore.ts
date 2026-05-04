@@ -18,6 +18,9 @@ export type ProjectHistoryRow = {
   railway_log_url: string | null;
   code_revision_id: string | null;
   source_hash: string | null;
+  active_revision_id: string | null;
+  revision_lock_owner: string | null;
+  revision_lock_expires_at: string | null;
 };
 
 export type ProjectBlackboardState = {

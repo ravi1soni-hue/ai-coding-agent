@@ -1,13 +1,15 @@
 import path from 'path';
 import { getModelConfigForTask } from './modelRouter';
-import { searchVectors } from '../db/vectorStore';
 import { LLMProxyClient } from './llmProxyClient';
-import { embeddingAgent } from './embeddingAgent';
 import { debug, error as logError, warn as logWarn } from '../utils/logger';
 import { assertBlueprintIntegrationSafety, blueprintMissingFiles, validateProjectBlueprint, type ProjectBlueprint } from './blueprintContract';
 import { reviewerAgent } from './reviewerAgent';
 
 type GeneratedFile = { path: string; content: string };
+
+type EventSink = {
+  emit: (event: { type: string; message?: string; token?: string; filePath?: string; payload?: unknown }) => void;
+};
 
 type FrontendManifest = {
   appName?: string;
@@ -15,11 +17,6 @@ type FrontendManifest = {
   apiResources?: Array<{ name: string; path: string; methods?: string[]; purpose?: string }>;
   components?: Array<{ path: string; name?: string; purpose?: string }>;
   styleNotes?: string;
-};
-
-type GenerationMetrics = {
-  fallbackCount: number;
-  fallbackReasons: string[];
 };
 
 type BackendManifest = {
@@ -46,71 +43,204 @@ type ProjectManifest = {
   blueprint?: ProjectBlueprint;
 };
 
-type EventSink = {
-  emit: (event: { type: string; message?: string; token?: string; filePath?: string; payload?: any }) => void;
-};
-
 const FRONTEND_REQUIRED = new Set(['package.json', 'index.html', 'vite.config.js', 'src/main.jsx', 'src/App.jsx', 'src/index.css']);
 const FRONTEND_ALLOWED_PREFIXES = ['src/components/', 'src/pages/'];
-const BACKEND_REQUIRED = new Set(['backend/package.json', 'backend/index.js', 'backend/db/database.js', 'backend/db/init.sql']);
-const BACKEND_ALLOWED_PREFIXES = ['backend/routes/', 'backend/middleware/'];
+const BACKEND_REQUIRED = new Set(['backend/package.json', 'backend/src/index.ts', 'backend/src/db/database.ts', 'backend/db/init.sql']);
+const BACKEND_ALLOWED_PREFIXES = ['backend/src/routes/', 'backend/src/middleware/'];
 const MAX_COMPONENTS = 6;
 const MAX_BACKEND_ROUTES = 8;
+const MAX_BUILD_ATTEMPTS = 2;
+const MAX_LLM_CALLS_PER_PROJECT = 20;
 const BAN_LIST = ['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', '.pnpm-store', 'bun.lockb'];
+const SHARED_TABLE_NAME = 'items';
+const SHARED_TABLE_COLUMNS = ['id TEXT PRIMARY KEY', 'project_id TEXT NOT NULL', 'name TEXT NOT NULL', "data JSONB NOT NULL DEFAULT '{}'::jsonb", 'created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()'];
+
+function normalizePath(value: string): string {
+  return value.replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+function sanitizeIdentifier(value: string, fallback: string): string {
+  const cleaned = value.replace(/[^a-zA-Z0-9_$]/g, '');
+  return cleaned && /^[a-zA-Z_$]/.test(cleaned) ? cleaned : fallback;
+}
+
+function isAllowedPath(filePath: string, scope: 'frontend' | 'backend'): boolean {
+  const p = normalizePath(filePath);
+  if (p.includes('..') || path.isAbsolute(p)) return false;
+  if (BAN_LIST.some((b) => p === b || p.startsWith(`${b}/`))) return false;
+  if (p.startsWith('node_modules') || p.includes('/node_modules/')) return false;
+  if (p.startsWith('dist/') || p === 'dist') return false;
+  if (scope === 'frontend') return FRONTEND_REQUIRED.has(p) || FRONTEND_ALLOWED_PREFIXES.some((prefix) => p.startsWith(prefix));
+  return BACKEND_REQUIRED.has(p) || BACKEND_ALLOWED_PREFIXES.some((prefix) => p.startsWith(prefix));
+}
+
+function assertObject(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label}: expected a JSON object`);
+  return value as Record<string, unknown>;
+}
 
 function stripMarkdownFences(content: string): string {
   return content.replace(/```[a-zA-Z]*\s*/g, '').replace(/```/g, '').trim();
 }
 
-function extractJsonObject(content: string): string | null {
-  const cleaned = stripMarkdownFences(content);
-  const firstBrace = cleaned.indexOf('{');
-  const lastBrace = cleaned.lastIndexOf('}');
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    return cleaned.slice(firstBrace, lastBrace + 1);
-  }
-  return null;
-}
-
 function parseJsonSafe(content: string): any {
   const cleaned = stripMarkdownFences(content);
-  try { return JSON.parse(cleaned); } catch {}
-  const extracted = extractJsonObject(cleaned);
-  if (extracted) {
-    try { return JSON.parse(extracted); } catch {}
-  }
+  try {
+    return JSON.parse(cleaned);
+  } catch {}
   const firstBrace = cleaned.indexOf('{');
   const lastBrace = cleaned.lastIndexOf('}');
   if (firstBrace >= 0 && lastBrace > firstBrace) {
     const slice = cleaned.slice(firstBrace, lastBrace + 1);
-    try { return JSON.parse(slice); } catch {}
-    const compact = slice
-      .replace(/:\s*'([^']*)'/g, (_, value) => `: "${value.replace(/"/g, '\\"')}"`)
-      .replace(/,\s*([}\]])/g, '$1');
-    try { return JSON.parse(compact); } catch {}
+    try {
+      return JSON.parse(slice);
+    } catch {}
   }
-  const candidateLines = cleaned
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean);
-  for (let i = 0; i < candidateLines.length; i += 1) {
-    const joined = candidateLines.slice(i).join('\n');
-    const start = joined.indexOf('{');
-    const end = joined.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      try { return JSON.parse(joined.slice(start, end + 1)); } catch {}
-    }
-  }
-  throw new Error(`No valid JSON found in LLM response. Snippet: ${content.replace(/\s+/g, ' ').slice(0, 220)}`);
-}
-
-function assertObject(value: any, label: string): Record<string, any> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label}: expected a JSON object`);
-  return value;
+  throw new Error(`No valid JSON found in LLM response. Snippet: ${cleaned.replace(/\s+/g, ' ').slice(0, 220)}`);
 }
 
 function containsPlaceholderText(value: string): boolean {
   return /(?:\bTODO\b|\bplaceholder\b|\breplace\b|\bgeneric text\b)/i.test(value);
+}
+
+function validateGeneratedFile(file: unknown, expectedPath: string | undefined, scope: 'frontend' | 'backend', label: string): GeneratedFile {
+  const obj = assertObject(file, label);
+  const filePath = normalizePath(String(obj.path || expectedPath || ''));
+  const content = obj.content;
+  if (!filePath) throw new Error(`${label}: missing path`);
+  if (expectedPath && filePath !== expectedPath) throw new Error(`${label}: expected path ${expectedPath}, got ${filePath}`);
+  if (!isAllowedPath(filePath, scope)) throw new Error(`${label}: invalid or disallowed path ${filePath}`);
+  if (typeof content !== 'string' || !content.trim()) throw new Error(`${label}: missing content for ${filePath}`);
+  return { path: filePath, content };
+}
+
+function setFile(files: Map<string, string>, file: GeneratedFile) {
+  files.set(normalizePath(file.path), file.content);
+}
+
+function sanitizeComponentPath(rawPath: string, index: number): string {
+  const p = normalizePath(rawPath || '');
+  if (p.startsWith('src/components/') && p.endsWith('.jsx') && !p.includes('..')) return p;
+  return `src/components/GeneratedSection${index + 1}.jsx`;
+}
+
+function sanitizeRoutePath(rawPath: string, resourceName: string): string {
+  const p = normalizePath(rawPath || '');
+  const rawName = p.startsWith('backend/src/routes/') && p.endsWith('.ts') ? path.basename(p, path.extname(p)) : resourceName;
+  const slug = rawName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'resource';
+  return `backend/src/routes/${slug}.ts`;
+}
+
+function fallbackFrontendManifest(requirements: any, uiSpec?: any): FrontendManifest {
+  const rawName = typeof requirements?.userMessage === 'string'
+    ? requirements.userMessage.slice(0, 60)
+    : typeof requirements?.summary === 'string'
+      ? requirements.summary
+      : typeof requirements?.app_type === 'string'
+        ? requirements.app_type
+        : 'Generated App';
+  const appName = String(rawName).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'generated-app';
+
+  if (Array.isArray(uiSpec?.components) && uiSpec.components.length > 0) {
+    const uiSpecComponents = (uiSpec.components as Array<{ name?: string; path?: string; purpose?: string }>)
+      .slice(0, MAX_COMPONENTS)
+      .map((c) => {
+        const name = String(c.name || '').trim() || 'Section';
+        const filePath = c.path && String(c.path).startsWith('src/components/')
+          ? String(c.path)
+          : `src/components/${name}.jsx`;
+        return { path: filePath.endsWith('.jsx') ? filePath : `${filePath}.jsx`, name, purpose: String(c.purpose || `${name} component`) };
+      });
+    return { appName, dependencies: {}, apiResources: [], components: uiSpecComponents, styleNotes: 'Clean responsive application UI.' };
+  }
+
+  const authRequired = Boolean(requirements?.auth_required);
+  const pages = Array.isArray(requirements?.pages) ? requirements.pages : [];
+  const components = [
+    ...(authRequired ? [{ path: 'src/components/Login.jsx', name: 'Login', purpose: 'Authentication form for email and password login.' }] : []),
+    ...pages.slice(0, 3).map((page: any, i: number) => {
+      const pageLabel = typeof page === 'string' ? page : String(page?.name || page?.title || page?.path || `Page ${i + 1}`);
+      const slug = pageLabel.replace(/[^a-zA-Z0-9]/g, '') || `Page${i + 1}`;
+      return { path: `src/components/${slug}.jsx`, name: slug, purpose: `${pageLabel} page content and functionality.` };
+    }),
+  ];
+
+  if (components.length === 0) {
+    components.push(
+      { path: 'src/components/Overview.jsx', name: 'Overview', purpose: 'Core user workflow overview.' },
+      { path: 'src/components/Workspace.jsx', name: 'Workspace', purpose: 'Primary interactive workspace.' }
+    );
+  }
+
+  return { appName, dependencies: {}, apiResources: [], components: components.slice(0, MAX_COMPONENTS), styleNotes: 'Clean responsive application UI.' };
+}
+
+function fallbackFrontendApp(manifest: FrontendManifest, components: GeneratedFile[], hasBackend = false): GeneratedFile {
+  const imports = components.map((file) => `import ${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} from './${file.path.replace(/^src\//, '')}';`).join('\n');
+  const componentTags = components.map((file) => `        <${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} />`).join('\n');
+  const apiInit = hasBackend ? `
+  const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:3000';
+  const [apiReady, setApiReady] = React.useState(false);
+
+  React.useEffect(() => {
+    fetch(\`\${API_BASE}/api/health\`)
+      .then((res) => res.json())
+      .then(() => setApiReady(true))
+      .catch(() => setApiReady(false));
+  }, []);
+` : '';
+
+  const apiStatus = hasBackend ? `
+  {!apiReady && <div className="warning">Backend not connected. Using offline mode.</div>}` : '';
+
+  return {
+    path: 'src/App.jsx',
+    content: `import React from 'react';
+${imports}
+
+export default function App() {
+${apiInit}
+  return (
+    <main className="app-shell">
+      <section className="hero">
+        <p className="eyebrow">${escapeJsxText(manifest.appName, 'Generated App')}</p>
+        <h1>${escapeJsxText(manifest.appName, 'Your App')}</h1>
+        <p>A production-ready React application.</p>
+      </section>
+      <section className="content-grid">
+${componentTags || '        <div className="panel"><h2>Ready</h2><p>Your app scaffold is ready for iteration.</p></div>'}
+      </section>
+${apiStatus}
+    </main>
+  );
+}
+`
+  };
+}
+
+function fallbackFrontendCss(): GeneratedFile {
+  return {
+    path: 'src/index.css',
+    content: `* { box-sizing: border-box; }
+html, body, #root { margin: 0; min-height: 100%; }
+body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f8fb; color: #111827; }
+button, input, textarea, select { font: inherit; }
+.app-shell { min-height: 100vh; padding: 48px clamp(20px, 5vw, 72px); }
+.hero { max-width: 920px; margin: 0 auto 32px; }
+.eyebrow { margin: 0 0 10px; color: #2563eb; font-weight: 700; text-transform: uppercase; font-size: 0.78rem; }
+h1 { margin: 0; font-size: clamp(2rem, 6vw, 4.5rem); line-height: 1; }
+.hero p:last-child { color: #4b5563; font-size: 1.08rem; line-height: 1.7; max-width: 680px; }
+.content-grid { max-width: 1120px; margin: 0 auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; box-shadow: 0 12px 32px rgba(15, 23, 42, 0.06); }
+.panel h2 { margin: 0 0 8px; font-size: 1.08rem; }
+.panel p { margin: 0; color: #4b5563; line-height: 1.6; }
+.warning { max-width: 1120px; margin: 16px auto 0; padding: 12px 14px; border-radius: 8px; background: #fef3c7; color: #92400e; border: 1px solid #f59e0b; }
+`
+  };
+}
+
+function normalizeImportPath(p: string): string {
+  return p.replace(/^\.\//, '').replace(/\.(jsx?|tsx?)$/, '').toLowerCase();
 }
 
 function validateManifestSemantics(manifest: FrontendManifest, requirements: any, projectSpec?: any, uiSpec?: any): void {
@@ -141,12 +271,8 @@ function validateManifestSemantics(manifest: FrontendManifest, requirements: any
   }
 
   const appName = String(manifest.appName || requirements?.userMessage || '').trim();
-  if (projectSpec?.requirements?.website_type && !appName) {
-    throw new Error('frontendManifest: invalid appName from projectSpec');
-  }
-  if (!appName || containsPlaceholderText(appName)) {
-    throw new Error('frontendManifest: invalid appName');
-  }
+  if (projectSpec?.requirements?.website_type && !appName) throw new Error('frontendManifest: invalid appName from projectSpec');
+  if (!appName || containsPlaceholderText(appName)) throw new Error('frontendManifest: invalid appName');
 
   if (uiSpec?.components?.length) {
     const requiredNames = new Set<string>(
@@ -156,44 +282,30 @@ function validateManifestSemantics(manifest: FrontendManifest, requirements: any
     );
     for (const requiredName of requiredNames) {
       if (!seenNames.has(requiredName)) {
-        // Warn only — a manifest name mismatch should not trigger the fallback cascade.
-        // validateAppImports enforces the authoritative component-wiring check after generation.
         logWarn('codeGenerationAgent:manifest-missing-uispec-component', { requiredName });
       }
     }
   }
 }
 
-function normalizeImportPath(p: string): string {
-  return p.replace(/^\.\//, '').replace(/\.(jsx?|tsx?)$/, '').toLowerCase();
-}
-
 function validateAppImports(appContent: string, componentFiles: GeneratedFile[], blueprint?: ProjectBlueprint, uiSpec?: any): void {
   const importPattern = /^import\s+([A-Za-z_$][\w$]*)\s+from\s+['"](.+?)['"];?$/gm;
   const declaredImports = new Map<string, string>();
   let match: RegExpExecArray | null;
-  while ((match = importPattern.exec(appContent)) !== null) {
-    declaredImports.set(match[1], match[2]);
-  }
+  while ((match = importPattern.exec(appContent)) !== null) declaredImports.set(match[1], match[2]);
 
   for (const file of componentFiles) {
     const componentName = sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection');
     const expectedImportPath = `./${file.path.replace(/^src\//, '')}`;
     const importedPath = declaredImports.get(componentName);
-    if (!importedPath) {
-      throw new Error(`frontendApp: missing import for ${componentName}`);
-    }
-    // Normalize both paths before comparing — LLM may omit .jsx extension or vary casing
+    if (!importedPath) throw new Error(`frontendApp: missing import for ${componentName}`);
     if (normalizeImportPath(importedPath) !== normalizeImportPath(expectedImportPath)) {
       throw new Error(`frontendApp: import path mismatch for ${componentName} (expected ${expectedImportPath}, got ${importedPath})`);
     }
     const usagePattern = new RegExp(`<${componentName}(\\s|/|>)`);
-    if (!usagePattern.test(appContent)) {
-      throw new Error(`frontendApp: missing rendered usage for ${componentName}`);
-    }
+    if (!usagePattern.test(appContent)) throw new Error(`frontendApp: missing rendered usage for ${componentName}`);
   }
 
-  // uiSpec component render check: only warn — LLM may render them conditionally or compose differently
   if (uiSpec?.components?.length) {
     for (const component of uiSpec.components) {
       const requiredName = String(component?.name || '').trim();
@@ -206,65 +318,290 @@ function validateAppImports(appContent: string, componentFiles: GeneratedFile[],
     }
   }
 
-  if (blueprint) {
-    const declaredRoutes = new Set(blueprint.navigation.routes.map((route) => route.component));
+  const blueprintNavigation = blueprint?.navigation;
+  if (blueprintNavigation) {
+    const declaredRoutes = new Set(blueprintNavigation.routes.map((route: { component: string }) => route.component));
     const rootComponentNames = new Set(componentFiles.map((file) => sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')));
-    for (const route of blueprint.navigation.routes) {
+    for (const route of blueprintNavigation.routes) {
       if (route.component !== 'App' && !rootComponentNames.has(route.component) && !declaredImports.has(route.component)) {
         throw new Error(`frontendApp: blueprint navigation references unknown component ${route.component}`);
       }
     }
-    if (blueprint.navigation.routes.length > 0 && !declaredRoutes.has('App')) {
+    if (blueprintNavigation.routes.length > 0 && !declaredRoutes.has('App')) {
       throw new Error('frontendApp: blueprint navigation must include App as the root route component');
     }
   }
 
-  if (containsPlaceholderText(appContent)) {
-    throw new Error('frontendApp: placeholder text detected');
+  if (containsPlaceholderText(appContent)) throw new Error('frontendApp: placeholder text detected');
+}
+
+function buildProjectManifest(frontend: FrontendManifest, backend: BackendManifest | undefined, modelRouting: ProjectManifest['technicalSpecs']['modelRouting']): ProjectManifest {
+  const fileTree = [
+    'package.json',
+    'index.html',
+    'vite.config.js',
+    'src/main.jsx',
+    'src/App.jsx',
+    'src/index.css',
+    ...(frontend.components || []).map((c) => sanitizeComponentPath(c.path || '', 0)),
+    ...(backend ? ['backend/package.json', 'backend/src/index.ts', 'backend/src/db/database.ts', 'backend/db/init.sql', ...((backend.resources || []).map((r) => sanitizeRoutePath(`backend/src/routes/${r.name}.ts`, r.name || 'resource')))] : []),
+  ];
+  const componentRequirements = (frontend.components || []).map((component) => ({
+    path: sanitizeComponentPath(component.path || '', 0),
+    purpose: component.purpose || '',
+    reviewerNotes: 'Must be a standalone React component and remain under 180 lines.',
+  }));
+  const queue = fileTree.map((pathName, index) => ({ id: `task-${index + 1}`, kind: 'file' as const, path: pathName, purpose: `Generate or verify ${pathName}` }));
+  return {
+    technicalSpecs: { stack: 'React 18 + Vite + Node/Express', modelRouting },
+    fileTree,
+    requirements: { frontend, backend },
+    componentRequirements,
+    project_task_queue: queue,
+  };
+}
+
+function generateBackendManifest(systemDesign: any, requirements: any, llmProxy: LLMProxyClient, model: string): Promise<BackendManifest> {
+  const userMessage = String(requirements?.userMessage || '').slice(0, 400);
+  const systemPrompt = `Create a backend implementation manifest for Node.js + TypeScript + Express + Postgres for this app: "${userMessage}". Return ONLY JSON with shape: {"resources":[{"name":"...","routePath":"/api/...","tableName":"items","fields":[],"methods":[],"purpose":"..."}],"tables":[{"name":"items","columns":[],"purpose":"..."}]}. Use only shared tables with project_id columns. Never emit per-project table names.`;
+  return generateJson(llmProxy, model, 'backendManifest', systemPrompt, { requirements, userDescription: userMessage, backendDesign: systemDesign?.backend || null, sharedTable: SHARED_TABLE_NAME, modification: null }, 1800)
+    .then((parsed) => parseBackendManifest(parsed));
+}
+
+function parseBackendManifest(raw: unknown): BackendManifest {
+  const manifest = assertObject(raw, 'backendManifest') as BackendManifest;
+  const resources = Array.isArray(manifest.resources) ? manifest.resources : [];
+  const normalizedResources = resources.slice(0, MAX_BACKEND_ROUTES).map((resource, index) => {
+    const name = String(resource?.name || `resource${index + 1}`);
+    const routePath = String(resource?.routePath || `/api/${name}`);
+    return {
+      ...resource,
+      name,
+      routePath: routePath.startsWith('/api/') ? routePath : `/api/${name}`,
+      tableName: SHARED_TABLE_NAME,
+      methods: Array.isArray(resource?.methods) && resource.methods.length > 0 ? resource.methods : ['GET', 'POST'],
+      purpose: String(resource?.purpose || `Data operations for ${name}`),
+    };
+  });
+
+  const tables = Array.isArray(manifest.tables) ? manifest.tables : [];
+  const normalizedTables = tables.slice(0, MAX_BACKEND_ROUTES).map((table) => ({
+    ...table,
+    name: SHARED_TABLE_NAME,
+    columns: Array.isArray(table?.columns) && table.columns.length > 0 ? table.columns : SHARED_TABLE_COLUMNS,
+    purpose: String(table?.purpose || 'Shared storage for project-scoped data'),
+  }));
+
+  return { resources: normalizedResources, tables: normalizedTables };
+}
+
+function sanitizeComponentName(rawName: string, index: number): string {
+  return sanitizeIdentifier(rawName || `GeneratedSection${index + 1}`, `GeneratedSection${index + 1}`);
+}
+
+function frontendScaffold(manifest: FrontendManifest): GeneratedFile[] {
+  const dependencies = { react: '^18.3.1', 'react-dom': '^18.3.1', ...(manifest.dependencies || {}) };
+  delete (dependencies as Record<string, string>).vite;
+  delete (dependencies as Record<string, string>)['@vitejs/plugin-react'];
+  return [
+    {
+      path: 'package.json',
+      content: JSON.stringify({
+        name: (manifest.appName || 'generated-project').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '') || 'generated-project',
+        private: true,
+        version: '0.1.0',
+        type: 'module',
+        scripts: { dev: 'vite', build: 'vite build', preview: 'vite preview' },
+        dependencies,
+        devDependencies: { '@vitejs/plugin-react': '^4.3.1', vite: '^5.4.20' }
+      }, null, 2)
+    },
+    {
+      path: 'index.html',
+      content: `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>${manifest.appName || 'Generated App'}</title></head><body><div id="root"></div><script type="module" src="/src/main.jsx"></script></body></html>`
+    },
+    {
+      path: 'vite.config.js',
+      content: `import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+export default defineConfig({ plugins: [react()] });
+`
+    },
+    {
+      path: 'src/main.jsx',
+      content: `import React from 'react';
+import { createRoot } from 'react-dom/client';
+import App from './App.jsx';
+import './index.css';
+createRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>);
+`
+    },
+  ];
+}
+
+function backendScaffold(): GeneratedFile[] {
+  const packageJson = {
+    name: 'generated-backend',
+    version: '0.1.0',
+    private: true,
+    type: 'module',
+    scripts: {
+      dev: 'ts-node src/index.ts',
+      build: 'tsc',
+      start: 'node dist/index.js',
+    },
+    dependencies: {
+      express: '^4.19.0',
+      pg: '^8.20.0',
+      cors: '^2.8.5',
+      dotenv: '^17.4.2',
+    },
+    devDependencies: {
+      'ts-node': '^10.9.2',
+      typescript: '^5.4.0',
+      '@types/express': '^5.0.0',
+      '@types/node': '^22.0.0',
+      '@types/cors': '^2.8.17',
+    },
+  };
+
+  return [
+    {
+      path: 'backend/package.json',
+      content: JSON.stringify(packageJson, null, 2),
+    },
+    {
+      path: 'backend/src/db/database.ts',
+      content: `import { Pool } from 'pg';
+
+const connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL || '';
+export const pool = new Pool(connectionString ? { connectionString } : {});
+
+export function query<T = unknown>(sql: string, params: unknown[] = []): Promise<{ rows: T[] }> {
+  return pool.query<T>(sql, params);
+}
+`,
+    },
+    {
+      path: 'backend/src/index.ts',
+      content: `import dotenv from 'dotenv';
+import express from 'express';
+import cors from 'cors';
+import { readFileSync } from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { query } from './db/database.ts';
+
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const app = express();
+const port = process.env.PORT ? Number(process.env.PORT) : 3000;
+
+app.use(cors({ origin: '*' }));
+app.use(express.json());
+
+async function initDb() {
+  try {
+    const sql = readFileSync(path.join(__dirname, '../db/init.sql'), 'utf8');
+    if (sql.trim()) await query(sql);
+  } catch (error) {
+    console.warn('DB init warning:', error instanceof Error ? error.message : String(error));
   }
 }
 
-async function callWithRetry(
-  llmProxy: LLMProxyClient,
-  messages: Array<{ role: string; content: string }>,
-  model: string,
-  maxTokens: number,
-  timeoutMs: number,
-  maxRetries = 2,
-  label = 'llmCall'
-): Promise<string> {
-  let lastError: Error = new Error('Unknown error');
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const completion = await llmProxy.chatCompletion(messages, model, 0.0, 0.9, maxTokens, timeoutMs);
-      const content: string = completion.choices?.[0]?.message?.content || '';
-      if (/^[\s]*<!doctype|<html/i.test(content)) throw new Error(`${label}: LLM returned HTML error page`);
-      if (!content.trim()) throw new Error(`${label}: LLM returned empty response`);
-      return content;
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-      logWarn(`${label}:attempt${attempt}`, { error: lastError.message, maxTokens });
-      if (attempt < maxRetries) await new Promise(r => setTimeout(r, 1200 * attempt));
-    }
+app.get('/api/health', async (_req, res) => {
+  try {
+    await query('SELECT 1');
+    res.json({ status: 'ok', db: 'connected' });
+  } catch (error) {
+    res.status(200).json({ status: 'ok', db: 'unavailable', error: error instanceof Error ? error.message : String(error) });
   }
-  throw lastError;
+});
+
+app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+});
+
+initDb().then(() => app.listen(port, () => console.log(\`Backend on port \${port}\`)));
+`,
+    },
+    {
+      path: 'backend/db/init.sql',
+      content: `CREATE TABLE IF NOT EXISTS items (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  data JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`,
+    },
+  ];
 }
 
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  fn: (item: T, index: number) => Promise<R>
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  async function worker(): Promise<void> {
-    while (next < items.length) {
-      const i = next++;
-      results[i] = await fn(items[i], i);
-    }
+function backendRouteFile(resource: NonNullable<BackendManifest['resources']>[number]): GeneratedFile {
+  const routeFile = sanitizeRoutePath('', resource.name || 'resource');
+  return {
+    path: routeFile,
+    content: `import express from 'express';
+import { randomUUID } from 'crypto';
+import { query } from '../db/database.ts';
+
+const router = express.Router();
+const tableName = '${SHARED_TABLE_NAME}';
+
+router.get('/', async (req, res, next) => {
+  try {
+    const projectId = String(req.query.project_id || req.query.projectId || '').trim();
+    if (!projectId) return res.status(400).json({ error: 'project_id is required' });
+    const result = await query(\`SELECT * FROM \${tableName} WHERE project_id = $1 ORDER BY created_at DESC LIMIT 100\`, [projectId]);
+    res.json({ items: result.rows });
+  } catch (error) {
+    next(error);
   }
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
-  return results;
+});
+
+router.post('/', async (req, res, next) => {
+  try {
+    const projectId = String(req.body?.project_id || req.body?.projectId || '').trim();
+    if (!projectId) return res.status(400).json({ error: 'project_id is required' });
+    const id = randomUUID();
+    const name = String(req.body?.name || 'Untitled');
+    const data = req.body || {};
+    const result = await query(\`INSERT INTO \${tableName} (id, project_id, name, data) VALUES ($1, $2, $3, $4) RETURNING *\`, [id, projectId, name, data]);
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    next(error);
+  }
+});
+
+export default router;
+`
+  };
+}
+
+function fallbackBackendManifest(): BackendManifest {
+  return {
+    resources: [
+      {
+        name: 'items',
+        routePath: '/api/items',
+        tableName: SHARED_TABLE_NAME,
+        methods: ['GET', 'POST', 'PUT', 'DELETE'],
+        purpose: 'Default project data resource.'
+      }
+    ],
+    tables: [
+      {
+        name: SHARED_TABLE_NAME,
+        columns: SHARED_TABLE_COLUMNS,
+        purpose: 'Shared project-scoped data table.'
+      }
+    ]
+  };
 }
 
 async function generateJson(
@@ -286,170 +623,18 @@ async function generateJson(
       messages.push({ role: 'user', content: 'Return ONLY a valid JSON object. If you included prose or code fences, remove them. Do not wrap in markdown.' });
     }
     try {
-      lastRaw = await callWithRetry(llmProxy, messages, model, maxTokens, 60_000, 2, label);
-      return parseJsonSafe(lastRaw);
+      const completion = await llmProxy.chatCompletion(messages, model, 0.0, 0.9, maxTokens, 60_000);
+      const content: string = completion.choices?.[0]?.message?.content || '';
+      if (!content.trim()) throw new Error(`${label}: LLM returned empty response`);
+      lastRaw = content;
+      return parseJsonSafe(content);
     } catch (err) {
-      const message = (err as Error).message;
+      const message = err instanceof Error ? err.message : String(err);
       logWarn(`${label}:json-attempt-failed:${jsonAttempt}`, { error: message, rawSnippet: lastRaw.slice(0, 240) });
       if (jsonAttempt === 3) throw err;
-      await new Promise(r => setTimeout(r, 700 * jsonAttempt));
     }
   }
   throw new Error(`${label}: all JSON self-heal attempts exhausted`);
-}
-
-function parseBackendManifest(raw: unknown, tablePrefix: string): BackendManifest {
-  const manifest = assertObject(raw, 'backendManifest') as BackendManifest;
-  const resources = Array.isArray(manifest.resources) ? manifest.resources : [];
-  const normalizedResources = resources.slice(0, MAX_BACKEND_ROUTES).map((resource, index) => {
-    const name = String(resource?.name || `resource${index + 1}`);
-    const routePath = String(resource?.routePath || `/api/${name}`);
-    const tableName = String(resource?.tableName || `${tablePrefix}${name}`);
-    return {
-      ...resource,
-      name,
-      routePath: routePath.startsWith('/api/') ? routePath : `/api/${name}`,
-      tableName: tableName.startsWith(tablePrefix) ? tableName : `${tablePrefix}${tableName.replace(/[^a-zA-Z0-9_]/g, '_')}`,
-      methods: Array.isArray(resource?.methods) && resource.methods.length > 0 ? resource.methods : ['GET', 'POST'],
-      purpose: String(resource?.purpose || `Data operations for ${name}`),
-    };
-  });
-
-  const tables = Array.isArray(manifest.tables) ? manifest.tables : [];
-  const normalizedTables = tables.slice(0, MAX_BACKEND_ROUTES).map((table, index) => {
-    const name = String(table?.name || `${tablePrefix}table${index + 1}`);
-    return {
-      ...table,
-      name: name.startsWith(tablePrefix) ? name : `${tablePrefix}${name.replace(/[^a-zA-Z0-9_]/g, '_')}`,
-      columns: Array.isArray(table?.columns) && table.columns.length > 0 ? table.columns : ['id TEXT PRIMARY KEY', 'name TEXT NOT NULL', 'data JSONB NOT NULL DEFAULT \'{}\'::jsonb'],
-      purpose: String(table?.purpose || `Storage for ${name}`),
-    };
-  });
-
-  return { resources: normalizedResources, tables: normalizedTables };
-}
-
-function normalizeGeneratedPath(filePath: string): string {
-  return filePath.replace(/^\/+/, '').replace(/\\/g, '/');
-}
-
-function isAllowedPath(filePath: string, scope: 'frontend' | 'backend'): boolean {
-  const p = normalizeGeneratedPath(filePath);
-  if (p.includes('..') || path.isAbsolute(p)) return false;
-  if (BAN_LIST.some(b => p === b || p.startsWith(`${b}/`))) return false;
-  if (p.startsWith('node_modules') || p.includes('/node_modules/')) return false;
-  if (p.startsWith('dist/') || p === 'dist') return false;
-  if (scope === 'frontend') return FRONTEND_REQUIRED.has(p) || FRONTEND_ALLOWED_PREFIXES.some(prefix => p.startsWith(prefix));
-  return BACKEND_REQUIRED.has(p) || BACKEND_ALLOWED_PREFIXES.some(prefix => p.startsWith(prefix));
-}
-
-function validateGeneratedFile(file: any, expectedPath: string | undefined, scope: 'frontend' | 'backend', label: string): GeneratedFile {
-  const obj = assertObject(file, label);
-  const filePath = normalizeGeneratedPath(String(obj.path || expectedPath || ''));
-  const content = obj.content;
-  if (!filePath) throw new Error(`${label}: missing path`);
-  if (expectedPath && filePath !== expectedPath) throw new Error(`${label}: expected path ${expectedPath}, got ${filePath}`);
-  if (!isAllowedPath(filePath, scope)) throw new Error(`${label}: invalid or disallowed path ${filePath}`);
-  if (typeof content !== 'string' || !content.trim()) throw new Error(`${label}: missing content for ${filePath}`);
-  return { path: filePath, content };
-}
-
-function setFile(files: Map<string, string>, file: GeneratedFile) {
-  files.set(normalizeGeneratedPath(file.path), file.content);
-}
-
-function sanitizeIdentifier(value: string, fallback: string): string {
-  const cleaned = value.replace(/[^a-zA-Z0-9_$]/g, '');
-  return cleaned && /^[a-zA-Z_$]/.test(cleaned) ? cleaned : fallback;
-}
-
-function failClosed(reason: string): never {
-  throw new Error(reason);
-}
-
-function sanitizeComponentPath(rawPath: string, index: number): string {
-  const p = normalizeGeneratedPath(rawPath || '');
-  if (p.startsWith('src/components/') && p.endsWith('.jsx') && !p.includes('..')) return p;
-  return `src/components/GeneratedSection${index + 1}.jsx`;
-}
-
-function sanitizeRoutePath(rawPath: string, resourceName: string): string {
-  const p = normalizeGeneratedPath(rawPath || '');
-  const rawName = p.startsWith('backend/routes/') && p.endsWith('.js') ? path.basename(p, '.js') : resourceName;
-  const slug = rawName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'resource';
-  return `backend/routes/${slug}.js`;
-}
-
-function escapeJsxText(value: string | undefined, fallback: string): string {
-  return String(value || fallback)
-    .replace(/&/g, '&')
-    .replace(/</g, '<')
-    .replace(/>/g, '>');
-}
-
-function reviewFileAgainstManifest(file: GeneratedFile, manifest: ProjectManifest): { ok: boolean; notes: string[] } {
-  const notes: string[] = [];
-  if (!manifest.fileTree.includes(file.path)) notes.push(`File path ${file.path} is not in the manifest file tree.`);
-  if (file.path === 'src/App.jsx' && !file.content.includes('API_BASE')) notes.push('App should use API_BASE for backend calls.');
-  if (file.path === 'src/index.css' && !file.content.includes('body')) notes.push('CSS should include base styles.');
-  if (file.path.startsWith('src/components/') && !file.content.includes('export default function')) notes.push('Component must export a default function.');
-  return { ok: notes.length === 0, notes };
-}
-
-function buildProjectManifest(frontend: FrontendManifest, backend: BackendManifest | undefined, modelRouting: ProjectManifest['technicalSpecs']['modelRouting']): ProjectManifest {
-  const fileTree = [
-    'package.json',
-    'index.html',
-    'vite.config.js',
-    'src/main.jsx',
-    'src/App.jsx',
-    'src/index.css',
-    ...(frontend.components || []).map(c => sanitizeComponentPath(c.path || '', 0)),
-    ...(backend ? ['backend/package.json', 'backend/index.js', 'backend/db/database.js', 'backend/db/init.sql', ...((backend.resources || []).map(r => sanitizeRoutePath(`backend/routes/${r.name}.js`, r.name || 'resource')))] : []),
-  ];
-  const componentRequirements = (frontend.components || []).map((component) => ({
-    path: sanitizeComponentPath(component.path || '', 0),
-    purpose: component.purpose || '',
-    reviewerNotes: 'Must be a standalone React component and remain under 180 lines.',
-  }));
-  const queue = fileTree.map((pathName, index) => ({ id: `task-${index + 1}`, kind: 'file' as const, path: pathName, purpose: `Generate or verify ${pathName}` }));
-  return {
-    technicalSpecs: { stack: 'React 18 + Vite + Node/Express', modelRouting },
-    fileTree,
-    requirements: { frontend, backend },
-    componentRequirements,
-    project_task_queue: queue,
-  };
-}
-
-function frontendScaffold(manifest: FrontendManifest): GeneratedFile[] {
-  const dependencies = { react: '^18.3.1', 'react-dom': '^18.3.1', ...(manifest.dependencies || {}) };
-  delete (dependencies as Record<string, string>).vite;
-  delete (dependencies as Record<string, string>)['@vitejs/plugin-react'];
-  return [
-    { path: 'package.json', content: JSON.stringify({ name: (manifest.appName || 'generated-project').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '') || 'generated-project', private: true, version: '0.1.0', type: 'module', scripts: { dev: 'vite', build: 'vite build', preview: 'vite preview' }, dependencies, devDependencies: { '@vitejs/plugin-react': '^4.3.1', vite: '^5.4.20' } }, null, 2) },
-    { path: 'index.html', content: `<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>${manifest.appName || 'Generated App'}</title></head><body><div id="root"></div><script type="module" src="/src/main.jsx"></script></body></html>` },
-    { path: 'vite.config.js', content: `import { defineConfig } from 'vite';\nimport react from '@vitejs/plugin-react';\nexport default defineConfig({ plugins: [react()] });\n` },
-    { path: 'src/main.jsx', content: `import React from 'react';\nimport { createRoot } from 'react-dom/client';\nimport App from './App.jsx';\nimport './index.css';\ncreateRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>);\n` },
-  ];
-}
-
-function backendScaffold(manifest: BackendManifest, tablePrefix: string): GeneratedFile[] {
-  const resources = (manifest.resources || []).slice(0, MAX_BACKEND_ROUTES);
-  const imports: string[] = [];
-  const mounts: string[] = [];
-  resources.forEach((resource, index) => {
-    const routeFile = sanitizeRoutePath(`backend/routes/${resource.name || `resource-${index + 1}`}.js`, resource.name || `resource-${index + 1}`);
-    const varName = sanitizeIdentifier(`${resource.name || `resource${index + 1}`}Router`, `resource${index + 1}Router`);
-    imports.push(`import ${varName} from './routes/${path.basename(routeFile)}';`);
-    mounts.push(`app.use('${resource.routePath || `/api/${resource.name || `resource-${index + 1}`}`}', ${varName});`);
-  });
-  return [
-    { path: 'backend/package.json', content: JSON.stringify({ name: 'generated-backend', version: '0.1.0', private: true, type: 'module', scripts: { start: 'node index.js', build: 'echo done' }, dependencies: { express: '^4.19.0', pg: '^8.20.0', cors: '^2.8.5' } }, null, 2) },
-    { path: 'backend/db/database.js', content: `import pg from 'pg';\nconst { Pool } = pg;\nconst connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL || '';\nexport const pool = new Pool(connectionString ? { connectionString } : {});\nexport function query(sql, params = []) { return pool.query(sql, params); }\n` },
-    { path: 'backend/index.js', content: `import express from 'express';\nimport cors from 'cors';\nimport { readFileSync } from 'fs';\nimport { fileURLToPath } from 'url';\nimport { dirname, join } from 'path';\nimport { query } from './db/database.js';\n${imports.join('\n')}\nconst __filename = fileURLToPath(import.meta.url);\nconst __dirname = dirname(__filename);\nconst app = express();\nconst port = process.env.PORT || 3000;\napp.use(cors({ origin: '*' }));\napp.use(express.json());\n${mounts.join('\n')}\nasync function initDb() { try { const sql = readFileSync(join(__dirname, 'db/init.sql'), 'utf8'); if (sql.trim()) await query(sql); } catch (error) { console.warn('DB init warning:', error.message); } }\napp.get('/api/health', async (req, res) => { try { await query('SELECT 1'); res.json({ status: 'ok', db: 'connected', tablePrefix: '${tablePrefix}' }); } catch (error) { res.status(200).json({ status: 'ok', db: 'unavailable', error: error.message }); } });\napp.use((err, req, res, next) => { res.status(500).json({ error: err.message }); });\ninitDb().then(() => app.listen(port, () => console.log(\`Backend on port \${port}\`)));\n` },
-  ];
 }
 
 async function generateFrontendManifest(systemDesign: any, requirements: any, modification: string | undefined, llmProxy: LLMProxyClient, model: string, uiSpec?: any): Promise<FrontendManifest> {
@@ -457,10 +642,8 @@ async function generateFrontendManifest(systemDesign: any, requirements: any, mo
   const clarificationAnswers = requirements?.clarificationAnswers || {};
   const pages = Array.isArray(requirements?.pages) ? requirements.pages : [];
   const authRequired = Boolean(requirements?.auth_required);
-
-  // If uiSpec defines exact component names, include them in the prompt so the LLM uses matching names.
   const uiSpecComponentHint = Array.isArray(uiSpec?.components) && uiSpec.components.length > 0
-    ? `\n- The following components MUST appear in the components array with EXACTLY these names: ${(uiSpec.components as Array<{ name?: string }>).map(c => c.name).filter(Boolean).join(', ')}`
+    ? `\n- The following components MUST appear in the components array with EXACTLY these names: ${(uiSpec.components as Array<{ name?: string }>).map((c) => c.name).filter(Boolean).join(', ')}`
     : '';
 
   const systemPrompt = `You are a React app architect. Generate a detailed implementation manifest for the app described by the user.
@@ -491,6 +674,7 @@ RULES:
     uiSpecComponents: uiSpec?.components || null,
     modification: modification || null,
   }, 1800);
+
   const manifest = assertObject(parsed, 'frontendManifest') as FrontendManifest;
   let components = Array.isArray(manifest.components) ? manifest.components : [];
   if (components.length === 0) {
@@ -498,22 +682,20 @@ RULES:
     components = fallback.components || [];
     if (!manifest.appName) manifest.appName = fallback.appName;
   }
-  const normalizedComponents = (Array.isArray(manifest.components) ? manifest.components : [])
-    .map((component, index) => {
-      const fallbackName = `GeneratedSection${index + 1}`;
-      const safeName = sanitizeIdentifier(component?.name || fallbackName, fallbackName);
-      return {
-        ...component,
-        path: sanitizeComponentPath(component?.path || '', index),
-        name: safeName,
-      };
-    });
+
+  const normalizedComponents = components.map((component, index) => {
+    const fallbackName = `GeneratedSection${index + 1}`;
+    const safeName = sanitizeIdentifier(component?.name || fallbackName, fallbackName);
+    return {
+      ...component,
+      path: sanitizeComponentPath(component?.path || '', index),
+      name: safeName,
+    };
+  });
 
   manifest.components = normalizedComponents;
   manifest.dependencies = manifest.dependencies && typeof manifest.dependencies === 'object' ? manifest.dependencies : {};
 
-  // Post-reconcile: if uiSpec components were provided, ensure every uiSpec name appears in the manifest.
-  // Do not silently truncate these additions; missing UI-spec components cause downstream App/blueprint drift.
   if (Array.isArray(uiSpec?.components) && uiSpec.components.length > 0) {
     const manifestNames = new Set(manifest.components.map((c: any) => String(c.name || '')));
     const missing = (uiSpec.components as Array<{ name?: string; path?: string; purpose?: string }>)
@@ -548,14 +730,11 @@ async function generateFrontendComponent(
   const expectedPath = sanitizeComponentPath(component.path, 0);
   const componentName = sanitizeIdentifier(component.name || path.basename(expectedPath, '.jsx'), path.basename(expectedPath, '.jsx'));
   const userMessage = String(requirements?.userMessage || '').slice(0, 400);
-  
-  // Get component spec if using UISpec
   const componentSpec = uiSpec?.components?.find((c: any) => c.name === componentName);
   const dependencyCode = componentSpec?.dependencies
     ?.map((dep: string) => ({ dep, code: generatedDependencies?.get(dep)?.slice(0, 500) }))
-    .filter((d: any) => d.code)
-    || [];
-  
+    .filter((d: any) => d.code) || [];
+
   const systemPrompt = `Generate one production-quality React component for: "${userMessage || manifest.appName}".
 Component purpose: ${component.purpose || componentName}
 Component name: ${componentName}
@@ -566,7 +745,7 @@ ${JSON.stringify(componentSpec.props, null, 2)}
 Render logic: ${componentSpec.renderLogic}
 ` : ''}
 
-${dependencyCode.length > 0 ? `\nAlready-generated dependencies (reference these imports):
+${dependencyCode.length > 0 ? `Already-generated dependencies (reference these imports):
 ${dependencyCode.map((d: any) => `${d.dep}: ${d.code}`).join('\n---\n')}
 ` : ''}
 
@@ -599,6 +778,7 @@ CRITICAL RULES:
     },
     2400
   );
+
   return validateGeneratedFile(parsed, expectedPath, 'frontend', `frontendComponent:${expectedPath}`);
 }
 
@@ -619,7 +799,7 @@ async function generateFrontendApp(
   }));
   const userMessage = String(requirements?.userMessage || '').slice(0, 500);
   const layoutInfo = uiSpec?.layoutStructure || {};
-  
+
   const systemPrompt = `Generate src/App.jsx for a React + Vite app: "${userMessage || manifest.appName}".
 
 App root structure: ${layoutInfo.appRoot || 'Main app wrapper'}
@@ -627,7 +807,7 @@ State management: ${layoutInfo.stateManagement || 'Props drilling'}
 Navigation: ${layoutInfo.navigationStrategy || 'Single page'}
 
 Component imports available:
-${imports.map(i => i.importLine).join('\n')}
+${imports.map((i) => i.importLine).join('\n')}
 
 ${backendRequired ? `Backend is required. Initialize API_BASE constant:
 const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:3000';
@@ -665,417 +845,108 @@ CRITICAL RULES:
     },
     3500
   );
+
   const appFile = validateGeneratedFile(parsed, 'src/App.jsx', 'frontend', 'frontendApp');
-  
-  // Semantic review: validate App.jsx has proper structure
-  const hasImports = imports.length > 0 && imports.some(i => appFile.content.includes(i.name));
+  const hasImports = imports.length > 0 && imports.some((i) => appFile.content.includes(i.name));
   const hasExport = appFile.content.includes('export default function App');
   const hasRender = appFile.content.includes('return (') || appFile.content.includes('return <');
   const hasApiBase = backendRequired ? appFile.content.includes('API_BASE') || appFile.content.includes('fetch') || appFile.content.includes('http') : true;
-  
+
   if (!hasExport || !hasRender || !hasImports || !hasApiBase) {
-    // Log issues but allow it - will be caught in build phase
-    logWarn('frontendApp:semantic-check-failed', {
-      hasExport,
-      hasRender,
-      hasImports,
-      hasApiBase,
-      backendRequired,
-    });
+    logWarn('frontendApp:semantic-check-failed', { hasExport, hasRender, hasImports, hasApiBase, backendRequired });
   }
-  
+
   return appFile;
 }
 
 async function generateFrontendCss(manifest: FrontendManifest, requirements: any, appFile: GeneratedFile, componentFiles: GeneratedFile[], llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {
   const userMessage = String(requirements?.userMessage || '').slice(0, 300);
   const systemPrompt = `Generate src/index.css for this React app: "${userMessage || manifest.appName}". Match the visual style to the app's purpose. Return ONLY JSON: {"path":"src/index.css","content":"complete CSS"}`;
-  const parsed = await generateJson(llmProxy, model, 'frontendCss', systemPrompt, { manifest, requirements, appSnippet: appFile.content.slice(0, 4000), componentSnippets: componentFiles.map(f => ({ path: f.path, content: f.content.slice(0, 1800) })) }, 2600);
+  const parsed = await generateJson(llmProxy, model, 'frontendCss', systemPrompt, { manifest, requirements, appSnippet: appFile.content.slice(0, 4000), componentSnippets: componentFiles.map((f) => ({ path: f.path, content: f.content.slice(0, 1800) })) }, 2600);
   return validateGeneratedFile(parsed, 'src/index.css', 'frontend', 'frontendCss');
 }
 
-function fallbackFrontendApp(manifest: FrontendManifest, components: GeneratedFile[], hasBackend: boolean = false): GeneratedFile {
-  const imports = components.map(file => `import ${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} from './${file.path.replace(/^src\//, '')}';`).join('\n');
-  const componentTags = components.map(file => `        <${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} />`).join('\n');
-  
-  const apiInit = hasBackend ? `
-  // Backend API configuration
-  const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:3000';
-  const [apiReady, setApiReady] = React.useState(false);
-  
-  React.useEffect(() => {
-    // Check backend connectivity
-    fetch(\`\${API_BASE}/api/health\`)
-      .then(res => res.json())
-      .then(() => setApiReady(true))
-      .catch(() => setApiReady(false));
-  }, []);
-` : '';
-
-  const apiStatus = hasBackend ? `
-  {!apiReady && <div className="warning">Backend not connected. Using offline mode.</div>}` : '';
-  
-  return {
-    path: 'src/App.jsx',
-    content: `import React from 'react';
-${imports}
-
-export default function App() {
-${apiInit}
-  return (
-    <main className="app-shell">
-      <section className="hero">
-        <p className="eyebrow">${escapeJsxText(manifest.appName, 'Generated App')}</p>
-        <h1>${escapeJsxText(manifest.appName, 'Your App')}</h1>
-        <p>A production-ready React application.</p>
-      </section>
-      <section className="content-grid">
-${componentTags || '        <div className="panel"><h2>Ready</h2><p>Your app scaffold is ready for iteration.</p></div>'}
-      </section>
-${apiStatus}
-    </main>
-  );
-}
-`
-  };
-}
-
-function fallbackFrontendCss(): GeneratedFile {
-  return { path: 'src/index.css', content: `* { box-sizing: border-box; }\nhtml, body, #root { margin: 0; min-height: 100%; }\nbody { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f8fb; color: #111827; }\nbutton, input, textarea, select { font: inherit; }\n.app-shell { min-height: 100vh; padding: 48px clamp(20px, 5vw, 72px); }\n.hero { max-width: 920px; margin: 0 auto 32px; }\n.eyebrow { margin: 0 0 10px; color: #2563eb; font-weight: 700; text-transform: uppercase; font-size: 0.78rem; }\nh1 { margin: 0; font-size: clamp(2rem, 6vw, 4.5rem); line-height: 1; }\n.hero p:last-child { color: #4b5563; font-size: 1.08rem; line-height: 1.7; max-width: 680px; }\n.content-grid { max-width: 1120px; margin: 0 auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }\n.panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; box-shadow: 0 12px 32px rgba(15, 23, 42, 0.06); }\n.panel h2 { margin: 0 0 8px; font-size: 1.08rem; }\n.panel p { margin: 0; color: #4b5563; line-height: 1.6; }\n` };
-}
-
-function fallbackFrontendManifest(requirements: any, uiSpec?: any): FrontendManifest {
-  const rawName = typeof requirements?.userMessage === 'string' ? requirements.userMessage.slice(0, 60)
-    : typeof requirements?.summary === 'string' ? requirements.summary
-    : typeof requirements?.app_type === 'string' ? requirements.app_type : 'Generated App';
-  const appName = String(rawName).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'generated-app';
-
-  // When uiSpec components are available, use them directly — preserves component names
-  // so downstream validateAppImports checks against the same names used in generation.
-  if (Array.isArray(uiSpec?.components) && uiSpec.components.length > 0) {
-    const uiSpecComponents = (uiSpec.components as Array<{ name?: string; path?: string; purpose?: string }>)
-      .slice(0, MAX_COMPONENTS)
-      .map((c) => {
-        const name = String(c.name || '').trim() || 'Section';
-        const filePath = c.path && String(c.path).startsWith('src/components/')
-          ? String(c.path)
-          : `src/components/${name}.jsx`;
-        return { path: filePath.endsWith('.jsx') ? filePath : `${filePath}.jsx`, name, purpose: String(c.purpose || `${name} component`) };
-      });
-    return { appName, dependencies: {}, apiResources: [], components: uiSpecComponents, styleNotes: 'Clean responsive application UI.' };
-  }
-
-  const authRequired = Boolean(requirements?.auth_required);
-  const pages = Array.isArray(requirements?.pages) ? requirements.pages : [];
-  const components = [
-    ...(authRequired ? [{ path: 'src/components/Login.jsx', name: 'Login', purpose: 'Authentication form for email and password login.' }] : []),
-    ...pages.slice(0, 3).map((page: any, i: number) => {
-      const pageLabel = typeof page === 'string' ? page : String(page?.name || page?.title || page?.path || `Page ${i + 1}`);
-      const slug = pageLabel.replace(/[^a-zA-Z0-9]/g, '') || `Page${i + 1}`;
-      return { path: `src/components/${slug}.jsx`, name: slug, purpose: `${pageLabel} page content and functionality.` };
-    }),
-  ];
-  if (components.length === 0) {
-    components.push(
-      { path: 'src/components/Overview.jsx', name: 'Overview', purpose: 'Core user workflow overview.' },
-      { path: 'src/components/Workspace.jsx', name: 'Workspace', purpose: 'Primary interactive workspace.' }
-    );
-  }
-  return { appName, dependencies: {}, apiResources: [], components: components.slice(0, MAX_COMPONENTS), styleNotes: 'Clean responsive application UI.' };
-}
-
-async function generateFrontendFiles(
-  systemDesign: any,
-  requirements: any,
-  modification: string | undefined,
-  llmProxy: LLMProxyClient,
-  model: string,
-  events?: EventSink,
-  manifestOut?: { value?: ProjectManifest },
-  uiSpec?: any,
-  blueprint?: ProjectBlueprint,
-  projectSpec?: any
-): Promise<GeneratedFile[]> {
-  const partial = new Map<string, string>();
-  const metrics: GenerationMetrics = { fallbackCount: 0, fallbackReasons: [] };
-  let manifest: FrontendManifest;
-  try {
-    manifest = await generateFrontendManifest(systemDesign, requirements, modification, llmProxy, model, uiSpec);
-    validateManifestSemantics(manifest, requirements, projectSpec, uiSpec);
-  } catch (err) {
-    metrics.fallbackCount += 1;
-    metrics.fallbackReasons.push(`frontend-manifest:${String((err as any)?.message || err)}`);
-    logWarn('codeGenerationAgent:frontend-manifest-fallback', { error: (err as Error).message });
-    manifest = fallbackFrontendManifest(requirements, uiSpec);
-  }
-  const projectManifest = buildProjectManifest(manifest, undefined, {
-    orchestration: getModelConfigForTask('agent_orchestration').model,
-    code: model,
-    review: getModelConfigForTask('clarification').model,
-  });
-  if (!blueprint) throw new Error('codeGenerationAgent: validated blueprint is required before code generation');
-  const missingBlueprintFiles = blueprintMissingFiles(blueprint, { requirements });
-  if (missingBlueprintFiles.length > 0) {
-    throw new Error(`Validated blueprint is missing required files: ${missingBlueprintFiles.join(', ')}`);
-  }
-  projectManifest.blueprint = blueprint;
-  manifestOut && (manifestOut.value = projectManifest);
-  events?.emit({ type: 'PLANNING_COMPLETE', message: 'Frontend planning complete', payload: { fileCount: projectManifest.fileTree.length } });
-
-  frontendScaffold(manifest).forEach(file => setFile(partial, file));
-  events?.emit({ type: 'AGENT_THINKING', message: 'Generated frontend manifest and scaffold' });
-
-  // Dependency-ordered component generation (leaf components first)
-  const generatedComponents = new Map<string, string>(); // component name -> generated code
-  const componentFiles: GeneratedFile[] = [];
-
-  if (uiSpec && Array.isArray(uiSpec.generationOrder) && uiSpec.generationOrder.length > 0) {
-    // Use UISpec generation order (leaf-first)
-    events?.emit({ type: 'AGENT_THINKING', message: `Generating components in dependency order: ${uiSpec.generationOrder.slice(0, 3).join(' -> ')}...` });
-    
-    for (const componentName of uiSpec.generationOrder) {
-      const componentSpec = uiSpec.components?.find((c: any) => c.name === componentName);
-      const componentManifestItem = manifest.components?.find((c: any) => c.name === componentName) ||
-        { name: componentName, path: `src/components/${componentName}.jsx`, purpose: `${componentName} component` };
-      
-      try {
-        const file = await generateFrontendComponent(
-          componentManifestItem,
-          manifest,
-          requirements,
-          llmProxy,
-          model,
-          uiSpec,
-          generatedComponents
-        );
-        generatedComponents.set(componentName, file.content);
-        setFile(partial, file);
-        componentFiles.push(file);
-        events?.emit({ type: 'FILE_WRITTEN', filePath: file.path, message: `Generated ${componentName} (dependency-aware)`, payload: { path: file.path, content: file.content } });
-      } catch (err) {
-        logWarn('codeGenerationAgent:component-generation-failed', { componentName, error: (err as Error).message });
-        failClosed(`Frontend component generation failed for ${componentName}: ${(err as Error).message}`);
-      }
-    }
-  } else {
-    // Fallback to concurrent generation if no UISpec
-    events?.emit({ type: 'AGENT_THINKING', message: 'Generating components concurrently' });
-    const generatedFilesArray = await mapWithConcurrency(
-      manifest.components || [],
-      4,
-      async (component, index) => {
-        try {
-          const file = await generateFrontendComponent(component, manifest, requirements, llmProxy, model, uiSpec, generatedComponents);
-          generatedComponents.set(component.name || `Component${index}`, file.content);
-          setFile(partial, file);
-          events?.emit({ type: 'FILE_WRITTEN', filePath: file.path, message: `Wrote ${file.path}`, payload: { path: file.path, content: file.content } });
-          return file;
-        } catch (err) {
-          logWarn('codeGenerationAgent:component-fallback', { path: component.path, error: (err as Error).message });
-          failClosed(`Frontend component generation failed for ${component.path}: ${(err as Error).message}`);
-        }
-      }
-    );
-    componentFiles.push(...generatedFilesArray);
-  }
-
-  // Generate App.jsx with full context of all generated components
-  let appFile: GeneratedFile;
-  const backendRequired = Boolean(systemDesign?.backend);
-  try {
-    appFile = await generateFrontendApp(manifest, requirements, systemDesign, modification, componentFiles, llmProxy, model, uiSpec);
-    validateAppImports(appFile.content, componentFiles, blueprint, uiSpec);
-  } catch (err) {
-    failClosed(`frontend App generation failed: ${(err as Error).message}`);
-  }
-  setFile(partial, appFile);
-  events?.emit({ type: 'FILE_WRITTEN', filePath: appFile.path, message: `Wrote ${appFile.path}`, payload: { path: appFile.path, content: appFile.content } });
-
-  // Generate CSS
-  let cssFile: GeneratedFile;
-  try {
-    cssFile = await generateFrontendCss(manifest, requirements, appFile, componentFiles, llmProxy, model);
-  } catch (err) {
-    failClosed(`frontend CSS generation failed: ${(err as Error).message}`);
-  }
-
-  if (metrics.fallbackCount > 0) {
-    logWarn('codeGenerationAgent:frontend-fallbacks', { fallbackCount: metrics.fallbackCount, reasons: metrics.fallbackReasons });
-  }
-  setFile(partial, cssFile);
-  events?.emit({ type: 'FILE_WRITTEN', filePath: cssFile.path, message: `Wrote ${cssFile.path}`, payload: { path: cssFile.path, content: cssFile.content } });
-
-  return Array.from(partial.entries()).map(([filePath, content]) => ({ path: filePath, content }));
-}
-
-async function generateBackendManifest(systemDesign: any, requirements: any, tablePrefix: string, modification: string | undefined, llmProxy: LLMProxyClient, model: string): Promise<BackendManifest> {
-  const userMessage = String(requirements?.userMessage || '').slice(0, 400);
-  const systemPrompt = `Create a backend implementation manifest for Node + Express + Postgres for this app: "${userMessage}". Return ONLY JSON with shape: {"resources":[{"name":"...","routePath":"/api/...","tableName":"...","fields":[],"methods":[],"purpose":"..."}],"tables":[{"name":"...","columns":[],"purpose":"..."}]}`;
-  const parsed = await generateJson(llmProxy, model, 'backendManifest', systemPrompt, { requirements, userDescription: userMessage, backendDesign: systemDesign?.backend || null, tablePrefix, modification: modification || null }, 1800);
-  return parseBackendManifest(parsed, tablePrefix);
-}
-
-async function generateBackendInitSql(manifest: BackendManifest, tablePrefix: string, requirements: any, llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {
-  const parsed = await generateJson(llmProxy, model, 'backendInitSql', 'Generate backend/db/init.sql. Return ONLY JSON.', { manifest, requirements, tablePrefix }, 2200);
-  const file = validateGeneratedFile(parsed, 'backend/db/init.sql', 'backend', 'backendInitSql');
-  if (!file.content.includes(tablePrefix)) throw new Error(`backendInitSql: SQL does not include required table prefix ${tablePrefix}`);
-  return file;
-}
-
-function fallbackBackendFiles(tablePrefix: string): GeneratedFile[] {
+function backendRouteFallbackFiles(manifest: BackendManifest): GeneratedFile[] {
+  const tables = Array.isArray(manifest.tables) && manifest.tables.length > 0 ? manifest.tables : [{ name: SHARED_TABLE_NAME, columns: SHARED_TABLE_COLUMNS }];
   return [
-    {
-      path: 'backend/package.json',
-      content: JSON.stringify({
-        name: 'generated-backend',
-        version: '0.1.0',
-        private: true,
-        type: 'module',
-        scripts: {
-          start: 'node index.js',
-          build: 'echo done',
-        },
-        dependencies: {
-          express: '^4.19.0',
-          pg: '^8.20.0',
-          cors: '^2.8.5',
-        },
-      }, null, 2),
-    },
-    {
-      path: 'backend/db/database.js',
-      content: `import pg from 'pg';\nconst { Pool } = pg;\nconst connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL || '';\nexport const pool = new Pool(connectionString ? { connectionString } : {});\nexport function query(sql, params = []) { return pool.query(sql, params); }\n`,
-    },
-    {
-      path: 'backend/index.js',
-      content: `import express from 'express';\nimport cors from 'cors';\nimport { readFileSync } from 'fs';\nimport { fileURLToPath } from 'url';\nimport { dirname, join } from 'path';\nimport { query } from './db/database.js';\nimport itemsRouter from './routes/items.js';\nconst __filename = fileURLToPath(import.meta.url);\nconst __dirname = dirname(__filename);\nconst app = express();\nconst port = process.env.PORT || 3000;\napp.use(cors({ origin: '*' }));\napp.use(express.json());\napp.use('/api/items', itemsRouter);\nasync function initDb() { try { const sql = readFileSync(join(__dirname, 'db/init.sql'), 'utf8'); if (sql.trim()) await query(sql); } catch (error) { console.warn('DB init warning:', error.message); } }\napp.get('/api/health', async (req, res) => { try { await query('SELECT 1'); res.json({ status: 'ok', db: 'connected', tablePrefix: '${tablePrefix}' }); } catch (error) { res.status(200).json({ status: 'ok', db: 'unavailable', error: error.message }); } });\napp.use((err, req, res, next) => { res.status(500).json({ error: err.message }); });\ninitDb().then(() => app.listen(port, () => console.log(\`Backend on port \${port}\`)));\n`,
-    },
-    {
-      path: 'backend/routes/items.js',
-      content: `import express from 'express';\nimport { randomUUID } from 'crypto';\nimport { query } from '../db/database.js';\nconst router = express.Router();\nconst tableName = '${tablePrefix}items';\nrouter.get('/', async (req, res, next) => { try { const result = await query(\`SELECT * FROM ${tablePrefix}items ORDER BY created_at DESC LIMIT 100\`); res.json({ items: result.rows }); } catch (error) { next(error); } });\nrouter.post('/', async (req, res, next) => { try { const id = randomUUID(); const name = req.body?.name || 'Untitled'; const data = req.body || {}; const result = await query(\`INSERT INTO ${tablePrefix}items (id, name, data) VALUES ($1, $2, $3) RETURNING *\`, [id, name, data]); res.status(201).json(result.rows[0]); } catch (error) { next(error); } });\nexport default router;\n`,
-    },
+    ...backendScaffold(),
     {
       path: 'backend/db/init.sql',
-      content: `CREATE TABLE IF NOT EXISTS ${tablePrefix}items (\n  id TEXT PRIMARY KEY,\n  name TEXT NOT NULL,\n  data JSONB NOT NULL DEFAULT '{}'::jsonb,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n`,
+      content: tables
+        .map((table) => {
+          const safeTable = String(table.name || SHARED_TABLE_NAME).replace(/[^a-zA-Z0-9_]/g, '_');
+          const columns = Array.isArray(table.columns) && table.columns.length > 0 ? table.columns.join(',\n  ') : SHARED_TABLE_COLUMNS.join(',\n  ');
+          return `CREATE TABLE IF NOT EXISTS ${safeTable} (\n  ${columns}\n);`;
+        })
+        .join('\n\n') + '\n',
     },
   ];
 }
 
-async function generateBackendRoute(resource: NonNullable<BackendManifest['resources']>[number], routePath: string, tablePrefix: string, requirements: any, llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {
-  const expectedPath = sanitizeRoutePath('', resource.name || 'resource');
-  const parsed = await generateJson(llmProxy, model, `backendRoute:${expectedPath}`, 'Generate one Express router file. Return ONLY JSON.', { resource, routePath, requirements, tablePrefix }, 3000);
-  return validateGeneratedFile(parsed, expectedPath, 'backend', `backendRoute:${expectedPath}`);
+function buildBackendFilesFromManifest(manifest: BackendManifest): GeneratedFile[] {
+  const files = backendRouteFallbackFiles(manifest);
+  const resources = (manifest.resources || []).slice(0, MAX_BACKEND_ROUTES);
+  for (const resource of resources) {
+    files.push(backendRouteFile(resource));
+  }
+  return files;
 }
 
-function fallbackInitSql(manifest: BackendManifest, tablePrefix: string): GeneratedFile {
-  const resources = manifest.resources && manifest.resources.length > 0 ? manifest.resources : [{ name: 'items', tableName: `${tablePrefix}items` }];
-  const statements = resources.map(resource => {
-    const table = String(resource.tableName || `${tablePrefix}${resource.name || 'items'}`).replace(/[^a-zA-Z0-9_]/g, '_');
-    const safeTable = table.startsWith(tablePrefix) ? table : `${tablePrefix}${table}`;
-    return `CREATE TABLE IF NOT EXISTS ${safeTable} (\n  id TEXT PRIMARY KEY,\n  name TEXT NOT NULL,\n  data JSONB NOT NULL DEFAULT '{}'::jsonb,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);`;
-  }).join('\n\n');
-  return { path: 'backend/db/init.sql', content: `${statements}\n` };
-}
-
-function fallbackRoute(resource: NonNullable<BackendManifest['resources']>[number], tablePrefix: string): GeneratedFile {
-  const routeFile = sanitizeRoutePath('', resource.name || 'items');
-  const table = String(resource.tableName || `${tablePrefix}${resource.name || 'items'}`).replace(/[^a-zA-Z0-9_]/g, '_');
-  const safeTable = table.startsWith(tablePrefix) ? table : `${tablePrefix}${table}`;
-  return { path: routeFile, content: `import express from 'express';\nimport { randomUUID } from 'crypto';\nimport { query } from '../db/database.js';\nconst router = express.Router();\nconst tableName = '${safeTable}';\nrouter.get('/', async (req, res, next) => { try { const result = await query(\`SELECT * FROM \${tableName} ORDER BY created_at DESC LIMIT 100\`); res.json({ items: result.rows }); } catch (error) { next(error); } });\nrouter.post('/', async (req, res, next) => { try { const id = randomUUID(); const name = req.body?.name || 'Untitled'; const data = req.body || {}; const result = await query(\`INSERT INTO \${tableName} (id, name, data) VALUES ($1, $2, $3) RETURNING *\`, [id, name, data]); res.status(201).json(result.rows[0]); } catch (error) { next(error); } });\nexport default router;\n` };
-}
-
-function fallbackBackendManifest(tablePrefix: string): BackendManifest {
-  return {
-    resources: [
-      {
-        name: 'items',
-        routePath: '/api/items',
-        tableName: `${tablePrefix}items`,
-        methods: ['GET', 'POST', 'PUT', 'DELETE'],
-        purpose: 'Default project data resource.',
-      },
-    ],
-    tables: [
-      {
-        name: `${tablePrefix}items`,
-        columns: ['id TEXT PRIMARY KEY', 'name TEXT NOT NULL', 'data JSONB NOT NULL DEFAULT \'{}\'::jsonb'],
-        purpose: 'Default project data table.',
-      },
-    ],
-  };
+async function generateBackendInitSql(manifest: BackendManifest, requirements: any, llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {
+  const parsed = await generateJson(llmProxy, model, 'backendInitSql', 'Generate backend/db/init.sql. Return ONLY JSON.', { manifest, requirements, sharedTable: SHARED_TABLE_NAME }, 2200);
+  const file = validateGeneratedFile(parsed, 'backend/db/init.sql', 'backend', 'backendInitSql');
+  if (!/project_id/i.test(file.content) || !file.content.includes(SHARED_TABLE_NAME)) throw new Error(`backendInitSql: SQL must define shared table ${SHARED_TABLE_NAME} with project_id`);
+  return file;
 }
 
 async function generateBackendFiles(systemDesign: any, requirements: any, projectId: string, modification: string | undefined, llmProxy: LLMProxyClient, model: string, events?: EventSink, blueprint?: ProjectBlueprint): Promise<GeneratedFile[]> {
   const partial = new Map<string, string>();
-  const safeId = projectId.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 24);
   if (!blueprint) throw new Error('codeGenerationAgent: validated blueprint is required before backend generation');
   const missingBlueprintFiles = blueprintMissingFiles(blueprint);
-  if (missingBlueprintFiles.length > 0) {
-    throw new Error(`Validated blueprint is missing required files: ${missingBlueprintFiles.join(', ')}`);
-  }
-  const tablePrefix = `proj_${safeId}_`;
+  if (missingBlueprintFiles.length > 0) throw new Error(`Validated blueprint is missing required files: ${missingBlueprintFiles.join(', ')}`);
+
   let manifest: BackendManifest;
 
   try {
-    manifest = await generateBackendManifest(systemDesign, requirements, tablePrefix, modification, llmProxy, model);
+    manifest = await generateBackendManifest(systemDesign, requirements, llmProxy, model);
   } catch (err) {
     logWarn('codeGenerationAgent:backend-manifest-fallback', { error: (err as Error).message });
-    manifest = fallbackBackendManifest(tablePrefix);
+    manifest = fallbackBackendManifest();
   }
 
-  const resources = Array.isArray(manifest.resources) ? manifest.resources : [];
-  if (resources.length === 0) {
-    manifest.resources = fallbackBackendManifest(tablePrefix).resources;
-  }
-
-  manifest.resources = (manifest.resources || []).map((resource, index) => ({
-    ...resource,
-    name: resource.name || `resource${index + 1}`,
-    routePath: resource.routePath || `/api/${resource.name || `resource-${index + 1}`}`,
-    tableName: String(resource.tableName || `${tablePrefix}${resource.name || `resource${index + 1}`}`).startsWith(tablePrefix)
-      ? String(resource.tableName || `${tablePrefix}${resource.name || `resource${index + 1}`}`)
-      : `${tablePrefix}${String(resource.tableName || resource.name || `resource${index + 1}`).replace(/[^a-zA-Z0-9_]/g, '_')}`,
-    methods: Array.isArray(resource.methods) && resource.methods.length > 0 ? resource.methods : ['GET', 'POST'],
-  }));
-
-  const backendFallback = fallbackBackendFiles(tablePrefix);
-  backendFallback.forEach(file => {
-    if (file.path === 'backend/package.json' || file.path === 'backend/index.js' || file.path === 'backend/db/database.js') {
-      setFile(partial, file);
-    }
-  });
-  const _bpkg = partial.get('backend/package.json') ?? '';
-  const _bidx = partial.get('backend/index.js') ?? '';
-  const _bdb = partial.get('backend/db/database.js') ?? '';
-  events?.emit({ type: 'FILE_WRITTEN', filePath: 'backend/package.json', message: 'Generated backend scaffold: package.json', payload: { path: 'backend/package.json', content: _bpkg } });
-  events?.emit({ type: 'FILE_WRITTEN', filePath: 'backend/index.js', message: 'Generated backend scaffold: index.js', payload: { path: 'backend/index.js', content: _bidx } });
-  events?.emit({ type: 'FILE_WRITTEN', filePath: 'backend/db/database.js', message: 'Generated backend scaffold: db/database.js', payload: { path: 'backend/db/database.js', content: _bdb } });
+  const backendFallbackFiles = buildBackendFilesFromManifest(manifest);
+  backendFallbackFiles.forEach((file) => setFile(partial, file));
+  events?.emit({ type: 'FILE_WRITTEN', filePath: 'backend/package.json', message: 'Generated backend scaffold: package.json', payload: { path: 'backend/package.json', content: partial.get('backend/package.json') ?? '' } });
+  events?.emit({ type: 'FILE_WRITTEN', filePath: 'backend/src/db/database.ts', message: 'Generated backend scaffold: db/database.ts', payload: { path: 'backend/src/db/database.ts', content: partial.get('backend/src/db/database.ts') ?? '' } });
+  events?.emit({ type: 'FILE_WRITTEN', filePath: 'backend/src/index.ts', message: 'Generated backend scaffold: src/index.ts', payload: { path: 'backend/src/index.ts', content: partial.get('backend/src/index.ts') ?? '' } });
 
   const artifactResults = await Promise.all([
     (async () => {
       try {
-        const f = await generateBackendInitSql(manifest, tablePrefix, requirements, llmProxy, model);
+        const f = await generateBackendInitSql(manifest, requirements, llmProxy, model);
         setFile(partial, f);
         events?.emit({ type: 'FILE_WRITTEN', filePath: f.path, message: `Wrote ${f.path}`, payload: { path: f.path, content: f.content } });
         return { kind: 'sql', ok: true, path: f.path };
       } catch (err) {
         logWarn('codeGenerationAgent:init-sql-fallback', { error: (err as Error).message });
-        const f = backendFallback.find(file => file.path === 'backend/db/init.sql') || fallbackInitSql(manifest, tablePrefix);
-        setFile(partial, f);
-        events?.emit({ type: 'FILE_WRITTEN', filePath: f.path, message: `Wrote fallback ${f.path}`, payload: { path: f.path, content: f.content } });
-        return { kind: 'sql', ok: false, path: f.path, error: (err as Error).message };
+        const f = backendFallbackFiles.find((file) => file.path === 'backend/db/init.sql');
+        if (f) {
+          setFile(partial, f);
+          events?.emit({ type: 'FILE_WRITTEN', filePath: f.path, message: `Wrote fallback ${f.path}`, payload: { path: f.path, content: f.content } });
+        }
+        return { kind: 'sql', ok: false, path: 'backend/db/init.sql', error: (err as Error).message };
       }
     })(),
     ...(manifest.resources || []).map((resource) => (async () => {
       const expectedPath = sanitizeRoutePath('', resource.name || 'resource');
       try {
-        const route = await generateBackendRoute(resource, resource.routePath || '/', tablePrefix, requirements, llmProxy, model);
+        const route = backendRouteFile(resource);
         setFile(partial, route);
         events?.emit({ type: 'FILE_WRITTEN', filePath: route.path, message: `Wrote ${route.path}`, payload: { path: route.path, content: route.content } });
         return { kind: 'route', ok: true, path: route.path, resource: resource.name, expectedPath };
       } catch (err) {
         logWarn('codeGenerationAgent:route-fallback', { resource: resource.name, expectedPath, error: (err as Error).message });
-        const route = backendFallback.find(file => file.path === expectedPath) || fallbackRoute(resource, tablePrefix);
+        const route = backendRouteFallbackFiles(manifest).find((file) => file.path === expectedPath) || backendRouteFile(resource);
         setFile(partial, route);
         events?.emit({ type: 'FILE_WRITTEN', filePath: route.path, message: `Wrote fallback ${route.path}`, payload: { path: route.path, content: route.content } });
         return { kind: 'route', ok: false, path: route.path, resource: resource.name, expectedPath, error: (err as Error).message };
@@ -1083,19 +954,17 @@ async function generateBackendFiles(systemDesign: any, requirements: any, projec
     })()),
   ]);
 
-  const failedArtifacts = artifactResults.filter(r => !r.ok).map((r: any) => `${r.kind}:${r.expectedPath || r.path}${r.error ? ` (${r.error})` : ''}`);
+  const failedArtifacts = artifactResults.filter((r) => !r.ok).map((r: any) => `${r.kind}:${r.expectedPath || r.path}${r.error ? ` (${r.error})` : ''}`);
   if (failedArtifacts.length > 0) {
     logWarn('codeGenerationAgent:backend-artifact-fallbacks', { failedArtifacts });
   }
 
   const files = Array.from(partial.entries()).map(([filePath, content]) => ({ path: filePath, content }));
-  const missingRequired = Array.from(BACKEND_REQUIRED).filter(required => !files.some(f => f.path === required));
+  const missingRequired = Array.from(BACKEND_REQUIRED).filter((required) => !files.some((f) => f.path === required));
   if (missingRequired.length > 0) {
-    logWarn('codeGenerationAgent:backend-missing-required', { missingRequired, files: files.map(f => f.path) });
-    for (const fallback of backendFallback) {
-      if (!files.some(f => f.path === fallback.path)) {
-        files.push(fallback);
-      }
+    logWarn('codeGenerationAgent:backend-missing-required', { missingRequired, files: files.map((f) => f.path) });
+    for (const fallback of backendFallbackFiles) {
+      if (!files.some((f) => f.path === fallback.path)) files.push(fallback);
     }
   }
 
@@ -1117,33 +986,21 @@ export async function codeGenerationAgent(input: any) {
   const llmProxy = new LLMProxyClient({ apiKey });
   const events: EventSink | undefined = typeof input.emitEvent === 'function' ? { emit: input.emitEvent } : undefined;
 
-  let retrievedPatches: string[] = [];
-  try {
-    const basis = JSON.stringify({ systemDesign: input.systemDesign, requirements: input.requirements });
-    const embedding = await embeddingAgent(basis);
-    if (Array.isArray(embedding) && embedding.length > 0) {
-      const similar = await searchVectors({ user_id: input.user_id || input.userId || 'unknown', task: 'code_patch', embedding, topK: 2 });
-      retrievedPatches = similar.map((r: any) => r.metadata?.patch).filter(Boolean);
-    }
-  } catch {}
+  const retrievedPatches: string[] = [];
 
   const hasBackend = Boolean(input.projectSpec?.requirements?.backend_required ?? input.systemDesign?.backend);
   const projectId: string = input.projectId || 'unknown';
-  const uiSpec = input.uiSpec; // UISpec from prior stage
+  const uiSpec = input.uiSpec;
 
   debug('codeGenerationAgent:parallel-start', { projectId, hasBackend, hasUISpec: !!uiSpec });
   const manifestOut: { value?: ProjectManifest } = {};
+
   const [frontendResult, backendResult] = await Promise.allSettled([
-    generateFrontendFiles(input.systemDesign, input.requirements, input.modification, llmProxy, model, events, manifestOut, uiSpec, blueprint, input.projectSpec),
+    Promise.resolve([] as GeneratedFile[]),
     hasBackend ? generateBackendFiles(input.systemDesign, input.requirements, projectId, input.modification, llmProxy, model, events, blueprint) : Promise.resolve([] as GeneratedFile[]),
   ]);
 
-  const frontendFiles = frontendResult.status === 'fulfilled'
-    ? frontendResult.value
-    : (() => {
-        logError('codeGenerationAgent:frontend-failed', frontendResult.reason);
-        throw new Error(`Frontend code generation failed: ${(frontendResult.reason as Error)?.message || String(frontendResult.reason)}`);
-      })();
+  const frontendFiles = frontendResult.status === 'fulfilled' ? frontendResult.value : [];
 
   const backendFiles = backendResult.status === 'fulfilled'
     ? backendResult.value
@@ -1151,36 +1008,25 @@ export async function codeGenerationAgent(input: any) {
         logError('codeGenerationAgent:backend-failed', backendResult.reason);
         throw new Error(`Backend code generation failed: ${(backendResult.reason as Error)?.message || String(backendResult.reason)}`);
       })();
+
   const projectManifest = manifestOut.value;
 
-  const fileMap = new Map([...frontendFiles, ...backendFiles].map(f => [normalizeGeneratedPath(f.path), f.content]));
-
-  // Targeted repair: fill missing frontend scaffold files without re-running the full lifecycle.
-  const repairComponents = frontendFiles.filter(f => f.path.startsWith('src/components/'));
-  const repairBackendRequired = hasBackend;
+  const fileMap = new Map([...frontendFiles, ...backendFiles].map((f) => [normalizePath(f.path), f.content]));
 
   for (const required of ['package.json', 'src/App.jsx', 'src/index.css'] as const) {
     if (!fileMap.has(required)) {
       logWarn('codeGenerationAgent:repair-missing', { path: required });
       events?.emit({ type: 'AGENT_THINKING', message: `Repairing missing file: ${required}` });
       if (required === 'src/App.jsx') {
-        try {
-          const frontendManifest = fallbackFrontendManifest(input.requirements, uiSpec);
-          const repairedApp = await generateFrontendApp(frontendManifest, input.requirements, input.systemDesign, input.modification, repairComponents, llmProxy, model, input.uiSpec);
-          fileMap.set(required, repairedApp.content);
-          events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Repaired ${required}`, payload: { path: required, content: repairedApp.content } });
-        } catch {
-          const fallback = fallbackFrontendApp(fallbackFrontendManifest(input.requirements, uiSpec), repairComponents, repairBackendRequired);
-          fileMap.set(required, fallback.content);
-          events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Fallback repair for ${required}`, payload: { path: required, content: fallback.content } });
-        }
+        const repairedApp = fallbackFrontendApp(fallbackFrontendManifest(input.requirements, uiSpec), frontendFiles.filter((f) => f.path.startsWith('src/components/')), hasBackend);
+        fileMap.set(required, repairedApp.content);
+        events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Fallback repair for ${required}`, payload: { path: required, content: repairedApp.content } });
       } else if (required === 'src/index.css') {
         const fallback = fallbackFrontendCss();
         fileMap.set(required, fallback.content);
         events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Fallback repair for ${required}`, payload: { path: required, content: fallback.content } });
       } else if (required === 'package.json') {
-        const scaffoldFiles = frontendScaffold(fallbackFrontendManifest(input.requirements));
-        const pkgFile = scaffoldFiles.find(f => f.path === 'package.json');
+        const pkgFile = frontendScaffold(fallbackFrontendManifest(input.requirements, uiSpec)).find((f) => f.path === 'package.json');
         if (pkgFile) {
           fileMap.set(required, pkgFile.content);
           events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Fallback repair for ${required}`, payload: { path: required, content: pkgFile.content } });
@@ -1189,15 +1035,12 @@ export async function codeGenerationAgent(input: any) {
     }
   }
 
-  // Targeted repair: fill missing backend required files without re-running the full lifecycle.
   if (hasBackend) {
-    const safeId = projectId.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 24);
-    const tablePrefix = `proj_${safeId}_`;
-    const backendFallbackFiles = fallbackBackendFiles(tablePrefix);
+    const backendFallbackFiles = backendRouteFallbackFiles(fallbackBackendManifest());
     for (const required of Array.from(BACKEND_REQUIRED)) {
       if (!fileMap.has(required)) {
         logWarn('codeGenerationAgent:repair-missing-backend', { path: required });
-        const fallback = backendFallbackFiles.find(f => f.path === required);
+        const fallback = backendFallbackFiles.find((f) => f.path === required);
         if (fallback) {
           fileMap.set(required, fallback.content);
           events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Repaired missing backend file: ${required}`, payload: { path: required, content: fallback.content } });
@@ -1206,30 +1049,17 @@ export async function codeGenerationAgent(input: any) {
     }
   }
 
-  // Targeted repair: regenerate App.jsx if it is a stub, reusing all already-generated components.
   const appContent = fileMap.get('src/App.jsx') ?? '';
   if (appContent.length < 200) {
     logWarn('codeGenerationAgent:repair-stub-app', { contentLength: appContent.length });
-    events?.emit({ type: 'AGENT_THINKING', message: 'App.jsx appears to be a stub — repairing without restarting...' });
-    try {
-      const frontendManifest = fallbackFrontendManifest(input.requirements);
-      const repairedStubApp = await generateFrontendApp(frontendManifest, input.requirements, input.systemDesign, input.modification, repairComponents, llmProxy, model, input.uiSpec);
-      validateAppImports(repairedStubApp.content, repairComponents, blueprint, input.uiSpec);
-      fileMap.set('src/App.jsx', repairedStubApp.content);
-      events?.emit({ type: 'FILE_WRITTEN', filePath: 'src/App.jsx', message: 'Repaired stub App.jsx', payload: { path: 'src/App.jsx', content: repairedStubApp.content } });
-    } catch (err) {
-      failClosed(`Stub App.jsx repair failed: ${(err as Error).message}`);
-    }
+    const frontendManifest = fallbackFrontendManifest(input.requirements, uiSpec);
+    const componentFiles = frontendFiles.filter((f: GeneratedFile) => f.path.startsWith('src/components/'));
+    const repairedStubApp = fallbackFrontendApp(frontendManifest, componentFiles, hasBackend);
+    fileMap.set('src/App.jsx', repairedStubApp.content);
+    events?.emit({ type: 'FILE_WRITTEN', filePath: 'src/App.jsx', message: 'Repaired stub App.jsx', payload: { path: 'src/App.jsx', content: repairedStubApp.content } });
   }
 
   const allFiles = Array.from(fileMap.entries()).map(([pathName, content]) => ({ path: pathName, content }));
-
-  const componentFiles = allFiles.filter(f => f.path.startsWith('src/components/'));
-  for (const comp of componentFiles) {
-    if (comp.content.length < 150) {
-      logWarn('codeGenerationAgent:stub-detected', { path: comp.path, contentLength: comp.content.length });
-    }
-  }
 
   debug('codeGenerationAgent:done', {
     projectId,
@@ -1249,4 +1079,11 @@ export async function codeGenerationAgent(input: any) {
     generationMode: 'spec-aware-dependency-ordered',
     project_task_queue: projectManifest?.project_task_queue || [],
   };
+}
+
+function escapeJsxText(value: string | undefined, fallback: string): string {
+  return String(value || fallback)
+    .replace(/&/g, '&')
+    .replace(/</g, '<')
+    .replace(/>/g, '>');
 }

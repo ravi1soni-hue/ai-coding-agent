@@ -3,7 +3,6 @@ import path from 'path';
 export type BlueprintFile = {
   path: string;
   purpose: string;
-  exports?: string[];
   dependsOn?: string[];
   kind: 'entry' | 'component' | 'route' | 'style' | 'config' | 'schema' | 'utility';
   mustInclude?: string[];
@@ -31,63 +30,93 @@ export type BlueprintState = {
   shape: Record<string, unknown>;
 };
 
-export type ProjectBlueprint = {
-  title: string;
+export type ProjectBlueprintStrict = {
+  projectType: 'landing_page' | 'dashboard' | 'full_app';
+  modules: string[];
+  frontend: {
+    pages: string[];
+    components: string[];
+    routing: boolean;
+    stateManagement: 'local' | 'context';
+  };
+  backend: {
+    required: boolean;
+    modules: string[];
+    routes: string[];
+  };
+  database: {
+    tables: string[];
+  };
+  structure: {
+    frontend: Record<string, unknown>;
+    backend: Record<string, unknown>;
+  };
+};
+
+export type ProjectBlueprintMetadata = {
+  title?: string;
   approved?: BlueprintApproval;
-  stack: {
+  stack?: {
     frontend: 'react-vite';
-    backend: 'node-express-ts';
+    backend: 'node-ts';
     database: 'postgresql';
   };
-  buildCriticalFiles: string[];
-  entrypoints: {
+  buildCriticalFiles?: string[];
+  entrypoints?: {
     frontend: string[];
     backend: string[];
   };
-  state: BlueprintState;
-  navigation: {
+  state?: BlueprintState;
+  navigation?: {
     type: 'react-router' | 'single-page';
     routes: Array<{ path: string; component: string; purpose: string }>;
   };
-  files: BlueprintFile[];
-  backendRoutes: BlueprintBackendRoute[];
-  invariants: string[];
+  invariants?: string[];
 };
 
-const REQUIRED_BUILD_FILES = new Set([
-  'package.json',
-  'index.html',
-  'vite.config.js',
-  'src/main.jsx',
-  'src/App.jsx',
-  'src/index.css',
-]);
+export type ProjectBlueprint = {
+  strict: ProjectBlueprintStrict;
+  metadata?: ProjectBlueprintMetadata;
+  files: BlueprintFile[];
+  dependencies: Record<string, string[]>;
+  backendRoutes: BlueprintBackendRoute[];
+  title?: string;
+  approved?: BlueprintApproval;
+  stack?: ProjectBlueprintMetadata['stack'];
+  buildCriticalFiles?: string[];
+  entrypoints?: ProjectBlueprintMetadata['entrypoints'];
+  state?: BlueprintState;
+  navigation?: NonNullable<ProjectBlueprintMetadata['navigation']>;
+  invariants?: string[];
+};
 
-const REQUIRED_BACKEND_FILES = new Set([
-  'backend/package.json',
-  'backend/index.js',
-  'backend/db/database.js',
-  'backend/db/init.sql',
-]);
-
+const REQUIRED_STRICT_FIELDS = ['projectType', 'modules', 'frontend', 'backend', 'database', 'structure'] as const;
+const REQUIRED_BUILD_FILES = ['package.json', 'index.html', 'vite.config.js', 'src/main.jsx', 'src/App.jsx', 'src/index.css'] as const;
+const REQUIRED_BACKEND_FILES = ['backend/package.json', 'backend/src/index.ts', 'backend/src/db/database.ts', 'backend/db/init.sql'] as const;
+const BLUEPRINT_PROJECT_TYPES = new Set(['landing_page', 'dashboard', 'full_app']);
+const BLUEPRINT_STATE_MANAGEMENT = new Set(['local', 'context']);
+const BLUEPRINT_NAVIGATION_TYPES = new Set(['react-router', 'single-page']);
+const BLUEPRINT_STACK = { frontend: 'react-vite', backend: 'node-ts', database: 'postgresql' } as const;
 const BANNED_PLACEHOLDERS = /(TODO|placeholder|lorem ipsum|TBD|replace me|generic text)/i;
+const ALLOWED_PATHS = /^(package\.json|index\.html|vite\.config\.js|src\/|backend\/)/;
 
 function normalizeFilePath(filePath: string): string {
   return filePath.replace(/\\/g, '/').replace(/^\/+/, '');
 }
 
 function assertString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || !value.trim()) {
-    throw new Error(`${label} must be a non-empty string`);
-  }
+  if (typeof value !== 'string' || !value.trim()) throw new Error(`${label} must be a non-empty string`);
   return value.trim();
 }
 
 function assertStringArray(value: unknown, label: string): string[] {
-  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || !item.trim())) {
-    throw new Error(`${label} must be an array of non-empty strings`);
-  }
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || !item.trim())) throw new Error(`${label} must be an array of non-empty strings`);
   return value.map((item) => item.trim());
+}
+
+function assertRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  return value as Record<string, unknown>;
 }
 
 function isAllowedBlueprintFile(filePath: string): boolean {
@@ -95,266 +124,188 @@ function isAllowedBlueprintFile(filePath: string): boolean {
   if (normalized.includes('..')) return false;
   if (normalized.startsWith('node_modules/') || normalized.includes('/node_modules/')) return false;
   if (normalized.startsWith('dist/') || normalized.startsWith('.git/')) return false;
-  return true;
+  return ALLOWED_PATHS.test(normalized);
 }
 
 function validateBlueprintFile(file: BlueprintFile, index: number): BlueprintFile {
   const pathValue = assertString(file.path, `files[${index}].path`);
   const purpose = assertString(file.purpose, `files[${index}].purpose`);
-  if (!isAllowedBlueprintFile(pathValue)) {
-    throw new Error(`files[${index}].path is not allowed: ${pathValue}`);
-  }
-  if (BANNED_PLACEHOLDERS.test(purpose) || BANNED_PLACEHOLDERS.test(pathValue)) {
-    throw new Error(`files[${index}] contains placeholder text`);
-  }
-  if (!['entry', 'component', 'route', 'style', 'config', 'schema', 'utility'].includes(file.kind)) {
-    throw new Error(`files[${index}].kind is invalid`);
-  }
+  if (!isAllowedBlueprintFile(pathValue)) throw new Error(`files[${index}].path is not allowed: ${pathValue}`);
+  if (BANNED_PLACEHOLDERS.test(pathValue) || BANNED_PLACEHOLDERS.test(purpose)) throw new Error(`files[${index}] contains placeholder text`);
+  if (!['entry', 'component', 'route', 'style', 'config', 'schema', 'utility'].includes(file.kind)) throw new Error(`files[${index}].kind is invalid`);
   return {
     path: normalizeFilePath(pathValue),
     purpose,
     kind: file.kind,
-    exports: Array.isArray(file.exports) ? file.exports.map(String) : undefined,
     dependsOn: Array.isArray(file.dependsOn) ? file.dependsOn.map(normalizeFilePath) : undefined,
     mustInclude: Array.isArray(file.mustInclude) ? file.mustInclude.map(String) : undefined,
   };
 }
 
-function requiresBackendArchitecture(requirements?: { backend_required?: boolean; auth_required?: boolean }): boolean {
-  return Boolean(requirements?.backend_required || requirements?.auth_required);
+function dedupeSorted(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => normalizeFilePath(value)).filter(Boolean))).sort();
+}
+
+function resultNavigation(value: unknown): NonNullable<ProjectBlueprintMetadata['navigation']> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const navigation = value as Record<string, unknown>;
+  return {
+    type: String(navigation.type) as 'react-router' | 'single-page',
+    routes: Array.isArray(navigation.routes)
+      ? navigation.routes.map((route: unknown, index: number) => ({
+          path: assertString((route as Record<string, unknown>).path, `metadata.navigation.routes[${index}].path`),
+          component: assertString((route as Record<string, unknown>).component, `metadata.navigation.routes[${index}].component`),
+          purpose: assertString((route as Record<string, unknown>).purpose, `metadata.navigation.routes[${index}].purpose`),
+        }))
+      : [],
+  };
 }
 
 export function validateProjectBlueprint(raw: unknown, context?: { requirements?: { backend_required?: boolean; auth_required?: boolean } }): ProjectBlueprint {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new Error('Blueprint must be a JSON object');
-  }
-
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Blueprint must be a JSON object');
   const blueprint = raw as Record<string, unknown>;
-  const title = assertString(blueprint.title, 'title');
+  const strict = assertRecord(blueprint.strict, 'strict');
+  const metadata = blueprint.metadata ? assertRecord(blueprint.metadata, 'metadata') : undefined;
 
-  const stack = blueprint.stack as Record<string, unknown> | undefined;
-  if (!stack) throw new Error('stack is required');
-  if (stack.frontend !== 'react-vite' || stack.backend !== 'node-express-ts' || stack.database !== 'postgresql') {
-    throw new Error('stack must declare react-vite, node-express-ts, and postgresql');
-  }
-
-  const buildCriticalFiles = assertStringArray(blueprint.buildCriticalFiles, 'buildCriticalFiles');
-  for (const required of REQUIRED_BUILD_FILES) {
-    if (!buildCriticalFiles.includes(required)) {
-      throw new Error(`Missing required frontend build file: ${required}`);
-    }
+  for (const field of REQUIRED_STRICT_FIELDS) {
+    if (!(field in strict)) throw new Error(`strict.${field} is required`);
   }
 
-  const entrypoints = blueprint.entrypoints as Record<string, unknown> | undefined;
-  if (!entrypoints) throw new Error('entrypoints is required');
-  const frontendEntrypoints = assertStringArray(entrypoints.frontend, 'entrypoints.frontend');
-  const backendEntrypoints = assertStringArray(entrypoints.backend, 'entrypoints.backend');
-  if (!frontendEntrypoints.includes('src/main.jsx') || !frontendEntrypoints.includes('src/App.jsx')) {
-    throw new Error('entrypoints.frontend must include src/main.jsx and src/App.jsx');
-  }
-  if (!backendEntrypoints.includes('backend/index.js')) {
-    throw new Error('entrypoints.backend must include backend/index.js');
+  const projectType = assertString(strict.projectType, 'strict.projectType');
+  if (!BLUEPRINT_PROJECT_TYPES.has(projectType)) throw new Error('strict.projectType must be landing_page, dashboard, or full_app');
+  const modules = assertStringArray(strict.modules, 'strict.modules');
+  const frontend = assertRecord(strict.frontend, 'strict.frontend');
+  const backend = assertRecord(strict.backend, 'strict.backend');
+  const database = assertRecord(strict.database, 'strict.database');
+  const structure = assertRecord(strict.structure, 'strict.structure');
+
+  const pages = assertStringArray(frontend.pages, 'strict.frontend.pages');
+  const components = assertStringArray(frontend.components, 'strict.frontend.components');
+  if (typeof frontend.routing !== 'boolean') throw new Error('strict.frontend.routing must be boolean');
+  if (!BLUEPRINT_STATE_MANAGEMENT.has(String(frontend.stateManagement))) throw new Error('strict.frontend.stateManagement must be local or context');
+
+  if (typeof backend.required !== 'boolean') throw new Error('strict.backend.required must be boolean');
+  const backendModules = assertStringArray(backend.modules, 'strict.backend.modules');
+  const backendRouteStrings = assertStringArray(backend.routes, 'strict.backend.routes');
+  const tables = assertStringArray(database.tables, 'strict.database.tables');
+  if (typeof structure.frontend !== 'object' || Array.isArray(structure.frontend)) throw new Error('strict.structure.frontend must be an object');
+  if (typeof structure.backend !== 'object' || Array.isArray(structure.backend)) throw new Error('strict.structure.backend must be an object');
+
+  const buildCriticalFiles = metadata?.buildCriticalFiles ? assertStringArray(metadata.buildCriticalFiles, 'metadata.buildCriticalFiles') : [...REQUIRED_BUILD_FILES];
+  for (const required of REQUIRED_BUILD_FILES) if (!buildCriticalFiles.includes(required)) throw new Error(`Missing required frontend build file: ${required}`);
+
+  const stack = metadata?.stack ? assertRecord(metadata.stack, 'metadata.stack') : undefined;
+  if (stack && (stack.frontend !== BLUEPRINT_STACK.frontend || stack.backend !== BLUEPRINT_STACK.backend || stack.database !== BLUEPRINT_STACK.database)) {
+    throw new Error('metadata.stack must declare react-vite, node-ts, and postgresql');
   }
 
-  const state = blueprint.state as Record<string, unknown> | undefined;
-  if (!state) throw new Error('state is required');
-  if (!['context', 'zustand', 'local'].includes(String(state.owner))) {
-    throw new Error('state.owner must be context, zustand, or local');
-  }
-  const stateStore = assertString(state.store, 'state.store');
-  const stateShape = state.shape;
-  if (!stateShape || typeof stateShape !== 'object' || Array.isArray(stateShape)) {
-    throw new Error('state.shape must be an object');
+  const entrypoints = metadata?.entrypoints ? assertRecord(metadata.entrypoints, 'metadata.entrypoints') : undefined;
+  if (entrypoints) {
+    const frontendEntrypoints = assertStringArray(entrypoints.frontend, 'metadata.entrypoints.frontend');
+    const backendEntrypoints = assertStringArray(entrypoints.backend, 'metadata.entrypoints.backend');
+    if (!frontendEntrypoints.includes('src/main.jsx') || !frontendEntrypoints.includes('src/App.jsx')) throw new Error('metadata.entrypoints.frontend must include src/main.jsx and src/App.jsx');
+    if (backend.required && !backendEntrypoints.includes('backend/src/index.ts')) throw new Error('metadata.entrypoints.backend must include backend/src/index.ts');
   }
 
-  const navigation = blueprint.navigation as Record<string, unknown> | undefined;
-  if (!navigation) throw new Error('navigation is required');
-  if (!['react-router', 'single-page'].includes(String(navigation.type))) {
-    throw new Error('navigation.type must be react-router or single-page');
-  }
-  const routes = Array.isArray(navigation.routes) ? navigation.routes : [];
-  if (routes.length === 0) throw new Error('navigation.routes cannot be empty');
+  if (!pages.length) throw new Error('strict.frontend.pages cannot be empty');
+  if (!components.length) throw new Error('strict.frontend.components cannot be empty');
+  if (!modules.length) throw new Error('strict.modules cannot be empty');
+  if (backend.required && !backendModules.length) throw new Error('strict.backend.modules cannot be empty when backend.required is true');
+  if (backend.required && !backendRouteStrings.length) throw new Error('strict.backend.routes cannot be empty when backend.required is true');
+  if (!tables.length) throw new Error('strict.database.tables cannot be empty');
+
+  const invariants = metadata?.invariants ? assertStringArray(metadata.invariants, 'metadata.invariants') : [];
+  if (invariants.length > 0 && !invariants.some((rule) => /project_id/i.test(rule))) throw new Error('metadata.invariants must include a project_id isolation rule');
+
+  const navigation = metadata?.navigation ? assertRecord(metadata.navigation, 'metadata.navigation') : undefined;
+  if (navigation && !BLUEPRINT_NAVIGATION_TYPES.has(String(navigation.type))) throw new Error('metadata.navigation.type must be react-router or single-page');
 
   const files = Array.isArray(blueprint.files) ? blueprint.files.map(validateBlueprintFile) : [];
-  if (files.length === 0) throw new Error('files cannot be empty');
+  const filePaths = dedupeSorted(files.map((file) => file.path));
+  if (filePaths.length !== files.length) throw new Error('Blueprint files must be unique');
+  for (const required of REQUIRED_BUILD_FILES) if (!filePaths.includes(required)) throw new Error(`Blueprint files missing required frontend file: ${required}`);
+  for (const required of REQUIRED_BACKEND_FILES) if (backend.required && !filePaths.includes(required)) throw new Error(`Blueprint files missing required backend file: ${required}`);
 
-  for (const required of REQUIRED_BUILD_FILES) {
-    if (!files.some((file) => file.path === required)) {
-      throw new Error(`Blueprint missing required frontend file: ${required}`);
-    }
+  const dependencies = assertRecord(blueprint.dependencies ?? {}, 'dependencies');
+  for (const [fileName, deps] of Object.entries(dependencies)) {
+    if (!Array.isArray(deps) || deps.some((dep) => typeof dep !== 'string' || !dep.trim())) throw new Error(`dependencies.${fileName} must be an array of strings`);
   }
 
-  const backendRequired = requiresBackendArchitecture(context?.requirements);
-  if (backendRequired) {
-    for (const required of REQUIRED_BACKEND_FILES) {
-      if (!files.some((file) => file.path === required)) {
-        throw new Error(`Blueprint missing required backend file: ${required}`);
-      }
-    }
-  }
-
-  const backendRoutes = Array.isArray(blueprint.backendRoutes) ? blueprint.backendRoutes : [];
-
-  if (backendRequired && backendRoutes.length === 0) {
-    throw new Error('backendRoutes cannot be empty when backend is required');
-  }
-
-  for (let i = 0; i < backendRoutes.length; i += 1) {
-    const route = backendRoutes[i] as Record<string, unknown>;
-    const routePath = assertString(route.path, `backendRoutes[${i}].path`);
-    if (!routePath.startsWith('/api/')) {
-      throw new Error(`backendRoutes[${i}].path must start with /api/`);
-    }
-    const method = assertString(route.method, `backendRoutes[${i}].method`) as BlueprintBackendRoute['method'];
-    if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
-      throw new Error(`backendRoutes[${i}].method is invalid`);
-    }
-    if (route.requiresProjectId !== true) {
-      throw new Error(`backendRoutes[${i}] must require project_id filtering`);
-    }
-    assertString(route.purpose, `backendRoutes[${i}].purpose`);
-  }
-
-  const invariants = assertStringArray(blueprint.invariants, 'invariants');
-  if (!invariants.some((rule) => /project_id/i.test(rule))) {
-    throw new Error('invariants must include a project_id isolation rule');
-  }
+  const backendRoutes = Array.isArray(blueprint.backendRoutes)
+    ? blueprint.backendRoutes.map((route: any, index: number) => ({
+        path: assertString(route.path, `backendRoutes[${index}].path`),
+        method: assertString(route.method, `backendRoutes[${index}].method`) as BlueprintBackendRoute['method'],
+        purpose: assertString(route.purpose, `backendRoutes[${index}].purpose`),
+        requiresProjectId: route.requiresProjectId === true,
+        tableName: typeof route.tableName === 'string' ? route.tableName : undefined,
+        queryNotes: typeof route.queryNotes === 'string' ? route.queryNotes : undefined,
+      }))
+    : [];
 
   return {
-    title,
-    stack: {
-      frontend: 'react-vite',
-      backend: 'node-express-ts',
-      database: 'postgresql',
+    strict: {
+      projectType: projectType as ProjectBlueprintStrict['projectType'],
+      modules,
+      frontend: {
+        pages,
+        components,
+        routing: frontend.routing,
+        stateManagement: frontend.stateManagement as ProjectBlueprintStrict['frontend']['stateManagement'],
+      },
+      backend: {
+        required: backend.required,
+        modules: backendModules,
+        routes: backendRouteStrings,
+      },
+      database: { tables },
+      structure: {
+        frontend: structure.frontend as Record<string, unknown>,
+        backend: structure.backend as Record<string, unknown>,
+      },
     },
-    buildCriticalFiles,
-    entrypoints: {
-      frontend: frontendEntrypoints,
-      backend: backendEntrypoints,
-    },
-    state: {
-      owner: state.owner as BlueprintState['owner'],
-      store: stateStore,
-      shape: stateShape as Record<string, unknown>,
-    },
-    navigation: {
-      type: navigation.type as ProjectBlueprint['navigation']['type'],
-      routes: routes.map((route, index) => ({
-        path: assertString((route as any).path, `navigation.routes[${index}].path`),
-        component: assertString((route as any).component, `navigation.routes[${index}].component`),
-        purpose: assertString((route as any).purpose, `navigation.routes[${index}].purpose`),
-      })),
-    },
+    metadata: metadata
+      ? {
+          title: typeof metadata.title === 'string' ? metadata.title : undefined,
+          approved: metadata.approved as BlueprintApproval | undefined,
+          stack: stack ? { frontend: BLUEPRINT_STACK.frontend, backend: BLUEPRINT_STACK.backend, database: BLUEPRINT_STACK.database } : undefined,
+          buildCriticalFiles,
+          entrypoints: entrypoints
+            ? {
+                frontend: assertStringArray((metadata.entrypoints as Record<string, unknown>).frontend, 'metadata.entrypoints.frontend'),
+                backend: assertStringArray((metadata.entrypoints as Record<string, unknown>).backend, 'metadata.entrypoints.backend'),
+              }
+            : undefined,
+          state: metadata.state as BlueprintState | undefined,
+          navigation: resultNavigation(metadata.navigation),
+          invariants,
+        }
+      : undefined,
     files,
-    backendRoutes: backendRoutes.map((route, index) => ({
-      path: assertString((route as any).path, `backendRoutes[${index}].path`),
-      method: assertString((route as any).method, `backendRoutes[${index}].method`) as BlueprintBackendRoute['method'],
-      purpose: assertString((route as any).purpose, `backendRoutes[${index}].purpose`),
-      requiresProjectId: (route as any).requiresProjectId === true,
-      tableName: typeof (route as any).tableName === 'string' ? String((route as any).tableName) : undefined,
-      queryNotes: typeof (route as any).queryNotes === 'string' ? String((route as any).queryNotes) : undefined,
-    })),
+    dependencies: Object.fromEntries(Object.entries(dependencies).map(([key, value]) => [normalizeFilePath(key), dedupeSorted(value as string[])])),
+    backendRoutes,
+    title: typeof metadata?.title === 'string' ? metadata.title : undefined,
+    approved: metadata?.approved as BlueprintApproval | undefined,
+    stack: metadata?.stack ? { frontend: BLUEPRINT_STACK.frontend, backend: BLUEPRINT_STACK.backend, database: BLUEPRINT_STACK.database } : undefined,
+    buildCriticalFiles,
+    entrypoints: metadata?.entrypoints
+      ? {
+          frontend: assertStringArray((metadata.entrypoints as Record<string, unknown>).frontend, 'metadata.entrypoints.frontend'),
+          backend: assertStringArray((metadata.entrypoints as Record<string, unknown>).backend, 'metadata.entrypoints.backend'),
+        }
+      : undefined,
+    state: metadata?.state as BlueprintState | undefined,
+    navigation: resultNavigation(metadata?.navigation),
     invariants,
   };
 }
 
-export function isBlueprintFileEntry(filePath: string): boolean {
-  const normalized = normalizeFilePath(filePath);
-  return REQUIRED_BUILD_FILES.has(normalized) || REQUIRED_BACKEND_FILES.has(normalized) || normalized.startsWith('src/components/') || normalized.startsWith('backend/routes/');
-}
-
-export function blueprintMissingFiles(
-  blueprint: ProjectBlueprint,
-  options?: { requirements?: { backend_required?: boolean; auth_required?: boolean } }
-): string[] {
+export function blueprintMissingFiles(blueprint: ProjectBlueprint, options?: { requirements?: { backend_required?: boolean; auth_required?: boolean } }): string[] {
   const filePaths = new Set(blueprint.files.map((file) => file.path));
   const missing: string[] = [];
-  for (const required of REQUIRED_BUILD_FILES) {
-    if (!filePaths.has(required)) missing.push(required);
-  }
-  const backendRequired = requiresBackendArchitecture(options?.requirements);
-  if (backendRequired) {
-    for (const required of REQUIRED_BACKEND_FILES) {
-      if (!filePaths.has(required)) missing.push(required);
-    }
-  }
+  for (const required of REQUIRED_BUILD_FILES) if (!filePaths.has(required)) missing.push(required);
+  const backendRequired = Boolean(options?.requirements?.backend_required || options?.requirements?.auth_required);
+  if (backendRequired) for (const required of REQUIRED_BACKEND_FILES) if (!filePaths.has(required)) missing.push(required);
   return missing;
-}
-
-function componentNameToPath(componentName: string): string {
-  const normalized = componentName.trim();
-  if (!normalized) return '';
-  return normalized.startsWith('src/components/') ? normalizeFilePath(normalized) : `src/components/${normalized}.jsx`;
-}
-
-function routePathToComponentPath(routePath: string, componentName: string): string {
-  const normalizedName = componentName.trim();
-  if (normalizedName === 'App') {
-    return 'src/App.jsx';
-  }
-  if (routePath === '/' || routePath === '') {
-    return componentNameToPath(normalizedName);
-  }
-  const slug = routePath.replace(/^\/+/, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  const safeSlug = slug || 'home';
-  return componentNameToPath(normalizedName || `${safeSlug[0].toUpperCase()}${safeSlug.slice(1)}`);
-}
-
-function assertBlueprintRouteCoverage(blueprint: ProjectBlueprint): void {
-  const filePaths = new Set(blueprint.files.map((file) => file.path));
-  for (let i = 0; i < blueprint.navigation.routes.length; i += 1) {
-    const route = blueprint.navigation.routes[i];
-    if (!route.component || typeof route.component !== 'string' || !route.component.trim()) {
-      throw new Error(`navigation.routes[${i}] must declare a component name`);
-    }
-
-    if (route.component === 'App' && !filePaths.has('src/App.jsx')) {
-      throw new Error('navigation.routes references App but src/App.jsx is missing');
-    }
-  }
-}
-
-function assertBlueprintDependencyCoverage(blueprint: ProjectBlueprint): void {
-  const filePaths = new Set(blueprint.files.map((file) => file.path));
-  for (let i = 0; i < blueprint.files.length; i += 1) {
-    const file = blueprint.files[i];
-    for (const dep of file.dependsOn || []) {
-      if (!filePaths.has(dep)) {
-        throw new Error(`files[${i}].dependsOn references missing file: ${dep}`);
-      }
-    }
-  }
-}
-
-function repairBlueprintIntegrationSafety(blueprint: ProjectBlueprint): ProjectBlueprint {
-  const filePaths = new Set(blueprint.files.map((file) => file.path));
-  const routes = blueprint.navigation.routes.map((route) => {
-    if (route.component === 'App') {
-      return route;
-    }
-    const expectedPath = routePathToComponentPath(route.path, route.component);
-    if (filePaths.has(expectedPath)) {
-      return route;
-    }
-    if (filePaths.has(`src/components/${route.component}.jsx`)) {
-      return route;
-    }
-    const fallbackComponent = componentNameToPath(route.component);
-    if (filePaths.has(fallbackComponent)) {
-      return route;
-    }
-    // Component file not found in any known location — log and leave route as-is;
-    // assertBlueprintRouteCoverage will catch it if it's a hard requirement.
-    return route;
-  });
-
-  return {
-    ...blueprint,
-    navigation: {
-      ...blueprint.navigation,
-      routes,
-    },
-  };
 }
 
 export function blueprintTopLevelPaths(blueprint: ProjectBlueprint): string[] {
@@ -369,110 +320,37 @@ export function blueprintTopLevelPaths(blueprint: ProjectBlueprint): string[] {
 }
 
 export function assertBlueprintIntegrationSafety(blueprint: ProjectBlueprint): ProjectBlueprint {
-  const repairedBlueprint = repairBlueprintIntegrationSafety(blueprint);
-  assertBlueprintRouteCoverage(repairedBlueprint);
-  assertBlueprintDependencyCoverage(repairedBlueprint);
-
-  const appFile = repairedBlueprint.files.find((file) => file.path === 'src/App.jsx');
-  if (!appFile) throw new Error('Blueprint missing src/App.jsx');
-  const hasAppRootRoute = repairedBlueprint.navigation.routes.some((route) => route.component === 'App');
-  const hasAppFile = repairedBlueprint.files.some((file) => /src\/App\.(jsx?|tsx?)$/.test(file.path));
-  if (!hasAppRootRoute && !hasAppFile) {
-    throw new Error('navigation must include App as the root entry component');
+  const filePaths = new Set(blueprint.files.map((file) => file.path));
+  const navigationRoutes = blueprint.metadata?.navigation?.routes || [];
+  for (const route of navigationRoutes) {
+    if (route.component === 'App' && !filePaths.has('src/App.jsx')) throw new Error('Blueprint missing src/App.jsx');
   }
-  if (!appFile.mustInclude?.some((token) => /router|API_BASE|fetch/i.test(token)) && repairedBlueprint.backendRoutes.length > 0) {
-    throw new Error('src/App.jsx must declare API_BASE or fetch usage when backend routes exist');
+  for (const [fileName, deps] of Object.entries(blueprint.dependencies)) {
+    for (const dep of deps) if (!filePaths.has(dep)) throw new Error(`dependencies.${fileName} references missing file: ${dep}`);
   }
-
-  return repairedBlueprint;
-}
-
-function assertStringArrayContainsAll(haystack: string[], needles: string[], label: string): void {
-  const set = new Set(haystack);
-  for (const needle of needles) {
-    if (!set.has(needle)) {
-      throw new Error(`${label} is missing required entry: ${needle}`);
-    }
-  }
-}
-
-function componentNameToFilePath(componentName: string): string {
-  const normalized = componentName.trim();
-  if (!normalized) return '';
-  if (normalized === 'App') return 'src/App.jsx';
-  if (normalized.startsWith('src/')) return normalizeFilePath(normalized);
-  return `src/components/${normalized}.jsx`;
+  if (!filePaths.has('src/App.jsx')) throw new Error('Blueprint missing src/App.jsx');
+  if (!filePaths.has('src/index.css')) throw new Error('Blueprint missing src/index.css');
+  return blueprint;
 }
 
 export function assertBlueprintMatchesContext(
   blueprint: ProjectBlueprint,
-  context: {
-    requirements?: { backend_required?: boolean; auth_required?: boolean; pages?: string[]; website_type?: string };
-    uiSpec?: { components?: Array<{ name: string; path: string }>; apiContract?: Array<{ endpoint: string; consumedBy: string[] }> };
-  }
+  context: { requirements?: { backend_required?: boolean; auth_required?: boolean; pages?: string[]; website_type?: string }; uiSpec?: { components?: Array<{ name: string; path: string }> } }
 ): ProjectBlueprint {
   const requirements = context.requirements || {};
-  const uiSpec = context.uiSpec;
-
   if (Array.isArray(requirements.pages) && requirements.pages.length > 0) {
-    const blueprintPaths = blueprint.navigation.routes.map((route) => route.path);
+    const blueprintRoutes = blueprint.metadata?.navigation?.routes || [];
+    const blueprintPaths = blueprintRoutes.map((route) => route.path);
     const pageHints = requirements.pages.map((page) => `/${String(page).toLowerCase().replace(/[^a-z0-9]+/g, '-')}`).filter((item) => item !== '/');
-    if (!blueprintPaths.includes('/') && !blueprintPaths.some((routePath) => pageHints.includes(routePath))) {
-      throw new Error('Blueprint navigation does not reflect the requested pages');
-    }
+    if (!blueprintPaths.includes('/') && !blueprintPaths.some((routePath) => pageHints.includes(routePath))) throw new Error('Blueprint navigation does not reflect the requested pages');
   }
-
-  if (requirements.auth_required) {
-    const hasAuthRoute = blueprint.files.some((file) => /login|auth/i.test(file.path)) || blueprint.navigation.routes.some((route) => /login|auth/i.test(route.path) || /login|auth/i.test(route.component));
-    if (!hasAuthRoute) {
-      throw new Error('Blueprint is missing auth-related files or navigation for an auth-required request');
-    }
-  }
-
-  if (requirements.backend_required && !blueprint.backendRoutes.some((route) => route.path.startsWith('/api/'))) {
-    throw new Error('Blueprint is missing backend API routes for a backend-required request');
-  }
-
-  if (uiSpec?.components?.length) {
-    const blueprintComponentNames = new Set(blueprint.navigation.routes.map((route) => route.component));
+  if (requirements.backend_required && !blueprint.backendRoutes.some((route) => route.path.startsWith('/api/'))) throw new Error('Blueprint is missing backend API routes for a backend-required request');
+  if (context.uiSpec?.components?.length) {
     const blueprintFilePaths = new Set(blueprint.files.map((file) => file.path));
-    const blueprintDependsOn = new Set(
-      blueprint.files.flatMap((file) => (Array.isArray(file.dependsOn) ? file.dependsOn : [])).map(normalizeFilePath)
-    );
-    const rootRouteHasApp =
-      blueprint.navigation.routes.some((route) => route.component === 'App') ||
-      blueprint.files.some((file) => /src\/App\.(jsx?|tsx?)$/.test(file.path));
-    const declaredComponentPaths = new Set(uiSpec.components.map((component) => normalizeFilePath(component.path)));
-    const declaredComponentNames = new Set(uiSpec.components.map((component) => component.name));
-    const routeComponents = new Set(blueprint.navigation.routes.map((route) => route.component));
-
-    for (const component of uiSpec.components) {
-      const componentPath = normalizeFilePath(component.path);
-      const expectedPath = componentNameToFilePath(component.name);
-      const componentNameWired = routeComponents.has(component.name) || declaredComponentNames.has(component.name);
-      const componentFileWired = blueprintFilePaths.has(componentPath) || blueprintFilePaths.has(expectedPath);
-      const componentReferencedByRoute = blueprint.navigation.routes.some((route) => route.component === component.name);
-      const componentReferencedByFile = blueprintDependsOn.has(componentPath) || blueprintDependsOn.has(expectedPath);
-      const componentReferencedByDeclaredPath = declaredComponentPaths.has(componentPath) || declaredComponentPaths.has(expectedPath);
-
-      if (!componentNameWired && !componentFileWired && !componentReferencedByRoute && !componentReferencedByFile && !componentReferencedByDeclaredPath) {
-        throw new Error(`Blueprint is missing UI spec component wiring for ${component.name}`);
-      }
-    }
-
-    if (!rootRouteHasApp) {
-      throw new Error('Blueprint is missing App root wiring for uiSpec-driven frontend composition');
+    for (const component of context.uiSpec.components) {
+      const expectedPath = component.path.replace(/\\/g, '/').replace(/^\/+/, '');
+      if (!blueprintFilePaths.has(expectedPath)) throw new Error(`Blueprint is missing UI spec component wiring for ${component.name}`);
     }
   }
-
-  if (uiSpec?.apiContract?.length) {
-    for (const api of uiSpec.apiContract) {
-      const endpointMatched = blueprint.backendRoutes.some((route) => route.path === api.endpoint);
-      if (!endpointMatched && Array.isArray(api.consumedBy) && api.consumedBy.length > 0) {
-        throw new Error(`Blueprint does not align with API contract endpoint ${api.endpoint}`);
-      }
-    }
-  }
-
   return blueprint;
 }

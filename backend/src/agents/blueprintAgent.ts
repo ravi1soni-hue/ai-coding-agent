@@ -20,34 +20,68 @@ const SYSTEM_PROMPT = `You are a principal full-stack architect. Return ONLY val
 
 Rules:
 - The blueprint must be machine-validatable with no prose, markdown fences, or comments outside the JSON.
+- The top-level response MUST contain only: strict, metadata, files, dependencies, backendRoutes.
+- Code generation MUST use strict only. metadata is for diagnostics, approval, and routing hints only.
+- Never invent extra files. files must be the single authoritative registry of generated files.
 - Every backend route must set requiresProjectId to true and describe project_id filtering.
-- Include exact file paths, purposes, dependencies, entrypoints, navigation, state, invariants, backend routes, and UI spec component wiring.
+- Every backend table/query must use shared tables with project_id columns. Never use per-project table names.
+- Stack is fixed: frontend = react-vite, backend = node-ts, database = postgresql.
+- All backend source files MUST be .ts files only.
 - Treat projectSpec as authoritative if present. Do not invent files, routes, components, or pages outside of projectSpec, systemDesign, or uiSpec.
 - If uiSpec.components is provided, every component must be represented in either navigation.routes, files, or as an explicit dependency chain from App.
 - Always include App in navigation.routes as the root entry component when uiSpec is present.
 - Reconcile the blueprint against projectSpec before returning JSON.
+- Ignore metadata fields during code generation.
 
-Required shape (all fields are mandatory):
+Required shape:
 {
-  "title": "string",
-  "stack": {
-    "frontend": "react-vite",
-    "backend": "node-express-ts",
-    "database": "postgresql"
+  "strict": {
+    "projectType": "landing_page|dashboard|full_app",
+    "modules": ["string"],
+    "frontend": {
+      "pages": ["string"],
+      "components": ["string"],
+      "routing": true,
+      "stateManagement": "local|context"
+    },
+    "backend": {
+      "required": true,
+      "modules": ["string"],
+      "routes": ["string"]
+    },
+    "database": {
+      "tables": ["string"]
+    },
+    "structure": {
+      "frontend": {},
+      "backend": {}
+    }
   },
-  "buildCriticalFiles": ["package.json", "index.html", "vite.config.js", "src/main.jsx", "src/App.jsx", "src/index.css"],
-  "entrypoints": {
-    "frontend": ["src/main.jsx", "src/App.jsx"],
-    "backend": ["backend/index.js"]
-  },
-  "state": {
-    "owner": "context|zustand|local",
-    "store": "string",
-    "shape": {}
-  },
-  "navigation": {
-    "type": "react-router|single-page",
-    "routes": [{ "path": "/", "component": "ComponentName", "purpose": "string" }]
+  "metadata": {
+    "title": "string",
+    "stack": {
+      "frontend": "react-vite",
+      "backend": "node-ts",
+      "database": "postgresql"
+    },
+    "buildCriticalFiles": ["package.json", "index.html", "vite.config.js", "src/main.jsx", "src/App.jsx", "src/index.css"],
+    "entrypoints": {
+      "frontend": ["src/main.jsx", "src/App.jsx"],
+      "backend": ["backend/src/index.ts"]
+    },
+    "state": {
+      "owner": "context|zustand|local",
+      "store": "string",
+      "shape": {}
+    },
+    "navigation": {
+      "type": "react-router|single-page",
+      "routes": [{ "path": "/", "component": "ComponentName", "purpose": "string" }]
+    },
+    "invariants": [
+      "Every backend query must filter by project_id",
+      "The frontend must render from explicit entrypoints"
+    ]
   },
   "files": [
     { "path": "package.json", "purpose": "Frontend npm package configuration", "kind": "config" },
@@ -57,8 +91,8 @@ Required shape (all fields are mandatory):
     { "path": "src/App.jsx", "purpose": "Root React component with routing", "kind": "entry" },
     { "path": "src/index.css", "purpose": "Global styles", "kind": "style" },
     { "path": "backend/package.json", "purpose": "Backend npm package configuration", "kind": "config" },
-    { "path": "backend/index.js", "purpose": "Express server entry point", "kind": "entry" },
-    { "path": "backend/db/database.js", "purpose": "PostgreSQL database connection pool", "kind": "utility" },
+    { "path": "backend/src/index.ts", "purpose": "TypeScript backend server entry point", "kind": "entry" },
+    { "path": "backend/src/db/database.ts", "purpose": "PostgreSQL database connection pool", "kind": "utility" },
     { "path": "backend/db/init.sql", "purpose": "Database schema initialization SQL", "kind": "schema" }
   ],
   "backendRoutes": [
@@ -67,13 +101,9 @@ Required shape (all fields are mandatory):
       "method": "GET",
       "purpose": "string",
       "requiresProjectId": true,
-      "tableName": "project_example",
+      "tableName": "items",
       "queryNotes": "Always filter by project_id"
     }
-  ],
-  "invariants": [
-    "Every backend query must filter by project_id",
-    "The frontend must render from explicit entrypoints"
   ]
 }`;
 
@@ -166,17 +196,17 @@ export async function blueprintAgent(input: BlueprintInput): Promise<ProjectBlue
         uiSpec: input.uiSpec,
       });
       const specBackendRequired = Boolean(projectSpec?.requirements?.backend_required);
-      if (!specBackendRequired && contextCheckedBlueprint.backendRoutes.length > 0) {
+      if (!specBackendRequired && (contextCheckedBlueprint.backendRoutes || []).length > 0) {
         throw new Error('Blueprint contains backend routes for a frontend-only canonical projectSpec');
       }
-      if (specBackendRequired && contextCheckedBlueprint.backendRoutes.length === 0) {
+      if (specBackendRequired && (contextCheckedBlueprint.backendRoutes || []).length === 0) {
         throw new Error('Blueprint is missing backend routes required by the canonical projectSpec');
       }
       debug('blueprintAgent:done', {
         attempt,
         title: contextCheckedBlueprint.title,
-        fileCount: contextCheckedBlueprint.files.length,
-        routeCount: contextCheckedBlueprint.backendRoutes.length,
+        fileCount: (contextCheckedBlueprint.files || []).length,
+        routeCount: (contextCheckedBlueprint.backendRoutes || []).length,
       });
       return contextCheckedBlueprint;
     }

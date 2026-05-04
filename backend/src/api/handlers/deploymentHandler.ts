@@ -6,6 +6,7 @@ export interface DeploymentInput {
   revisionId: string;
   buildDir: string;
   backendDir?: string;
+  workspaceRoot?: string;
   frontendProjectName?: string;
   backendService?: string;
   hasBackend?: boolean;
@@ -40,6 +41,7 @@ export async function handleDeployment(input: DeploymentInput): Promise<HandlerR
         revisionId: input.revisionId,
         buildDir: input.buildDir,
         backendDir: input.backendDir,
+        workspaceRoot: input.workspaceRoot,
         frontendProjectName: input.frontendProjectName,
         backendService: input.backendService,
         hasBackend: input.hasBackend,

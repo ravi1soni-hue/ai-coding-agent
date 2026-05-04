@@ -31,6 +31,9 @@ export async function ensureCoreTables() {
       status TEXT NOT NULL DEFAULT 'active',
       current_step TEXT,
       progress DOUBLE PRECISION NOT NULL DEFAULT 0,
+      active_revision_id TEXT,
+      revision_lock_owner TEXT,
+      revision_lock_expires_at TIMESTAMPTZ,
       requirements JSONB,
       clarifications JSONB,
       confirmation JSONB,
@@ -46,6 +49,8 @@ export async function ensureCoreTables() {
       last_active_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+
+  await pgQuery(`CREATE UNIQUE INDEX IF NOT EXISTS idx_project_sessions_one_active_revision ON project_sessions(active_revision_id) WHERE active_revision_id IS NOT NULL`);
 
   await pgQuery(`
     CREATE TABLE IF NOT EXISTS project_blackboards (
@@ -78,6 +83,10 @@ export async function ensureCoreTables() {
 
   await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS current_step TEXT`);
   await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS progress DOUBLE PRECISION NOT NULL DEFAULT 0`);
+  await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS active_revision_id TEXT`);
+  await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS revision_lock_owner TEXT`);
+  await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS revision_lock_expires_at TIMESTAMPTZ`);
+  await pgQuery(`CREATE UNIQUE INDEX IF NOT EXISTS idx_project_sessions_one_active_revision ON project_sessions(active_revision_id) WHERE active_revision_id IS NOT NULL`);
   await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS requirements JSONB`);
   await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS clarifications JSONB`);
   await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS confirmation JSONB`);
@@ -149,23 +158,11 @@ export async function ensureCoreTables() {
     )
   `);
 
-  await pgQuery(`
-    CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id)
-  `);
-
-  await pgQuery(`
-    CREATE INDEX IF NOT EXISTS idx_project_sessions_user_id ON project_sessions(user_id)
-  `);
-
-  await pgQuery(`
-    CREATE INDEX IF NOT EXISTS idx_project_events_project_created ON project_events(project_id, created_at)
-  `);
-
-  await pgQuery(`
-    CREATE INDEX IF NOT EXISTS idx_project_deployments_project_created ON project_deployments(project_id, created_at)
-  `);
-
-  await pgQuery(`
-    CREATE INDEX IF NOT EXISTS idx_project_code_revisions_project_created ON project_code_revisions(project_id, created_at)
-  `);
+  await pgQuery(`CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id)`);
+  await pgQuery(`CREATE INDEX IF NOT EXISTS idx_project_sessions_user_id ON project_sessions(user_id)`);
+  await pgQuery(`CREATE INDEX IF NOT EXISTS idx_project_sessions_active_revision ON project_sessions(active_revision_id)`);
+  await pgQuery(`CREATE INDEX IF NOT EXISTS idx_project_sessions_revision_lock ON project_sessions(revision_lock_expires_at)`);
+  await pgQuery(`CREATE INDEX IF NOT EXISTS idx_project_events_project_created ON project_events(project_id, created_at)`);
+  await pgQuery(`CREATE INDEX IF NOT EXISTS idx_project_deployments_project_created ON project_deployments(project_id, created_at)`);
+  await pgQuery(`CREATE INDEX IF NOT EXISTS idx_project_code_revisions_project_created ON project_code_revisions(project_id, created_at)`);
 }

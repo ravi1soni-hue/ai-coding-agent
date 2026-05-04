@@ -47,7 +47,7 @@ export async function handleBlueprint(input: BlueprintInput): Promise<BlueprintH
       timeoutMs,
       'Blueprint generation'
     );
-    debug('handleBlueprint:done', { projectId: input.projectId, title: result.title, fileCount: result.files.length });
+    debug('handleBlueprint:done', { projectId: input.projectId, title: result.title, fileCount: (result.files || []).length });
     return { success: true, data: result };
   } catch (err) {
     error('handleBlueprint', err);

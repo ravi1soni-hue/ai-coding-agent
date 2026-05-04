@@ -24,9 +24,9 @@ async function runDbInitSql(backendDir: string): Promise<void> {
     return;
   }
 
-  const postgresUrl = env.POSTGRES_URL;
+  const postgresUrl = env.POSTGRES_URL || env.DATABASE_URL;
   if (!postgresUrl) {
-    logWarn('deploymentAgent:db-init', 'POSTGRES_URL not set, skipping DB init');
+    logWarn('deploymentAgent:db-init', 'DATABASE_URL/POSTGRES_URL not set, skipping DB init');
     return;
   }
 
@@ -53,6 +53,7 @@ export async function deploymentAgent(input: {
   revisionId: string;
   buildDir: string;
   backendDir?: string;
+  workspaceRoot?: string;
   frontendProjectName?: string;
   backendService?: string;
   hasBackend?: boolean;
@@ -62,8 +63,10 @@ export async function deploymentAgent(input: {
     if (!input.buildDir) throw new Error('buildDir required');
     if (!input.projectId) throw new Error('projectId required');
     if (!input.revisionId) throw new Error('revisionId required');
+    if (!input.workspaceRoot) throw new Error('workspaceRoot required');
 
     const defaultProjectName = `proj-${input.projectId.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 18) || 'site'}`;
+    debug('deploymentAgent:workspaceRoot', { projectId: input.projectId, workspaceRoot: input.workspaceRoot });
 
     // ── Frontend: deploy to Vercel ──────────────────────────────────────────
     const vercelResult = await deployToVercel({

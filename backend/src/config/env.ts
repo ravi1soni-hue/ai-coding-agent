@@ -6,6 +6,8 @@ export const config = {
   PORT: process.env.PORT ? parseInt(process.env.PORT, 10) : 3000,
   REDIS_URL: process.env.REDIS_URL || '',
   POSTGRES_URL: process.env.POSTGRES_URL || '',
+  DATABASE_URL: process.env.DATABASE_URL || process.env.POSTGRES_URL || '',
+  API_BASE_URL: process.env.API_BASE_URL || process.env.RAILWAY_PUBLIC_URL || process.env.RAILWAY_STATIC_URL || process.env.RAILWAY_SERVICE_URL || 'http://localhost:3000',
   OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
   RAILWAY_TOKEN: process.env.RAILWAY_TOKEN || '',
   RAILWAY_PROJECT_ID: process.env.RAILWAY_PROJECT_ID || '',
@@ -36,4 +38,9 @@ export const config = {
   VERCEL_ACCESS_TOKEN: process.env.VERCEL_ACCESS_TOKEN || '',
   VERCEL_TEAM_ID: process.env.VERCEL_TEAM_ID || '',
   WS_ALLOWED_ORIGINS: process.env.WS_ALLOWED_ORIGINS || '',
+  LIMITS: {
+    maxRetriesPerStage: parseInt(process.env.MAX_RETRIES_PER_STAGE || '2', 10),
+    maxLlmCallsPerProject: parseInt(process.env.MAX_LLM_CALLS_PER_PROJECT || '20', 10),
+    maxBuildAttempts: parseInt(process.env.MAX_BUILD_ATTEMPTS || '2', 10),
+  },
 };
