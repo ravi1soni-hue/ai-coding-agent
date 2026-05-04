@@ -42,6 +42,28 @@ import { TTLSet } from '../utils/ttlSet';
 // Socket server
 // ---------------------------------------------------------------------------
 
+function requiresBackendArchitecture(requirements: any): boolean {
+  return Boolean(requirements?.backend_required || requirements?.auth_required);
+}
+
+function buildFrontendOnlySystemDesign(requirements: any) {
+  return {
+    frontend: {
+      framework: 'react-vite',
+      pages: Array.isArray(requirements?.pages) ? requirements.pages : [],
+      components: [],
+      styling: 'css',
+    },
+    backend: null,
+    database: null,
+    auth: null,
+    hosting: {
+      frontend: 'vercel',
+      backend: null,
+    },
+  };
+}
+
 export function createSocketServer(server: http.Server) {
   const wss = new Server({ server });
   const activePipelines = new TTLSet();
@@ -563,13 +585,17 @@ export function createSocketServer(server: http.Server) {
         if (session.step === 'systemDesign') {
           sendProgress(ws, session, 'systemDesign', 'Designing system architecture...');
           const projectSpec = buildProjectSpec();
-          const sdResult = await handleSystemDesign({ requirements: session.requirements, projectSpec, projectId });
-          if (!sdResult.success) {
-            session.step = 'systemDesign'; // stay, allow retry
-            sendError(ws, session, toClientErrorMessage(sdResult.error, 'System design failed. Reply to retry.'));
-            return;
+          if (requiresBackendArchitecture(session.requirements)) {
+            const sdResult = await handleSystemDesign({ requirements: session.requirements, projectSpec, projectId });
+            if (!sdResult.success) {
+              session.step = 'systemDesign'; // stay, allow retry
+              sendError(ws, session, toClientErrorMessage(sdResult.error, 'System design failed. Reply to retry.'));
+              return;
+            }
+            session.systemDesign = sdResult.data;
+          } else {
+            session.systemDesign = buildFrontendOnlySystemDesign(session.requirements);
           }
-          session.systemDesign = sdResult.data;
           await persistBlackboardState();
           session.stepRetries['systemDesign'] = 0;
           debug('socket:systemDesign', { projectId });

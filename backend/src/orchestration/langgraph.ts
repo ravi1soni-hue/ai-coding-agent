@@ -20,9 +20,9 @@ export type OrchestrationContext = {
 	requirements?: any;
 	clarifications?: any;
 	confirmation?: any;
-  systemDesign?: any;
-  blueprint?: any;
-  codeGen?: any;
+	systemDesign?: any;
+	blueprint?: any;
+	codeGen?: any;
 	testResult?: any;
 	deployment?: any;
 	materializedRevision?: any;
@@ -33,6 +33,10 @@ export type OrchestrationContext = {
 	  timestamp: string;
 	}>;
 };
+
+function requiresBackendArchitecture(requirements: any): boolean {
+  return Boolean(requirements?.backend_required || requirements?.auth_required);
+}
 
 export async function runOrchestration(ctx: OrchestrationContext) {
     const user_id = ctx.user_message?.slice(0, 32) || 'unknown';
@@ -78,9 +82,34 @@ export async function runOrchestration(ctx: OrchestrationContext) {
     );
 
     // Step 4: System Design
-    ctx.systemDesign = await runStage('systemDesign', ctx.requirements, async () =>
-      systemDesignAgent(ctx.requirements)
-    );
+    if (requiresBackendArchitecture(ctx.requirements)) {
+      ctx.systemDesign = await runStage('systemDesign', ctx.requirements, async () =>
+        systemDesignAgent(ctx.requirements)
+      );
+    } else {
+      ctx.systemDesign = {
+        frontend: {
+          framework: 'react-vite',
+          pages: Array.isArray(ctx.requirements?.pages) ? ctx.requirements.pages : [],
+          components: [],
+          styling: 'css',
+        },
+        backend: null,
+        database: null,
+        auth: null,
+        hosting: {
+          frontend: 'vercel',
+          backend: null,
+        },
+      };
+      await logOrchestrationStep({ user_id, step: 'systemDesign', input: ctx.requirements, output: ctx.systemDesign });
+      ctx.history.push({
+        step: 'systemDesign',
+        input: ctx.requirements,
+        output: ctx.systemDesign,
+        timestamp: new Date().toISOString(),
+      });
+    }
 
     // Step 5: Blueprint Validation
     ctx.blueprint = await runStage('blueprint', ctx.systemDesign, async () =>

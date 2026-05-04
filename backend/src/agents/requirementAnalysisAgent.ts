@@ -13,6 +13,26 @@ export type RequirementAnalysisOutput = {
   notes?: string;
 };
 
+function shouldForceFrontendOnly(userMessage: string): boolean {
+  const text = userMessage.toLowerCase();
+  const frontendSignals = [
+    'pricing page',
+    'landing page',
+    'marketing page',
+    'static page',
+    'frontend-focused',
+    'front-end focused',
+    'client side',
+    'client-side',
+    'without backend',
+    'no backend',
+    'mock data',
+    'static content',
+  ];
+  const backendSignals = ['api', 'backend', 'database', 'auth', 'login', 'signup', 'webhook', 'admin panel', 'server'];
+  return frontendSignals.some((signal) => text.includes(signal)) && !backendSignals.some((signal) => text.includes(signal));
+}
+
 export async function requirementAnalysisAgent(input: { user_message: string }): Promise<RequirementAnalysisOutput> {
   debug('requirementAnalysisAgent', { input });
   try {
@@ -23,6 +43,7 @@ export async function requirementAnalysisAgent(input: { user_message: string }):
 - If the user message is broad or vague, infer a reasonable website_type and pages set.
 - If the user asks for a feature that is better suited to a web application, still map it to a web-based product.
 - If the request is ambiguous, do not fail silently; choose a safe default and add a short note explaining your assumption.
+- For marketing pages, pricing pages, landing pages, and other clearly frontend-only requests, set backend_required to false unless the user explicitly asks for backend functionality.
 Respond ONLY with valid JSON with keys: website_type, pages, backend_required, auth_required, deployment_pref, notes.
 Do NOT include any Markdown code block markers (no triple backticks or 'json'), just return raw JSON.`;
     const completion = await llmProxy.chatCompletion([
@@ -32,9 +53,7 @@ Do NOT include any Markdown code block markers (no triple backticks or 'json'), 
     debug('requirementAnalysisAgent:completion', { completion });
     let content = completion.choices?.[0]?.message?.content || '{}';
     debug('LLM_RAW_CONTENT_REQUIREMENT_ANALYSIS', { content });
-    // Always remove all Markdown code block markers (handles ```json, ``` etc.)
     content = content.replace(/```[a-zA-Z]*\s*|```/g, '').trim();
-    // Now extract the first JSON object
     const jsonMatch = content.match(/{[\s\S]*}/);
     if (!jsonMatch) {
       logError('requirementAnalysisAgent:no-json', { content });
@@ -50,6 +69,13 @@ Do NOT include any Markdown code block markers (no triple backticks or 'json'), 
     if (!result.website_type || !Array.isArray(result.pages)) {
       throw new Error('Malformed requirementAnalysisAgent output');
     }
+
+    if (shouldForceFrontendOnly(input.user_message)) {
+      result.backend_required = false;
+      result.auth_required = false;
+      result.notes = [result.notes, 'Normalized to frontend-only because the request is clearly static/client-side.'].filter(Boolean).join(' ');
+    }
+
     debug('requirementAnalysisAgent:result', { result });
     return result;
   } catch (err) {

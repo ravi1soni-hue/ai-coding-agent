@@ -371,10 +371,23 @@ export function assertBlueprintMatchesContext(
 
   if (uiSpec?.components?.length) {
     const blueprintComponentNames = new Set(blueprint.navigation.routes.map((route) => route.component));
+    const blueprintFilePaths = new Set(blueprint.files.map((file) => file.path));
+    const rootRouteHasApp = blueprint.navigation.routes.some((route) => route.component === 'App');
+
     for (const component of uiSpec.components) {
-      if (!blueprintComponentNames.has(component.name) && !blueprint.files.some((file) => file.path === component.path)) {
+      const componentPath = component.path.replace(/\\/g, '/').replace(/^\/+/, '');
+      const componentNameWired = blueprintComponentNames.has(component.name);
+      const componentFileWired = blueprintFilePaths.has(componentPath);
+      const componentReferencedByRoute = blueprint.navigation.routes.some((route) => route.component === component.name);
+      const componentReferencedByFile = blueprint.files.some((file) => Array.isArray(file.dependsOn) && file.dependsOn.includes(componentPath));
+
+      if (!componentNameWired && !componentFileWired && !componentReferencedByRoute && !componentReferencedByFile) {
         throw new Error(`Blueprint is missing UI spec component wiring for ${component.name}`);
       }
+    }
+
+    if (!rootRouteHasApp) {
+      throw new Error('Blueprint is missing App root wiring for uiSpec-driven frontend composition');
     }
   }
 

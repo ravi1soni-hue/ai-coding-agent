@@ -15,7 +15,7 @@ export async function systemDesignAgent(input: any) {
 
     const systemPrompt = `You are a software architect. Design a complete technical architecture for the given requirements.
 
-Canonical project spec (authoritative, if present):
+Project spec context, if available:
 ${JSON.stringify(projectSpec, null, 2)}
 
 Respond ONLY in JSON with this exact shape (no markdown fences):
@@ -62,9 +62,9 @@ RULES:
 - hosting.backend must always be "railway" when backend is needed, else null
 - If backend_required is false: set backend, database to null
 - If auth_required is false: set auth to null
-- database.tables must list ALL tables needed with ALL columns (be specific and complete)
+- database.tables must list tables needed for the request with the columns that are actually used
 - Include created_at/updated_at timestamps on tables that need them
-- For auth: always include a users table with id, email, password_hash, created_at`;
+- For auth: include the minimum users table needed for the request`;
 
     const userInput = JSON.stringify({
       requirements: input.requirements || input,
