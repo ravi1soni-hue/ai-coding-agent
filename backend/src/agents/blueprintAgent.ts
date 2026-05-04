@@ -11,6 +11,31 @@ type BlueprintInput = {
   modification?: string;
 };
 
+const REQUIRED_FILES_DEFAULTS: Array<{ path: string; purpose: string; kind: 'entry' | 'config' | 'style' | 'schema' | 'utility' }> = [
+  { path: 'package.json', purpose: 'Frontend npm package configuration', kind: 'config' },
+  { path: 'index.html', purpose: 'Vite entry HTML template', kind: 'entry' },
+  { path: 'vite.config.js', purpose: 'Vite build configuration', kind: 'config' },
+  { path: 'src/main.jsx', purpose: 'React application entry point', kind: 'entry' },
+  { path: 'src/App.jsx', purpose: 'Root React component with routing', kind: 'entry' },
+  { path: 'src/index.css', purpose: 'Global styles', kind: 'style' },
+  { path: 'backend/package.json', purpose: 'Backend npm package configuration', kind: 'config' },
+  { path: 'backend/index.js', purpose: 'Express server entry point', kind: 'entry' },
+  { path: 'backend/db/database.js', purpose: 'PostgreSQL database connection pool', kind: 'utility' },
+  { path: 'backend/db/init.sql', purpose: 'Database schema initialization SQL', kind: 'schema' },
+];
+
+function ensureRequiredFiles(parsed: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(parsed.files)) parsed.files = [];
+  const files = parsed.files as Array<Record<string, unknown>>;
+  const existingPaths = new Set(files.map((f) => String(f.path || '')));
+  for (const required of REQUIRED_FILES_DEFAULTS) {
+    if (!existingPaths.has(required.path)) {
+      files.push({ path: required.path, purpose: required.purpose, kind: required.kind });
+    }
+  }
+  return parsed;
+}
+
 function stripMarkdown(content: string): string {
   return content.replace(/```[a-zA-Z]*\s*/g, '').replace(/```/g, '').trim();
 }
@@ -64,6 +89,16 @@ Required shape:
     ]
   },
   "files": [
+    { "path": "package.json", "purpose": "Frontend npm package configuration", "kind": "config" },
+    { "path": "index.html", "purpose": "Vite entry HTML template", "kind": "entry" },
+    { "path": "vite.config.js", "purpose": "Vite build configuration", "kind": "config" },
+    { "path": "src/main.jsx", "purpose": "React application entry point", "kind": "entry" },
+    { "path": "src/App.jsx", "purpose": "Root React component with routing", "kind": "entry" },
+    { "path": "src/index.css", "purpose": "Global styles", "kind": "style" },
+    { "path": "backend/package.json", "purpose": "Backend npm package configuration", "kind": "config" },
+    { "path": "backend/index.js", "purpose": "Express server entry point", "kind": "entry" },
+    { "path": "backend/db/database.js", "purpose": "PostgreSQL database connection pool", "kind": "utility" },
+    { "path": "backend/db/init.sql", "purpose": "Database schema initialization SQL", "kind": "schema" },
     {
       "path": "src/components/Component.jsx",
       "purpose": "string",
@@ -108,12 +143,12 @@ Always include all required files.`;
     model,
     0.2,
     0.9,
-    2600,
+    4000,
   );
 
   let content = completion.choices?.[0]?.message?.content || '';
   content = extractJson(content);
-  let parsed: unknown;
+  let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(content);
   } catch (err) {
@@ -121,6 +156,7 @@ Always include all required files.`;
     throw new Error('Blueprint agent returned malformed JSON');
   }
 
+  ensureRequiredFiles(parsed);
   const blueprint = validateProjectBlueprint(parsed);
   debug('blueprintAgent:done', {
     title: blueprint.title,

@@ -19,7 +19,7 @@ export interface HandlerResult<T = any> {
   fallback?: any;
 }
 
-const TIMEOUT_MS = 3_000;
+const TIMEOUT_MS = 30_000;
 
 export async function handleClarification(
   input: ClarificationInput

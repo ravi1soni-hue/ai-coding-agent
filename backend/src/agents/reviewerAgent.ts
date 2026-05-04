@@ -9,10 +9,6 @@ type ReviewerInput = {
 function buildApprovalNotes(blueprint: ProjectBlueprint): string[] {
   const notes: string[] = [];
 
-  if (!blueprint.approved?.approved) {
-    notes.push('Blueprint has not been approved yet.');
-  }
-
   if (!Array.isArray(blueprint.files) || blueprint.files.length === 0) {
     notes.push('Blueprint has no files.');
   }

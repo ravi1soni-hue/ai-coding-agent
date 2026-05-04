@@ -33,6 +33,7 @@ export async function handleCodeGeneration(
         systemDesign: input.systemDesign,
         requirements: input.requirements,
         blueprint: input.blueprint,
+        uiSpec: input.uiSpec,
         modification: input.modification,
         context: input.context,
         projectId: input.projectId,

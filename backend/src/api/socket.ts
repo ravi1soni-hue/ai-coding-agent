@@ -158,6 +158,8 @@ export function createSocketServer(server: http.Server) {
             clarifications: session.clarifications,
             confirmation: session.confirmation,
             systemDesign: session.systemDesign,
+            uiSpec: session.uiSpec,
+            blueprint: session.blueprint,
             codeGen: session.codeGen,
             testResult: session.testResult,
             deployment: session.deployment,
@@ -339,6 +341,7 @@ export function createSocketServer(server: http.Server) {
               clarificationAnswers: Object.keys(clarificationAnswers).length > 0 ? clarificationAnswers : undefined,
             },
             blueprint: session.blueprint,
+            uiSpec: session.uiSpec,
             modification: `Fix these build errors and produce corrected complete files:\n${normalizedLogs.slice(-2000)}`,
             projectId,
             userId: authedUser.id,
@@ -574,6 +577,7 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.blueprint = bpResult.data;
+          await persistBlackboardState();
           session.stepRetries['blueprint'] = 0;
           debug('socket:blueprint', { projectId, title: session.blueprint?.title, fileCount: session.blueprint?.files?.length });
           ws.send(JSON.stringify({ type: 'stream', token: 'Architecture blueprint ready! Generating your code now...' }));
@@ -847,14 +851,6 @@ export function createSocketServer(server: http.Server) {
         sendProgress(ws, session, 'deploy_modification', 'Deployed!', 1);
         session.step = 'done_modification';
 
-      } catch (err) {
-        logError('socket:runModificationFlow', err);
-        sendError(ws, session, toClientErrorMessage(err, 'Modification failed. Reply to retry.'));
-      } finally {
-        activePipelines.delete(projectId);
-      }
-
-      if (session.step === 'done_modification') {
         await touchProjectSession(authedUser.id, projectId);
         ws.send(JSON.stringify({
           type: 'done',
@@ -868,6 +864,12 @@ export function createSocketServer(server: http.Server) {
         session.step = 'done';
         session.modification = undefined;
         session.modificationContext = undefined;
+
+      } catch (err) {
+        logError('socket:runModificationFlow', err);
+        sendError(ws, session, toClientErrorMessage(err, 'Modification failed. Reply to retry.'));
+      } finally {
+        activePipelines.delete(projectId);
       }
     }
 
@@ -940,13 +942,13 @@ export function createSocketServer(server: http.Server) {
       if (session.step !== 'init' && session.step !== 'done') {
         if (typeof userText === 'string' && userText.trim()) {
           const retryableSteps = [
-            'requirementAnalysis', 'systemDesign', 'codeGen', 'testFix', 'deploy',
+            'requirementAnalysis', 'systemDesign', 'uiSpec', 'blueprint', 'codeGen', 'testFix', 'deploy',
             'codeGen_modification', 'testFix_modification', 'deploy_modification',
           ];
           if (retryableSteps.includes(session.step)) {
             // Retry from current step (don't reset)
             ws.send(JSON.stringify({ type: 'stream', token: `Retrying from step: ${session.step}...` }));
-            await runFlow(null, null);
+            await runFlow(userText, null);
             return;
           }
 
