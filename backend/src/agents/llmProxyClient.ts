@@ -111,9 +111,14 @@ export class LLMProxyClient {
       throw new Error(`LLM Proxy chatCompletion failed: No valid API key configured for model "${selectedModel}". Check your environment variables for API_KEY settings.`);
     }
     
-    // Use provided timeout or reasonable defaults based on max_tokens
-    const defaultTimeout = Math.max(90_000, Math.min(300_000, max_tokens * 30));
-    const requestTimeoutMs = timeoutMs || defaultTimeout;
+    const estimatedPayloadSize = JSON.stringify(messages || []).length;
+    const estimatedWorkMs = Math.max(
+      max_tokens * 35,
+      Math.ceil(estimatedPayloadSize / 6) * 18,
+      Array.isArray(messages) ? messages.length * 2500 : 5000
+    );
+    const defaultTimeout = Math.min(420_000, Math.max(45_000, estimatedWorkMs));
+    const requestTimeoutMs = timeoutMs ?? defaultTimeout;
     
     const modelCandidates = this.buildModelCandidates(selectedModel);
     this.log('chatCompletion called', {

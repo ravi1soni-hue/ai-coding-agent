@@ -17,11 +17,24 @@ export interface BlueprintHandlerResult<T = any> {
   error?: string;
 }
 
-const TIMEOUT_MS = 120_000;
+function estimateBlueprintTimeoutMs(input: BlueprintInput): number {
+  const payloadSize = JSON.stringify({
+    requirements: input.requirements,
+    systemDesign: input.systemDesign,
+    uiSpec: input.uiSpec,
+    projectSpec: input.projectSpec,
+    modification: input.modification,
+  }).length;
+
+  const estimateFromSize = Math.ceil(payloadSize / 8) * 18;
+  const estimateFromScope = Array.isArray(input.uiSpec?.components) ? input.uiSpec.components.length * 12_000 : 0;
+  return Math.min(420_000, Math.max(45_000, estimateFromSize + estimateFromScope));
+}
 
 export async function handleBlueprint(input: BlueprintInput): Promise<BlueprintHandlerResult> {
   debug('handleBlueprint', { projectId: input.projectId });
   try {
+    const timeoutMs = estimateBlueprintTimeoutMs(input);
     const result = await withTimeout(
       blueprintAgent({
         requirements: input.requirements,
@@ -31,7 +44,7 @@ export async function handleBlueprint(input: BlueprintInput): Promise<BlueprintH
         modification: input.modification,
         projectId: input.projectId,
       }),
-      TIMEOUT_MS,
+      timeoutMs,
       'Blueprint generation'
     );
     debug('handleBlueprint:done', { projectId: input.projectId, title: result.title, fileCount: result.files.length });

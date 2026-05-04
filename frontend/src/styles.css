@@ -545,6 +545,30 @@ body {
   color: var(--muted);
 }
 
+.generatedSummaryRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 4px 0 10px;
+}
+
+.generatedSummaryPill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: rgba(180, 108, 255, 0.12);
+  color: #5d2fa8;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.generatedSummaryHint {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
 .logsHeader {
   display: flex;
   justify-content: flex-end;
@@ -571,6 +595,82 @@ body {
 
 .copyLogsBtn:active {
   transform: translateY(1px);
+}
+
+.generatedFilesPanel {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 10px;
+  max-height: 26vh;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.generatedFilesEmpty {
+  border: 1px dashed #d9daea;
+  border-radius: 14px;
+  padding: 16px;
+  color: #5f647e;
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.generatedFileRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #e7e8f3;
+  border-radius: 14px;
+  padding: 12px;
+  background: #fbfbfe;
+  box-shadow: 0 8px 18px rgba(25, 23, 40, 0.04);
+}
+
+.generatedFileMeta {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.generatedFilePath {
+  font-size: 0.86rem;
+  font-weight: 700;
+  color: #22253b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.generatedFileLines {
+  font-size: 0.78rem;
+  color: #5f647e;
+}
+
+.eyeBtn {
+  border: 1px solid rgba(180, 108, 255, 0.18);
+  border-radius: 12px;
+  min-width: 42px;
+  min-height: 42px;
+  width: 42px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(180deg, rgba(180, 108, 255, 0.14), rgba(180, 108, 255, 0.08));
+  color: #5d2fa8;
+  cursor: pointer;
+  flex: 0 0 auto;
+  transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.eyeBtn:hover {
+  border-color: rgba(180, 108, 255, 0.42);
+  background: linear-gradient(180deg, rgba(180, 108, 255, 0.2), rgba(180, 108, 255, 0.12));
+  transform: translateY(-1px);
+}
+
+.eyeBtn svg {
+  display: block;
 }
 
 .socketStatus {

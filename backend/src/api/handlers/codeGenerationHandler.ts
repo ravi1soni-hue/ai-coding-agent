@@ -22,7 +22,24 @@ export interface HandlerResult<T = any> {
   fallback?: any;
 }
 
-const TIMEOUT_MS = 600_000;
+function estimateCodeGenerationTimeoutMs(input: CodeGenerationInput): number {
+  const payloadSize = JSON.stringify({
+    systemDesign: input.systemDesign,
+    projectSpec: input.projectSpec,
+    requirements: input.requirements,
+    blueprint: input.blueprint,
+    uiSpec: input.uiSpec,
+    modification: input.modification,
+    context: input.context,
+  }).length;
+
+  const estimateFromSize = Math.ceil(payloadSize / 6) * 20;
+  const estimateFromScope =
+    (Array.isArray(input.blueprint?.files) ? input.blueprint.files.length * 12_000 : 0) +
+    (Array.isArray(input.uiSpec?.components) ? input.uiSpec.components.length * 9_000 : 0);
+  return Math.min(900_000, Math.max(75_000, estimateFromSize + estimateFromScope));
+}
+
 // Keep to 2: targeted failures are repaired inside codeGenerationAgent itself.
 // This outer retry only covers true unexpected crashes (network blip, OOM, etc.).
 const MAX_ATTEMPTS = 2;
@@ -39,6 +56,7 @@ export async function handleCodeGeneration(
       // Suppress UI events on retries to avoid the frontend seeing duplicate
       // PLANNING_COMPLETE / FILE_WRITTEN sequences when the first attempt fails.
       const emitEvent = attempt === 1 ? input.emitEvent : undefined;
+      const timeoutMs = estimateCodeGenerationTimeoutMs(input);
       const result = await withTimeout(
           codeGenerationAgent({
           systemDesign: input.systemDesign,
@@ -53,7 +71,7 @@ export async function handleCodeGeneration(
           user_id: input.userId,
           emitEvent,
         }),
-        TIMEOUT_MS,
+        timeoutMs,
         'Code generation'
       );
       debug('handleCodeGeneration:done', { projectId: input.projectId, attempt });
