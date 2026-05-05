@@ -23,11 +23,14 @@ import {
   hashInput,
   markStage,
   recordFix,
+  saveCheckpoint,
   setBlueprint,
   setClarifications,
   setCode,
+  setConfirmation,
   setDeployment,
   setExecutionPlan,
+  setModification,
   setRequirements,
   setSystemDesign,
   setTests,
@@ -169,17 +172,51 @@ function routeRecoveryTarget(stage: OrchestrationState, issueType: string): Orch
   }
 }
 
+type StageOptions = {
+  adapter?: OrchestrationAdapter;
+  persistence?: PersistenceAdapter;
+  percent?: number;
+};
+
+async function persistMemory(memory: ProjectMemory, persistence?: PersistenceAdapter): Promise<void> {
+  if (!persistence?.saveSnapshot) return;
+  try {
+    await persistence.saveSnapshot(memory);
+  } catch {
+    // best-effort persistence; never fail the pipeline on snapshot errors
+  }
+}
+
+async function persistLastEvent(memory: ProjectMemory, persistence?: PersistenceAdapter): Promise<void> {
+  if (!persistence?.appendEvent) return;
+  const last = memory.history[memory.history.length - 1];
+  if (!last) return;
+  try {
+    await persistence.appendEvent(last);
+  } catch {
+    // best-effort
+  }
+}
+
 async function stageWrap<T>(
   memory: ProjectMemory,
   stage: OrchestrationState,
   input: unknown,
-  handler: () => Promise<T>
+  handler: () => Promise<T>,
+  options: StageOptions = {}
 ): Promise<StageResult<T>> {
+  const { adapter, persistence, percent } = options;
   const policy = currentPolicy(memory);
   const inputHash = hashInput({ stage, input, memory: { projectId: memory.projectId, sessionId: memory.sessionId } });
-  const checkpoint = memory.checkpoints.find((item) => item.stage === stage && item.inputHash === inputHash);
-  if (checkpoint && checkpoint.output !== undefined) {
-    return createSuccessResult(stage, checkpoint.output as T, undefined, checkpoint.issues);
+  const cached = memory.checkpoints.find((item) => item.stage === stage && item.inputHash === inputHash);
+  if (cached && cached.output !== undefined) {
+    adapter?.emit?.({ type: 'info', stage, message: `resumed ${stage} from checkpoint` });
+    return createSuccessResult(stage, cached.output as T, undefined, cached.issues);
+  }
+
+  adapter?.emit?.({ type: 'stage_start', stage });
+  if (typeof percent === 'number') {
+    adapter?.emit?.({ type: 'progress', stage, percent, message: `entering ${stage}` });
   }
 
   let attempt = 0;
@@ -190,6 +227,14 @@ async function stageWrap<T>(
     try {
       markStage(memory, stage);
       const output = await handler();
+      const checkpoint = saveCheckpoint(memory, stage, inputHash, output, [], attempt);
+      appendHistory(memory, stage, 'stage_complete', `Completed ${stage}`, undefined);
+      await persistMemory(memory, persistence);
+      await persistLastEvent(memory, persistence);
+      if (persistence?.saveCheckpoint) {
+        try { await persistence.saveCheckpoint(checkpoint); } catch { /* best-effort */ }
+      }
+      adapter?.emit?.({ type: 'stage_complete', stage, output });
       return createSuccessResult(stage, output, undefined, []);
     } catch (error) {
       lastError = error;
@@ -202,6 +247,9 @@ async function stageWrap<T>(
       });
       appendIssue(memory, issue);
       appendHistory(memory, stage, 'stage_error', issue.message, issue);
+      adapter?.emit?.({ type: 'stage_error', stage, issue });
+      await persistMemory(memory, persistence);
+      await persistLastEvent(memory, persistence);
       const action = decideRecoveryAction(issue, policy);
 
       if (action === 'ask_user') {
@@ -289,69 +337,30 @@ async function selfHealWithCodeGeneration(
   recordFix(memory, 'code_generation', 'Applied automated repair after test failure');
 }
 
-export async function runAIOrchestration(
+async function loadOrCreateMemory(
   command: OrchestrationCommand,
-  adapter: OrchestrationAdapter = {},
-  persistence: PersistenceAdapter = {}
-): Promise<OrchestrationResult> {
-  void persistence;
-  const sessionId = command.sessionId || command.projectId;
+  sessionId: string,
+  persistence: PersistenceAdapter
+): Promise<ProjectMemory> {
+  if (persistence.loadSnapshot) {
+    try {
+      const snapshot = await persistence.loadSnapshot(command.projectId);
+      if (snapshot) return snapshot;
+    } catch {
+      // fall through to fresh memory
+    }
+  }
   const deploymentMode = command.step === 'deployment' ? 'full-stack' : 'frontend-only';
-  const memory = createInitialMemory({
+  return createInitialMemory({
     projectId: command.projectId,
     sessionId,
     userMessage: command.userMessage,
     deploymentMode,
   });
+}
 
-  appendHistory(memory, 'requirements', 'orchestration_start', 'Orchestration started', command);
-
-  const requirementsResult = await stageWrap(memory, 'requirements', command.userMessage, async () => {
-    const result = await requirementAnalysisAgent({ user_message: command.userMessage });
-    const requirements = toRequirementAnalysisOutput((result as { output?: RequirementAnalysisShape }).output || (result as unknown as RequirementAnalysisShape));
-    setRequirements(memory, {
-      userMessage: command.userMessage,
-      website_type: requirements.website_type,
-      pages: requirements.pages,
-      backend_required: requirements.backend_required,
-      auth_required: requirements.auth_required,
-      deployment_pref: requirements.deployment_pref,
-      notes: requirements.notes,
-    });
-    return requirements;
-  });
-
-  if (requirementsResult.status !== 'success') return finalizeResult(memory, requirementsResult, null, null);
-
-  const clarificationResult = await stageWrap(memory, 'clarification', memory.requirements, async () => {
-    const result = await clarificationAgent({
-      requirements: {
-        website_type: memory.requirements?.website_type || 'business',
-        pages: memory.requirements?.pages || [],
-        backend_required: Boolean(memory.requirements?.backend_required),
-        auth_required: Boolean(memory.requirements?.auth_required),
-        deployment_pref: memory.requirements?.deployment_pref,
-        notes: memory.requirements?.notes,
-      },
-      clarificationAnswers: command.clarificationAnswers || {},
-      askedQuestions: [],
-      projectSpec: undefined,
-      modification: command.modification,
-    });
-    const clarification = toClarificationOutput(result.output, command.clarificationAnswers || {});
-    setClarifications(memory, {
-      questions: clarification.questions,
-      confirmed: clarification.confirmed,
-      done: clarification.done,
-      answers: clarification.context.clarificationAnswers,
-      askedQuestions: clarification.context.askedQuestions,
-    });
-    return clarification;
-  });
-
-  if (clarificationResult.status === 'needs_input') return finalizeResult(memory, clarificationResult, null, null);
-
-  const projectSpec = validateProjectSpec(
+function buildProjectSpec(memory: ProjectMemory, command: OrchestrationCommand) {
+  return validateProjectSpec(
     consolidateProjectSpec({
       projectId: command.projectId,
       userMessage: command.userMessage,
@@ -385,16 +394,207 @@ export async function runAIOrchestration(
             },
           },
       clarificationAnswers: command.clarificationAnswers || {},
-      systemDesign: undefined,
-      uiSpec: undefined,
-      blueprint: undefined,
+      systemDesign: memory.systemDesign,
+      uiSpec: memory.uiSpec?.structuredSpec,
+      blueprint: memory.blueprint?.blueprint,
       modification: command.modification,
     }),
     { partial: true }
   );
+}
 
+function finalizePartial(
+  memory: ProjectMemory,
+  pausedAt: OrchestrationState,
+  persistence: PersistenceAdapter
+): Promise<OrchestrationResult> {
+  markStage(memory, pausedAt);
+  memory.status = 'paused';
+  return Promise.resolve(persistMemory(memory, persistence)).then(() => ({
+    projectId: memory.projectId,
+    sessionId: memory.sessionId,
+    frontendUrl: memory.deployment?.frontendUrl || null,
+    backendUrl: memory.deployment?.backendUrl || null,
+    status: 'partial' as const,
+    memory,
+  }));
+}
+
+async function runClarificationLoop(
+  memory: ProjectMemory,
+  command: OrchestrationCommand,
+  options: StageOptions
+): Promise<{ done: boolean; questions: string[] }> {
+  const incomingAnswers = { ...(memory.clarifications?.answers || {}), ...(command.clarificationAnswers || {}) };
+  const askedQuestions = memory.clarifications?.askedQuestions || [];
+
+  const result = await stageWrap(
+    memory,
+    'clarification',
+    { answers: incomingAnswers, askedQuestions },
+    async () => {
+      const agentResult = await clarificationAgent({
+        requirements: {
+          website_type: memory.requirements?.website_type || 'business',
+          pages: memory.requirements?.pages || [],
+          backend_required: Boolean(memory.requirements?.backend_required),
+          auth_required: Boolean(memory.requirements?.auth_required),
+          deployment_pref: memory.requirements?.deployment_pref,
+          notes: memory.requirements?.notes,
+        },
+        clarificationAnswers: incomingAnswers,
+        askedQuestions,
+        projectSpec: undefined,
+        modification: command.modification,
+      });
+      const clarification = toClarificationOutput(agentResult.output, incomingAnswers);
+      setClarifications(memory, {
+        questions: clarification.questions,
+        confirmed: clarification.confirmed,
+        done: clarification.done,
+        answers: clarification.context.clarificationAnswers,
+        askedQuestions: clarification.context.askedQuestions,
+      });
+      return clarification;
+    },
+    options
+  );
+
+  if (result.status !== 'success') {
+    return { done: false, questions: memory.clarifications?.questions || [] };
+  }
+
+  const done = Boolean(memory.clarifications?.done);
+  const questions = memory.clarifications?.questions || [];
+  if (!done && questions.length > 0) {
+    options.adapter?.emit?.({ type: 'clarification_request', stage: 'clarification', questions });
+  }
+  return { done, questions };
+}
+
+async function runConfirmationGate(
+  memory: ProjectMemory,
+  command: OrchestrationCommand,
+  projectSpec: any,
+  options: StageOptions
+): Promise<{ confirmed: boolean }> {
+  if (memory.confirmation?.confirmed) return { confirmed: true };
+
+  if (command.confirmation?.confirmed) {
+    setConfirmation(memory, {
+      confirmed: true,
+      summary: projectSpec,
+      userResponse: command.confirmation.userResponse,
+    });
+    appendHistory(memory, 'confirmation', 'confirmation_received', 'User confirmed project spec');
+    await persistMemory(memory, options.persistence);
+    await persistLastEvent(memory, options.persistence);
+    options.adapter?.emit?.({ type: 'stage_complete', stage: 'confirmation', output: projectSpec });
+    return { confirmed: true };
+  }
+
+  markStage(memory, 'confirmation');
+  appendHistory(memory, 'confirmation', 'confirmation_request', 'Awaiting user confirmation', projectSpec);
+  await persistMemory(memory, options.persistence);
+  await persistLastEvent(memory, options.persistence);
+  options.adapter?.emit?.({ type: 'confirmation_request', stage: 'confirmation', summary: projectSpec });
+  return { confirmed: false };
+}
+
+function invalidateDownstream(memory: ProjectMemory, fromStage: OrchestrationState): void {
+  const order: OrchestrationState[] = [
+    'requirements',
+    'clarification',
+    'confirmation',
+    'system_design',
+    'ui_spec',
+    'blueprint',
+    'execution_plan',
+    'code_generation',
+    'testing',
+    'deployment',
+  ];
+  const idx = order.indexOf(fromStage);
+  if (idx < 0) return;
+  const drop = new Set(order.slice(idx));
+  memory.checkpoints = memory.checkpoints.filter((cp) => !drop.has(cp.stage));
+}
+
+export async function runAIOrchestration(
+  command: OrchestrationCommand,
+  adapter: OrchestrationAdapter = {},
+  persistence: PersistenceAdapter = {}
+): Promise<OrchestrationResult> {
+  const sessionId = command.sessionId || command.projectId;
+  const memory = await loadOrCreateMemory(command, sessionId, persistence);
+  const opts: StageOptions = { adapter, persistence };
+
+  // Modification fast-path: previously-completed project receiving a change request
+  if (command.modification && (memory.status === 'completed' || memory.currentState === 'done')) {
+    setModification(memory, {
+      modification: command.modification,
+      appliedAt: new Date().toISOString(),
+      affectedStages: ['blueprint', 'code_generation', 'testing', 'deployment'],
+    });
+    invalidateDownstream(memory, 'blueprint');
+    memory.status = 'active';
+    appendHistory(memory, 'modification', 'modification_started', 'Re-entering pipeline at blueprint for modification', command.modification);
+    await persistMemory(memory, persistence);
+    await persistLastEvent(memory, persistence);
+    adapter.emit?.({ type: 'stage_start', stage: 'modification', message: 'Applying modification' });
+  } else {
+    appendHistory(memory, memory.currentState || 'requirements', 'orchestration_start', 'Orchestration started', command);
+    await persistLastEvent(memory, persistence);
+    adapter.emit?.({ type: 'progress', stage: memory.currentState || 'requirements', percent: 0, message: 'orchestration started' });
+  }
+
+  // 1. Requirements
+  if (!memory.requirements?.website_type) {
+    const requirementsResult = await stageWrap(
+      memory,
+      'requirements',
+      command.userMessage,
+      async () => {
+        const result = await requirementAnalysisAgent({ user_message: command.userMessage });
+        const requirements = toRequirementAnalysisOutput(
+          (result as { output?: RequirementAnalysisShape }).output || (result as unknown as RequirementAnalysisShape)
+        );
+        setRequirements(memory, {
+          userMessage: command.userMessage,
+          website_type: requirements.website_type,
+          pages: requirements.pages,
+          backend_required: requirements.backend_required,
+          auth_required: requirements.auth_required,
+          deployment_pref: requirements.deployment_pref,
+          notes: requirements.notes,
+        });
+        return requirements;
+      },
+      { ...opts, percent: 5 }
+    );
+    if (requirementsResult.status !== 'success') return finalizeResult(memory, requirementsResult, null, null);
+  }
+
+  // 2. Clarification loop (pause-resume aware)
+  if (!memory.clarifications?.done) {
+    const clarOutcome = await runClarificationLoop(memory, command, { ...opts, percent: 12 });
+    if (!clarOutcome.done) {
+      return finalizePartial(memory, 'clarification', persistence);
+    }
+  }
+
+  // 3. Build canonical project spec
+  const projectSpec = buildProjectSpec(memory, command);
   appendHistory(memory, 'clarification', 'project_spec_ready', 'Canonical project spec created', projectSpec);
+  await persistLastEvent(memory, persistence);
 
+  // 4. Confirmation gate (pause-resume aware)
+  const confirmation = await runConfirmationGate(memory, command, projectSpec, { ...opts, percent: 18 });
+  if (!confirmation.confirmed) {
+    return finalizePartial(memory, 'confirmation', persistence);
+  }
+
+  // 5. System design
   const systemDesignResult = await stageWrap(memory, 'system_design', projectSpec, async () => {
     const result = isFrontendOnlyRequirements(memory.requirements)
       ? {
@@ -412,7 +612,7 @@ export async function runAIOrchestration(
       : await systemDesignAgent({ requirements: memory.requirements, projectSpec });
     setSystemDesign(memory, result.output);
     return result.output;
-  });
+  }, { ...opts, percent: 25 });
 
   if (systemDesignResult.status !== 'success') return finalizeResult(memory, systemDesignResult, null, null);
 
@@ -431,7 +631,7 @@ export async function runAIOrchestration(
     });
     setUISpec(memory, { uiSpec: result.output, structuredSpec: result.output });
     return result.output;
-  });
+  }, { ...opts, percent: 35 });
 
   if (uiSpecResult.status !== 'success') return finalizeResult(memory, uiSpecResult, null, null);
 
@@ -446,7 +646,7 @@ export async function runAIOrchestration(
     });
     setBlueprint(memory, { blueprint: output });
     return output;
-  });
+  }, { ...opts, percent: 50 });
 
   if (blueprintResult.status !== 'success') return finalizeResult(memory, blueprintResult, null, null);
 
@@ -468,7 +668,7 @@ export async function runAIOrchestration(
     });
     setCode(memory, { files: generated.files || [], patch: generated.patch || '' });
     return generated;
-  });
+  }, { ...opts, percent: 65 });
 
   if (codeResult.status !== 'success') return finalizeResult(memory, codeResult, null, null);
 
@@ -477,6 +677,16 @@ export async function runAIOrchestration(
     codeGen: memory.code,
   });
   appendHistory(memory, 'code_generation', 'workspace_materialized', 'Generated workspace materialized', materializedRevision);
+  await persistLastEvent(memory, persistence);
+  if (persistence.saveCodeRevision && memory.code) {
+    try {
+      await persistence.saveCodeRevision({
+        projectId: command.projectId,
+        files: memory.code.files,
+        patch: memory.code.patch,
+      });
+    } catch { /* best-effort */ }
+  }
 
   const testResult = await stageWrap(memory, 'testing', memory.code, async () => {
     const result = await testFixAgent({
@@ -491,7 +701,7 @@ export async function runAIOrchestration(
     const buildArtifacts = toBuildArtifact(result);
     setTests(memory, { success: result.success, logs: result.logs, buildDir: buildArtifacts.buildDir, backendDir: buildArtifacts.backendDir });
     return { ...result, ...buildArtifacts };
-  });
+  }, { ...opts, percent: 80 });
 
   if (testResult.status !== 'success') return finalizeResult(memory, testResult, null, null);
 
@@ -514,9 +724,20 @@ export async function runAIOrchestration(
       raw: result,
     });
     return result;
-  });
+  }, { ...opts, percent: 95 });
 
   if (deploymentResult.status !== 'success') return finalizeResult(memory, deploymentResult, null, null);
+
+  if (persistence.saveDeployment && memory.deployment) {
+    try {
+      await persistence.saveDeployment({
+        projectId: command.projectId,
+        frontendUrl: memory.deployment.frontendUrl,
+        backendUrl: memory.deployment.backendUrl,
+        raw: memory.deployment.raw,
+      });
+    } catch { /* best-effort */ }
+  }
 
   adapter.emit?.({
     type: 'done',
@@ -526,6 +747,7 @@ export async function runAIOrchestration(
   });
 
   finalizeMemory(memory, true);
+  await persistMemory(memory, persistence);
   await cleanupWorkspace(materializedRevision.workspaceDir).catch(() => {});
   return {
     projectId: command.projectId,

@@ -206,6 +206,7 @@ export type OrchestrationCommand = {
   userMessage: string;
   modification?: string;
   clarificationAnswers?: Record<string, string>;
+  confirmation?: { confirmed: boolean; userResponse?: string };
   step?: OrchestrationState;
 };
 
@@ -250,6 +251,7 @@ export type DeploymentRecord = {
 
 export type PersistenceAdapter = {
   saveSnapshot?: (memory: ProjectMemory) => Promise<void> | void;
+  loadSnapshot?: (projectId: string) => Promise<ProjectMemory | null> | ProjectMemory | null;
   saveCheckpoint?: (checkpoint: OrchestrationCheckpoint) => Promise<void> | void;
   loadCheckpoints?: (projectId: string) => Promise<OrchestrationCheckpoint[]> | OrchestrationCheckpoint[];
   appendEvent?: (event: OrchestrationEvent) => Promise<void> | void;
