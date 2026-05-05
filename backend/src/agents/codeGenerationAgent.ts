@@ -742,8 +742,15 @@ async function generateJson(
       { role: 'user', content: JSON.stringify(userPayload) },
     ];
     if (jsonAttempt > 1 && lastBadJson) {
+      const trimmed = lastBadJson.trimEnd();
+      const wasTruncated = !trimmed.endsWith('}') && !trimmed.endsWith('"}');
       messages.push({ role: 'assistant', content: lastBadJson.slice(0, 1200) });
-      messages.push({ role: 'user', content: 'Your previous response was not valid JSON. Return ONLY a valid JSON object with no markdown fences, no prose, and all string values properly escaped.' });
+      messages.push({
+        role: 'user',
+        content: wasTruncated
+          ? 'Your response was truncated before the JSON was closed. Return ONLY a complete, valid JSON object — shorten string values if necessary but ensure the JSON is fully closed with no markdown fences.'
+          : 'Your previous response was not valid JSON. Return ONLY a valid JSON object with no markdown fences, no prose, and all string values properly escaped.',
+      });
     }
     let rawContent = '';
     try {
@@ -989,7 +996,7 @@ CRITICAL RULES:
 async function generateFrontendCss(manifest: FrontendManifest, requirements: any, appFile: GeneratedFile, componentFiles: GeneratedFile[], llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {
   const userMessage = String(requirements?.userMessage || '').slice(0, 300);
   const systemPrompt = `Generate src/index.css for this React app: "${userMessage || manifest.appName}". Match the visual style to the app's purpose. Return ONLY JSON: {"path":"src/index.css","content":"complete CSS"}`;
-  const parsed = await generateJson(llmProxy, model, 'frontendCss', systemPrompt, { manifest, requirements, appSnippet: appFile.content.slice(0, 4000), componentSnippets: componentFiles.map((f) => ({ path: f.path, content: f.content.slice(0, 1800) })) }, 2600);
+  const parsed = await generateJson(llmProxy, model, 'frontendCss', systemPrompt, { manifest, requirements, appSnippet: appFile.content.slice(0, 4000), componentSnippets: componentFiles.map((f) => ({ path: f.path, content: f.content.slice(0, 1800) })) }, 4000);
   return validateGeneratedFile(parsed, 'src/index.css', 'frontend', 'frontendCss');
 }
 
