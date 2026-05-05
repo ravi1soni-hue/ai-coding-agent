@@ -4,7 +4,7 @@ import { clarificationAgent } from '../agents/clarificationAgent';
 import { confirmationGate } from '../agents/confirmationGate';
 import { systemDesignAgent } from '../agents/systemDesignAgent';
 import { uiSpecAgent } from '../agents/uiSpecAgent';
-import { blueprintAgent } from '../agents/blueprintAgent';
+import { generateBlueprint } from '../agents/blueprintAgent';
 import { codeGenerationAgent } from '../agents/codeGenerationAgent';
 import { insertVector } from '../db/vectorStore';
 import { testFixAgent } from '../agents/testFixAgent';
@@ -23,8 +23,9 @@ export type OrchestrationContext = {
 	clarifications?: any;
 	confirmation?: any;
 	systemDesign?: any;
-	uiSpec?: any;
-	blueprint?: any;
+  uiSpec?: any;
+  structuredSpec?: any;
+  blueprint?: any;
 	projectSpec?: any;
 	codeGen?: any;
 	testResult?: any;
@@ -135,24 +136,21 @@ export async function runOrchestration(ctx: OrchestrationContext) {
       });
     }
 
-    // Step 5: UI Spec
-    ctx.uiSpec = await runStage('uiSpec', ctx.projectSpec, async () =>
+    // Step 5: UI Spec -> Structured Spec
+    // uiSpecAgent already compiles and validates the StructuredSpec internally.
+    // Store the result directly — do not re-compile or the field shapes will mismatch.
+    ctx.structuredSpec = await runStage('uiSpec', ctx.projectSpec, async () =>
       uiSpecAgent({
         requirements: ctx.requirements,
         systemDesign: ctx.systemDesign,
         projectSpec: ctx.projectSpec,
       })
     );
+    ctx.uiSpec = ctx.structuredSpec;
 
-    // Step 6: Blueprint
-    ctx.blueprint = await runStage('blueprint', ctx.projectSpec, async () =>
-      blueprintAgent({
-        requirements: ctx.requirements,
-        systemDesign: ctx.systemDesign,
-        uiSpec: ctx.uiSpec,
-        projectSpec: ctx.projectSpec,
-        projectId,
-      })
+    // Step 6: Blueprint validation + deterministic compilation
+    ctx.blueprint = await runStage('blueprint', ctx.structuredSpec, async () =>
+      generateBlueprint(ctx.structuredSpec, ctx.systemDesign, ctx.requirements)
     );
 
     // Step 7: Code Generation
@@ -160,6 +158,7 @@ export async function runOrchestration(ctx: OrchestrationContext) {
       codeGenerationAgent({
         systemDesign: ctx.systemDesign,
         uiSpec: ctx.uiSpec,
+        structuredSpec: ctx.structuredSpec,
         blueprint: ctx.blueprint,
         requirements: ctx.requirements,
         projectSpec: ctx.projectSpec,
@@ -195,6 +194,7 @@ export async function runOrchestration(ctx: OrchestrationContext) {
           const repair = await codeGenerationAgent({
             systemDesign: ctx.systemDesign,
             uiSpec: ctx.uiSpec,
+            structuredSpec: ctx.structuredSpec,
             requirements: ctx.requirements,
             modification: `Fix the build errors below and regenerate complete files:\n${String(logs).slice(-4000)}`,
             projectSpec: ctx.projectSpec,

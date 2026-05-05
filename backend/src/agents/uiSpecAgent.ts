@@ -11,6 +11,7 @@
 
 import { getModelConfigForTask } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
+import { compileStructuredSpec } from './structuredSpec';
 import { debug, error as logError } from '../utils/logger';
 
 export interface ComponentInterface {
@@ -160,7 +161,7 @@ function calculateComponentDependencies(
   return { order, dependencies: depMap };
 }
 
-export async function uiSpecAgent(input: any): Promise<UISpec> {
+export async function uiSpecAgent(input: any): Promise<any> {
   debug('uiSpecAgent', { input });
   try {
     if (!input || !input.systemDesign) {
@@ -460,9 +461,14 @@ RULES:
       navigationStrategy: String(layoutObj.navigationStrategy || 'Single page with conditional rendering'),
       stateManagementStrategy: String(layoutObj.stateManagementStrategy || 'useState for local state, props for passing data'),
     };
+    const structuredSpec = compileStructuredSpec({
+      uiSpec,
+      systemDesign,
+      requirements,
+    });
 
-    debug('uiSpecAgent:final', { uiSpec });
-    return uiSpec;
+    debug('uiSpecAgent:final', { structuredSpec });
+    return structuredSpec;
   } catch (err) {
     logError('uiSpecAgent', err);
     throw err;

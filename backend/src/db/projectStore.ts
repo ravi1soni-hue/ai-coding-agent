@@ -100,6 +100,7 @@ export async function updateProjectSnapshot(input: {
   confirmation?: unknown;
   systemDesign?: unknown;
   uiSpec?: unknown;
+  structuredSpec?: unknown;
   blueprint?: unknown;
   taskQueue?: unknown;
   terminalLogs?: unknown;
@@ -118,12 +119,13 @@ export async function updateProjectSnapshot(input: {
       confirmation = COALESCE($8::jsonb, confirmation),
       system_design = COALESCE($9::jsonb, system_design),
       ui_spec = COALESCE($10::jsonb, ui_spec),
-      blueprint = COALESCE($11::jsonb, blueprint),
-      task_queue = COALESCE($12::jsonb, task_queue),
-      terminal_logs = COALESCE($13::jsonb, terminal_logs),
-      code_gen = COALESCE($14::jsonb, code_gen),
-      test_result = COALESCE($15::jsonb, test_result),
-      deployment = COALESCE($16::jsonb, deployment),
+      structured_spec = COALESCE($11::jsonb, structured_spec),
+      blueprint = COALESCE($12::jsonb, blueprint),
+      task_queue = COALESCE($13::jsonb, task_queue),
+      terminal_logs = COALESCE($14::jsonb, terminal_logs),
+      code_gen = COALESCE($15::jsonb, code_gen),
+      test_result = COALESCE($16::jsonb, test_result),
+      deployment = COALESCE($17::jsonb, deployment),
       last_active_at = NOW()
      WHERE id = $1 AND user_id = $2`,
     [
@@ -137,6 +139,7 @@ export async function updateProjectSnapshot(input: {
       input.confirmation ? JSON.stringify(input.confirmation) : null,
       input.systemDesign ? JSON.stringify(input.systemDesign) : null,
       input.uiSpec ? JSON.stringify(input.uiSpec) : null,
+      input.structuredSpec ? JSON.stringify(input.structuredSpec) : null,
       input.blueprint ? JSON.stringify(input.blueprint) : null,
       input.taskQueue ? JSON.stringify(input.taskQueue) : null,
       input.terminalLogs ? JSON.stringify(input.terminalLogs) : null,
@@ -391,12 +394,13 @@ export async function getProjectSnapshot(input: { userId: string; projectId: str
     confirmation: any;
     system_design: any;
     ui_spec: any;
+    structured_spec: any;
     code_gen: any;
     test_result: any;
     deployment: any;
   }>(
     `SELECT id, status, current_step, progress, requirements, clarifications, confirmation,
-            system_design, ui_spec, code_gen, test_result, deployment
+            system_design, ui_spec, structured_spec, code_gen, test_result, deployment
      FROM project_sessions
      WHERE id = $1 AND user_id = $2
      LIMIT 1`,

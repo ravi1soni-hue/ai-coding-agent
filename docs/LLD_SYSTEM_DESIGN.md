@@ -2,15 +2,15 @@
 
 ## 1. Purpose
 
-This document defines the current low-level architecture, runtime behavior, data flow, contracts, storage model, deployment model, and validation rules for the AI autonomous website builder system.
+This document describes the current low-level architecture, runtime behavior, data flow, contracts, storage model, deployment model, validation rules, and safety boundaries of the AI autonomous website builder system.
 
-It is intended to be consumed by another system or reviewer to identify architecture gaps, contract mismatches, runtime risks, and isolation issues.
+It is intended for reviewers and automated auditors that need to verify architectural completeness, cross-stage consistency, isolation guarantees, and runtime correctness.
 
 ---
 
 ## 2. System Summary
 
-The platform is an AI-orchestrated website builder that converts a user product request into a deployable full-stack application by executing a deterministic pipeline.
+The platform is an AI-orchestrated website builder that converts a user request into a deployable web application by running a deterministic multi-stage pipeline.
 
 ### Primary pipeline
 1. requirementAnalysis
@@ -24,8 +24,10 @@ The platform is an AI-orchestrated website builder that converts a user product 
 9. deploy
 
 ### Runtime stack
-- Frontend: React 18 + Vite
-- Backend: Node.js + TypeScript
+- Frontend runtime: React 18 + Vite
+- Frontend language: JavaScript / JSX
+- Backend runtime: Node.js + TypeScript
+- Backend framework for generated services: Express
 - Persistent storage: PostgreSQL
 - Transient session/cache layer: Redis
 - Frontend deployment: Vercel
@@ -52,6 +54,7 @@ The platform is an AI-orchestrated website builder that converts a user product 
 - No permanent project state in Redis
 - No deployment from outside the workspace
 - No per-project database table creation pattern
+- No backend source generation in `.js` files
 
 ---
 
@@ -60,7 +63,7 @@ The platform is an AI-orchestrated website builder that converts a user product 
 ### Frontend
 - React 18
 - Vite
-- JavaScript/JSX generation only
+- JavaScript / JSX generation only
 
 ### Backend
 - Node.js
@@ -77,6 +80,7 @@ The platform is an AI-orchestrated website builder that converts a user product 
 The system rejects stack drift:
 - Frontend must remain React/Vite
 - Backend must remain Node.js/TypeScript
+- Generated backend files must use `.ts`
 - Alternative frontend or backend frameworks are not accepted
 
 ---
@@ -101,16 +105,20 @@ The system rejects stack drift:
 - Redis cache
 - PostgreSQL database
 - Workspace materializer
+- Project consistency validator
+- Model routing layer
+- LLM proxy client
+- Error/logging utilities
 
 ### 5.2 Data flow summary
-User message → WebSocket → pipeline stage → persisted snapshot → generated artifacts → build/test → deployment → final URLs returned over WebSocket
+User message → WebSocket → requirement analysis → clarification → confirmation → system design → UI spec → blueprint → code generation → build/test repair → deployment → final URLs returned over WebSocket
 
 ---
 
 ## 6. Core Runtime Boundaries
 
 ### 6.1 Workspace isolation
-Each request must create a unique project workspace:
+Each request must create a unique project workspace.
 
 - `projectId = uuid()`
 - `workspaceRoot = /projects/{projectId}`
@@ -128,7 +136,8 @@ Workspace rules:
 - No permanent project artifacts in Redis
 
 ### 6.3 Revision isolation
-Each project session supports a single active revision:
+Each project session supports a single active revision.
+
 - `active_revision_id` is stored on `project_sessions`
 - revision locking prevents concurrent generation runs from overwriting one another
 - generation must acquire a lock before mutating a project workspace
@@ -162,7 +171,24 @@ Each project session supports a single active revision:
 - Must return JSON only
 - Must include pages
 - For frontend-only requests, backend can be disabled
+- For clearly frontend-only requests such as pricing pages or static pages, backend is forced off unless the request explicitly asks for backend functionality
 - Must be consistent with the downstream fixed stack
+
+### Current implementation notes
+The requirement analysis agent uses the LLM output and then applies a frontend-only override when the request contains strong frontend signals such as:
+- pricing page
+- landing page
+- marketing page
+- static page
+- client-side
+- without backend
+- no backend
+- mock data
+- static content
+
+If those signals are present and no backend signal is present, the agent forces:
+- `backend_required = false`
+- `auth_required = false`
 
 ---
 
@@ -236,6 +262,17 @@ Each project session supports a single active revision:
 - Must be consistent with projectSpec
 - Must remain deterministic for the same canonical inputs
 
+### Current implementation notes
+The system design agent:
+- Reads canonical project spec context if provided
+- Derives backend/auth requirements from input or projectSpec
+- Enforces:
+  - `frontend.framework = react-vite`
+  - `hosting.frontend = vercel`
+  - `hosting.backend = railway` when backend is required
+- Normalizes malformed JSON from the LLM before returning
+- Fails if backend is required but the backend section is missing
+
 ---
 
 ## 7.5 Stage: uiSpec
@@ -308,6 +345,17 @@ Top-level:
 - Must include project_id isolation rules
 - Must use `backend/src/index.ts` and `backend/src/db/database.ts` for backend entry/scaffold references
 - Must not use `.js` backend generation paths
+
+### Current implementation notes
+The blueprint agent:
+- Requires canonical `projectSpec`
+- Rejects mismatched website types
+- Ensures canonical pages are present
+- Retries up to three times on validation errors
+- Uses a fixed system prompt and only accepts JSON
+- Validates the output with `validateProjectBlueprint`
+- Rejects blueprints missing required files or violating stack rules
+- Rejects backend routes when the canonical request is frontend-only
 
 ---
 
@@ -596,8 +644,8 @@ Defined stages:
 - source_archive_path
 - source_hash
 - patch_path
-- patch_applied
 - patch_apply_log
+- patch_applied
 - generation_payload
 - created_at
 
@@ -757,6 +805,16 @@ The current blueprint contract enforces:
 - invariants must include `project_id` isolation
 - required build files must be present in the file registry
 - backend file registry entries must use `.ts` paths
+
+### 15.6 Current implementation notes
+The blueprint validator:
+- enforces required strict fields
+- rejects placeholder text
+- validates navigation and file registry rules
+- requires build-critical frontend files
+- requires backend source files when backend is required
+- normalizes all file paths before validation
+- rejects path traversal and invalid paths
 
 ---
 
@@ -922,6 +980,8 @@ The backend exposes project/auth routes for:
 - `requirementAnalysisAgent.ts`: requirement parsing
 - `projectConsistency.ts`: cross-stage consistency checks
 - `projectStore.ts`: persistence layer
+- `modelRouter.ts`: model selection by task
+- `llmProxyClient.ts`: LLM provider abstraction
 
 ### Frontend core
 - `App.jsx`: UI shell
@@ -931,7 +991,32 @@ The backend exposes project/auth routes for:
 
 ---
 
-## 22. Verification Checklist for External Reviewer
+## 22. Validation and Consistency Rules
+
+### 22.1 Cross-stage consistency
+The system validates that:
+- requirement pages are reflected in system design
+- UI spec components are wired into the blueprint
+- blueprint file registry includes required files
+- generated code contains expected files for the UI spec
+- App uses the expected export form
+- backend-required projects have backend architecture and routes
+
+### 22.2 Current normalization behavior
+The consistency validator now normalizes page labels before comparing them. This prevents false mismatches such as:
+- `pricing page`
+- `Pricing`
+
+The normalization removes the literal word `page` and compares lowercase normalized labels.
+
+### 22.3 Validation scope
+- consistency validation is staged
+- checks run only after the relevant pipeline stage has completed
+- validation returns a structured issue list with stage names and messages
+
+---
+
+## 23. Verification Checklist for External Reviewer
 
 A separate verifier should confirm:
 
@@ -951,10 +1036,12 @@ A separate verifier should confirm:
 14. WebSocket message flow persists state and events correctly
 15. Shared-table database queries always filter by `project_id`
 16. Backend generation never emits `.js` files
+17. Requirement pages and system design pages use normalized comparison
+18. Blueprint retry prompts are clean and valid text
 
 ---
 
-## 23. Known Gaps / Review Targets
+## 24. Known Gaps / Review Targets
 
 Areas a separate verifier should inspect closely:
 - Whether blueprint contract metadata is still more permissive than desired
@@ -968,7 +1055,7 @@ Areas a separate verifier should inspect closely:
 
 ---
 
-## 24. Suggested Follow-Up Hardening
+## 25. Suggested Follow-Up Hardening
 
 Recommended next steps:
 - split blueprint compatibility metadata from strict generation contract even further if needed
@@ -979,10 +1066,11 @@ Recommended next steps:
 - add build verification for generated project workspaces
 - add deployment contract tests for Vercel/Railway response parsing
 - add concurrency tests for revision locking
+- add regression tests for page normalization in consistency checks
 
 ---
 
-## 25. Final Note
+## 26. Final Note
 
 This system is designed to be verified by an external agent. The most important invariants to validate are:
 
@@ -994,5 +1082,6 @@ This system is designed to be verified by an external agent. The most important 
 - build/deploy gating
 - persistence correctness
 - revision locking correctness
+- cross-stage consistency normalization
 
 Any deviation from those invariants should be treated as a system gap.

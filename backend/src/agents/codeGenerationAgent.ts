@@ -3,6 +3,7 @@ import { getModelConfigForTask } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { debug, error as logError, warn as logWarn } from '../utils/logger';
 import { assertBlueprintIntegrationSafety, blueprintMissingFiles, validateProjectBlueprint, type ProjectBlueprint } from './blueprintContract';
+import { validateStructuredSpec, type StructuredSpec } from './structuredSpec';
 import { reviewerAgent } from './reviewerAgent';
 
 type GeneratedFile = { path: string; content: string };
@@ -993,14 +994,64 @@ export async function codeGenerationAgent(input: any) {
   const uiSpec = input.uiSpec;
 
   debug('codeGenerationAgent:parallel-start', { projectId, hasBackend, hasUISpec: !!uiSpec });
-  const manifestOut: { value?: ProjectManifest } = {};
+
+  async function generateFrontendFiles(): Promise<GeneratedFile[]> {
+    let manifest: FrontendManifest;
+    try {
+      manifest = await generateFrontendManifest(input.systemDesign, input.requirements, input.modification, llmProxy, model, uiSpec);
+      validateManifestSemantics(manifest, input.requirements, input.projectSpec, uiSpec);
+    } catch (err) {
+      logWarn('codeGenerationAgent:frontend-manifest-fallback', { error: (err as Error).message });
+      manifest = fallbackFrontendManifest(input.requirements, uiSpec);
+    }
+
+    const scaffoldFiles = frontendScaffold(manifest);
+    const componentSpecs = (manifest.components || []).slice(0, MAX_COMPONENTS);
+
+    const generatedDependencies = new Map<string, string>();
+    const componentFiles: GeneratedFile[] = [];
+    for (const component of componentSpecs) {
+      try {
+        const file = await generateFrontendComponent(component, manifest, input.requirements, llmProxy, model, uiSpec, generatedDependencies);
+        generatedDependencies.set(file.path.replace(/^src\/components\//, '').replace(/\.jsx$/, ''), file.content);
+        componentFiles.push(file);
+        events?.emit({ type: 'FILE_WRITTEN', filePath: file.path, message: `Generated ${file.path}`, payload: { path: file.path, content: file.content } });
+      } catch (err) {
+        logWarn('codeGenerationAgent:component-fallback', { path: component.path, error: (err as Error).message });
+      }
+    }
+
+    let appFile: GeneratedFile;
+    try {
+      appFile = await generateFrontendApp(manifest, input.requirements, input.systemDesign, input.modification, componentFiles, llmProxy, model, uiSpec);
+      validateAppImports(appFile.content, componentFiles, blueprint, uiSpec);
+    } catch (err) {
+      logWarn('codeGenerationAgent:app-fallback', { error: (err as Error).message });
+      appFile = fallbackFrontendApp(manifest, componentFiles, hasBackend);
+    }
+
+    let cssFile: GeneratedFile;
+    try {
+      cssFile = await generateFrontendCss(manifest, input.requirements, appFile, componentFiles, llmProxy, model);
+    } catch (err) {
+      logWarn('codeGenerationAgent:css-fallback', { error: (err as Error).message });
+      cssFile = fallbackFrontendCss();
+    }
+
+    return [...scaffoldFiles, appFile, cssFile, ...componentFiles];
+  }
 
   const [frontendResult, backendResult] = await Promise.allSettled([
-    Promise.resolve([] as GeneratedFile[]),
+    generateFrontendFiles(),
     hasBackend ? generateBackendFiles(input.systemDesign, input.requirements, projectId, input.modification, llmProxy, model, events, blueprint) : Promise.resolve([] as GeneratedFile[]),
   ]);
 
-  const frontendFiles = frontendResult.status === 'fulfilled' ? frontendResult.value : [];
+  const frontendFiles = frontendResult.status === 'fulfilled'
+    ? frontendResult.value
+    : (() => {
+        logError('codeGenerationAgent:frontend-failed', (frontendResult as PromiseRejectedResult).reason);
+        throw new Error(`Frontend code generation failed: ${((frontendResult as PromiseRejectedResult).reason as Error)?.message || String((frontendResult as PromiseRejectedResult).reason)}`);
+      })();
 
   const backendFiles = backendResult.status === 'fulfilled'
     ? backendResult.value
@@ -1008,8 +1059,6 @@ export async function codeGenerationAgent(input: any) {
         logError('codeGenerationAgent:backend-failed', backendResult.reason);
         throw new Error(`Backend code generation failed: ${(backendResult.reason as Error)?.message || String(backendResult.reason)}`);
       })();
-
-  const projectManifest = manifestOut.value;
 
   const fileMap = new Map([...frontendFiles, ...backendFiles].map((f) => [normalizePath(f.path), f.content]));
 
@@ -1077,7 +1126,7 @@ export async function codeGenerationAgent(input: any) {
     hasBackend,
     projectId,
     generationMode: 'spec-aware-dependency-ordered',
-    project_task_queue: projectManifest?.project_task_queue || [],
+    project_task_queue: [],
   };
 }
 

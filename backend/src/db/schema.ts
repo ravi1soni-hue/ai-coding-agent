@@ -39,6 +39,7 @@ export async function ensureCoreTables() {
       confirmation JSONB,
       system_design JSONB,
       ui_spec JSONB,
+      structured_spec JSONB,
       blueprint JSONB,
       task_queue JSONB,
       terminal_logs JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -90,6 +91,7 @@ export async function ensureCoreTables() {
   await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS confirmation JSONB`);
   await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS system_design JSONB`);
   await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS ui_spec JSONB`);
+  await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS structured_spec JSONB`);
   await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS blueprint JSONB`);
   await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS task_queue JSONB`);
   await pgQuery(`ALTER TABLE project_sessions ADD COLUMN IF NOT EXISTS terminal_logs JSONB NOT NULL DEFAULT '[]'::jsonb`);

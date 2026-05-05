@@ -1,227 +1,203 @@
-import { getModelConfigForTask } from './modelRouter';
-import { LLMProxyClient } from './llmProxyClient';
-import { debug, error as logError } from '../utils/logger';
-import { assertBlueprintMatchesContext, validateProjectBlueprint, type ProjectBlueprint } from './blueprintContract';
+import path from 'path';
+import { debug } from '../utils/logger';
+import {
+  assertBlueprintIntegrationSafety,
+  validateProjectBlueprint,
+  type BlueprintBackendRoute,
+  type BlueprintFile,
+  type BlueprintState,
+  type ProjectBlueprint,
+  type ProjectBlueprintMetadata,
+  type ProjectBlueprintStrict,
+} from './blueprintContract';
+import { compileStructuredSpec, validateStructuredSpec, type StructuredSpec } from './structuredSpec';
 
 type BlueprintInput = {
   requirements: any;
   systemDesign?: any;
   uiSpec?: any;
+  structuredSpec?: any;
   projectSpec?: any;
   projectId?: string;
   modification?: string;
 };
 
-type Message = { role: 'system' | 'user' | 'assistant'; content: string };
+const BLUEPRINT_STACK = { frontend: 'react-vite', backend: 'node-ts', database: 'postgresql' } as const;
 
-const MAX_RETRIES = 3;
+function normalizePathValue(value: string): string {
+  return value.replace(/\\/g, '/').replace(/^\/+/, '');
+}
 
-const SYSTEM_PROMPT = `You are a principal full-stack architect. Return ONLY valid JSON for a PROJECT_BLUEPRINT object.
+function uniqueSorted(values: string[]): string[] {
+  return Array.from(new Set(values.map(normalizePathValue).filter(Boolean))).sort();
+}
 
-Rules:
-- The blueprint must be machine-validatable with no prose, markdown fences, or comments outside the JSON.
-- The top-level response MUST contain only: strict, metadata, files, dependencies, backendRoutes.
-- Code generation MUST use strict only. metadata is for diagnostics, approval, and routing hints only.
-- Never invent extra files. files must be the single authoritative registry of generated files.
-- Every backend route must set requiresProjectId to true and describe project_id filtering.
-- Every backend table/query must use shared tables with project_id columns. Never use per-project table names.
-- Stack is fixed: frontend = react-vite, backend = node-ts, database = postgresql.
-- All backend source files MUST be .ts files only.
-- Treat projectSpec as authoritative if present. Do not invent files, routes, components, or pages outside of projectSpec, systemDesign, or uiSpec.
-- If uiSpec.components is provided, every component must be represented in either navigation.routes, files, or as an explicit dependency chain from App.
-- Always include App in navigation.routes as the root entry component when uiSpec is present.
-- Reconcile the blueprint against projectSpec before returning JSON.
-- Ignore metadata fields during code generation.
+function toBlueprintFile(pathValue: string, kind: BlueprintFile['kind'], purpose: string, dependsOn: string[] = [], mustInclude: string[] = []): BlueprintFile {
+  return {
+    path: normalizePathValue(pathValue),
+    kind,
+    purpose,
+    dependsOn: uniqueSorted(dependsOn),
+    mustInclude: mustInclude.length > 0 ? mustInclude : undefined,
+  };
+}
 
-Required shape:
-{
-  "strict": {
-    "projectType": "landing_page|dashboard|full_app",
-    "modules": ["string"],
-    "frontend": {
-      "pages": ["string"],
-      "components": ["string"],
-      "routing": true,
-      "stateManagement": "local|context"
-    },
-    "backend": {
-      "required": true,
-      "modules": ["string"],
-      "routes": ["string"]
-    },
-    "database": {
-      "tables": ["string"]
-    },
-    "structure": {
-      "frontend": {},
-      "backend": {}
+function generateBackendRoutes(spec: StructuredSpec): BlueprintBackendRoute[] {
+  return spec.apiContracts.map((contract) => ({
+    path: contract.path,
+    method: contract.method,
+    purpose: contract.purpose,
+    requiresProjectId: contract.backendRequired,
+    tableName: contract.tableName,
+    queryNotes: contract.queryNotes,
+  }));
+}
+
+function deriveProjectType(requirements: any, backendRequired: boolean): ProjectBlueprintStrict['projectType'] {
+  const websiteType = String(requirements?.website_type || '').trim();
+  if (websiteType === 'landing_page') return 'landing_page';
+  if (websiteType === 'dashboard') return 'dashboard';
+  return backendRequired ? 'full_app' : 'landing_page';
+}
+
+export function generateBlueprint(structuredSpec: StructuredSpec, systemDesign: any, requirements: any): ProjectBlueprint {
+  const componentFiles = structuredSpec.componentSchema.map((component) =>
+    toBlueprintFile(
+      component.filePath,
+      'component',
+      component.purpose,
+      component.imports.length > 0 ? component.imports.map((dep) => dep) : component.children.map((child) => `src/components/${child}.jsx`)
+    )
+  );
+
+  const appDependencies = uniqueSorted([
+    ...componentFiles.map((file) => file.path),
+    ...structuredSpec.filePlan.filter((file) => file.path !== 'src/App.jsx').map((file) => file.path),
+  ]);
+
+  const files: BlueprintFile[] = [
+    toBlueprintFile('package.json', 'config', 'Frontend package manifest'),
+    toBlueprintFile('index.html', 'entry', 'Frontend HTML entry', ['package.json']),
+    toBlueprintFile('vite.config.js', 'config', 'Vite configuration', ['package.json']),
+    toBlueprintFile('src/main.jsx', 'entry', 'React bootstrap', ['src/App.jsx', 'src/index.css']),
+    toBlueprintFile('src/App.jsx', 'entry', 'Application composition root', appDependencies, ['App']),
+    toBlueprintFile('src/index.css', 'style', 'Global stylesheet', ['src/App.jsx']),
+    ...componentFiles,
+  ];
+
+  if (structuredSpec.backend_required) {
+    files.push(
+      toBlueprintFile('backend/package.json', 'config', 'Backend package manifest'),
+      toBlueprintFile('backend/src/index.ts', 'entry', 'Backend server entry', ['backend/src/db/database.ts', ...structuredSpec.apiContracts.map((api) => api.routeFile)]),
+      toBlueprintFile('backend/src/db/database.ts', 'utility', 'Database access helper'),
+      toBlueprintFile('backend/db/init.sql', 'schema', 'Database schema initialization')
+    );
+    for (const route of structuredSpec.apiContracts) {
+      files.push(toBlueprintFile(route.routeFile, 'route', route.purpose, ['backend/src/db/database.ts']));
     }
-  },
-  "metadata": {
-    "title": "string",
-    "stack": {
-      "frontend": "react-vite",
-      "backend": "node-ts",
-      "database": "postgresql"
+  }
+
+  const dependencies: Record<string, string[]> = Object.fromEntries(
+    structuredSpec.filePlan.map((entry) => [entry.path, uniqueSorted(entry.dependsOn)])
+  );
+
+  const frontendPages = structuredSpec.componentSchema.map((component) => component.name).filter((name) => name !== 'App');
+  const backendModules = structuredSpec.backend_required ? structuredSpec.apiContracts.map((route) => path.basename(route.routeFile, '.ts')) : [];
+
+  const strict: ProjectBlueprintStrict = {
+    projectType: deriveProjectType(requirements, structuredSpec.backend_required),
+    modules: uniqueSorted([...frontendPages, ...backendModules]),
+    frontend: {
+      pages: frontendPages,
+      components: frontendPages,
+      routing: true,
+      stateManagement: 'context',
     },
-    "buildCriticalFiles": ["package.json", "index.html", "vite.config.js", "src/main.jsx", "src/App.jsx", "src/index.css"],
-    "entrypoints": {
-      "frontend": ["src/main.jsx", "src/App.jsx"],
-      "backend": ["backend/src/index.ts"]
+    backend: {
+      required: structuredSpec.backend_required,
+      modules: backendModules,
+      routes: structuredSpec.apiContracts.map((route) => route.path),
     },
-    "state": {
-      "owner": "context|zustand|local",
-      "store": "string",
-      "shape": {}
+    database: {
+      tables: structuredSpec.backend_required ? ['items'] : [],
     },
-    "navigation": {
-      "type": "react-router|single-page",
-      "routes": [{ "path": "/", "component": "ComponentName", "purpose": "string" }]
+    structure: {
+      frontend: {
+        layoutTree: structuredSpec.layoutTree,
+        components: structuredSpec.componentSchema,
+      },
+      backend: structuredSpec.backend_required
+        ? {
+            routes: structuredSpec.apiContracts,
+          }
+        : {},
     },
-    "invariants": [
-      "Every backend query must filter by project_id",
-      "The frontend must render from explicit entrypoints"
-    ]
-  },
-  "files": [
-    { "path": "package.json", "purpose": "Frontend npm package configuration", "kind": "config" },
-    { "path": "index.html", "purpose": "Vite entry HTML template", "kind": "entry" },
-    { "path": "vite.config.js", "purpose": "Vite build configuration", "kind": "config" },
-    { "path": "src/main.jsx", "purpose": "React application entry point", "kind": "entry" },
-    { "path": "src/App.jsx", "purpose": "Root React component with routing", "kind": "entry" },
-    { "path": "src/index.css", "purpose": "Global styles", "kind": "style" },
-    { "path": "backend/package.json", "purpose": "Backend npm package configuration", "kind": "config" },
-    { "path": "backend/src/index.ts", "purpose": "TypeScript backend server entry point", "kind": "entry" },
-    { "path": "backend/src/db/database.ts", "purpose": "PostgreSQL database connection pool", "kind": "utility" },
-    { "path": "backend/db/init.sql", "purpose": "Database schema initialization SQL", "kind": "schema" }
-  ],
-  "backendRoutes": [
+  };
+
+  const metadata: ProjectBlueprintMetadata = {
+    title: String(requirements?.userMessage || 'Generated Project').slice(0, 120),
+    stack: BLUEPRINT_STACK,
+    buildCriticalFiles: ['package.json', 'index.html', 'vite.config.js', 'src/main.jsx', 'src/App.jsx', 'src/index.css'],
+    entrypoints: {
+      frontend: ['src/main.jsx', 'src/App.jsx'],
+      backend: structuredSpec.backend_required ? ['backend/src/index.ts'] : [],
+    },
+    state: {
+      owner: 'context',
+      store: 'appState',
+      shape: {},
+    },
+    navigation: {
+      type: 'react-router',
+      routes: [
+        { path: '/', component: 'App', purpose: 'Application root' },
+        ...structuredSpec.layoutTree.children.map((child) => ({
+          path: `/${child.component.toLowerCase()}`,
+          component: child.component,
+          purpose: child.name,
+        })),
+      ],
+    },
+    invariants: [
+      'Every backend query must filter by project_id',
+      'The frontend must render from explicit entrypoints',
+    ],
+  };
+
+  const blueprint: ProjectBlueprint = validateProjectBlueprint(
     {
-      "path": "/api/example",
-      "method": "GET",
-      "purpose": "string",
-      "requiresProjectId": true,
-      "tableName": "items",
-      "queryNotes": "Always filter by project_id"
-    }
-  ]
-}`;
+      strict,
+      metadata,
+      files,
+      dependencies,
+      backendRoutes: generateBackendRoutes(structuredSpec),
+      title: metadata.title,
+      stack: metadata.stack,
+      buildCriticalFiles: metadata.buildCriticalFiles,
+      entrypoints: metadata.entrypoints,
+      state: metadata.state as BlueprintState,
+      navigation: metadata.navigation,
+      invariants: metadata.invariants,
+    },
+    { requirements }
+  );
 
-function stripMarkdown(content: string): string {
-  return content.replace(/```[a-zA-Z]*\s*/g, '').replace(/```/g, '').trim();
-}
-
-function extractJson(content: string): string {
-  const cleaned = stripMarkdown(content);
-  const first = cleaned.indexOf('{');
-  const last = cleaned.lastIndexOf('}');
-  if (first >= 0 && last > first) return cleaned.slice(first, last + 1);
-  return cleaned;
-}
-
-function tryParseBlueprint(raw: string): { blueprint: ProjectBlueprint } | { error: string } {
-  let jsonStr: string;
-  try {
-    jsonStr = extractJson(raw);
-  } catch {
-    return { error: 'Could not extract JSON from response' };
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonStr);
-  } catch (err: any) {
-    return { error: `JSON parse failed: ${err.message}` };
-  }
-
-  try {
-    const blueprint = validateProjectBlueprint(parsed);
-    return { blueprint };
-  } catch (err: any) {
-    return { error: `Blueprint validation failed: ${err.message}` };
-  }
+  return assertBlueprintIntegrationSafety(blueprint);
 }
 
 export async function blueprintAgent(input: BlueprintInput): Promise<ProjectBlueprint> {
   debug('blueprintAgent:start', { projectId: input.projectId });
   if (!input?.requirements) throw new Error('Blueprint input requires requirements');
 
-  const { model, apiKey } = getModelConfigForTask('core_reasoning');
-  const llmProxy = new LLMProxyClient({ apiKey });
-
-  if (!input.projectSpec) {
-    throw new Error('Canonical projectSpec required for blueprint generation');
-  }
-  const projectSpec = input.projectSpec;
-  const specRequirements = projectSpec?.requirements || {};
-  if (input.requirements?.website_type && specRequirements.website_type && input.requirements.website_type !== specRequirements.website_type) {
-    throw new Error('Blueprint input does not match canonical projectSpec requirements');
-  }
-  if (Array.isArray(specRequirements.pages) && Array.isArray(input.requirements?.pages)) {
-    const specPages = specRequirements.pages.map((page: string) => String(page).trim()).filter(Boolean);
-    const inputPages = input.requirements.pages.map((page: string) => String(page).trim()).filter(Boolean);
-    for (const page of specPages) {
-      if (!inputPages.includes(page)) {
-        throw new Error(`Blueprint input is missing canonical page: ${page}`);
-      }
-    }
-  }
-  const userContent = JSON.stringify({
-    requirements: input.requirements,
-    projectSpec,
-    systemDesign: input.systemDesign || null,
-    uiSpec: input.uiSpec || null,
-    modification: input.modification || null,
-    projectId: input.projectId || null,
-  });
-
-  const messages: Message[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'user', content: userContent },
-  ];
-
-  let lastError = 'Unknown error';
-
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    debug('blueprintAgent:attempt', { attempt, projectId: input.projectId });
-
-    const completion = await llmProxy.chatCompletion(messages, model, 0.2, 0.9, 4000);
-    const raw = completion.choices?.[0]?.message?.content || '';
-
-    const result = tryParseBlueprint(raw);
-
-    if ('blueprint' in result) {
-      const contextCheckedBlueprint = assertBlueprintMatchesContext(result.blueprint, {
-        requirements: input.requirements,
+  const structuredSpec = input.structuredSpec
+    ? validateStructuredSpec(input.structuredSpec)
+    : compileStructuredSpec({
         uiSpec: input.uiSpec,
+        systemDesign: input.systemDesign,
+        requirements: input.requirements,
       });
-      const specBackendRequired = Boolean(projectSpec?.requirements?.backend_required);
-      if (!specBackendRequired && (contextCheckedBlueprint.backendRoutes || []).length > 0) {
-        throw new Error('Blueprint contains backend routes for a frontend-only canonical projectSpec');
-      }
-      if (specBackendRequired && (contextCheckedBlueprint.backendRoutes || []).length === 0) {
-        throw new Error('Blueprint is missing backend routes required by the canonical projectSpec');
-      }
-      debug('blueprintAgent:done', {
-        attempt,
-        title: contextCheckedBlueprint.title,
-        fileCount: (contextCheckedBlueprint.files || []).length,
-        routeCount: (contextCheckedBlueprint.backendRoutes || []).length,
-      });
-      return contextCheckedBlueprint;
-    }
 
-    lastError = result.error;
-    logError('blueprintAgent:validation-error', { attempt, error: lastError });
-
-    if (attempt < MAX_RETRIES) {
-      messages.push({ role: 'assistant', content: raw });
-      messages.push({
-        role: 'user',
-        content: `Your previous response failed validation with this exact error:\n\n${lastError}\n\nCorrect the issue and return the COMPLETE corrected JSON blueprint. Requirements:\n- No prose, no markdown fences, no code blocks — raw JSON only\n- Every backendRoute MUST have requiresProjectId set to boolean true (not a string)\n- files[] MUST include all 10 required paths: package.json, index.html, vite.config.js, src/main.jsx, src/App.jsx, src/index.css, backend/package.json, backend/src/index.ts, backend/src/db/database.ts, backend/db/init.sql\n- entrypoints.frontend MUST include ["src/main.jsx","src/App.jsx"]\n- stack.frontend MUST be exactly "react-vite", stack.backend MUST be exactly "node-ts", stack.database MUST be exactly "postgresql"\n- navigation.routes MUST include a route with component "App"`,
-      });
-    }
-  }
-
-  throw new Error(`Blueprint generation failed after ${MAX_RETRIES} attempts. Last error: ${lastError}`);
+  const blueprint = generateBlueprint(structuredSpec, input.systemDesign, input.requirements);
+  debug('blueprintAgent:done', { projectId: input.projectId, fileCount: blueprint.files.length, routeCount: blueprint.backendRoutes.length });
+  return blueprint;
 }
