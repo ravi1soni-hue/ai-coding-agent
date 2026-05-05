@@ -96,6 +96,34 @@ function parseJsonSafe(content: string): any {
     try {
       return JSON.parse(slice);
     } catch {}
+    // Robust fallback for {"path":"...","content":"..."} responses.
+    // Large JSX files often contain literal newlines or other characters the LLM
+    // fails to escape, breaking JSON.parse. Since content is always the last field,
+    // we extract path normally and treat everything between the content opening quote
+    // and the final closing quote as the raw file content.
+    const pathMatch = slice.match(/"path"\s*:\s*"([^"]*)"/);
+    const contentKeyIdx = slice.indexOf('"content"');
+    if (pathMatch && contentKeyIdx !== -1) {
+      const colonIdx = slice.indexOf(':', contentKeyIdx);
+      const openQuote = slice.indexOf('"', colonIdx + 1);
+      if (openQuote !== -1) {
+        // The JSON object closes with `"}` — find the last occurrence of that sequence
+        // to locate the end of the content string value rather than any quote inside it.
+        const closingSeq = slice.lastIndexOf('"}');
+        const closeQuote = closingSeq > openQuote ? closingSeq : slice.lastIndexOf('"');
+        if (closeQuote > openQuote) {
+          const rawContent = slice.slice(openQuote + 1, closeQuote);
+          // Unescape only the sequences the LLM does escape; leave literal newlines as-is.
+          const unescaped = rawContent
+            .replace(/\\n/g, '\n')
+            .replace(/\\t/g, '\t')
+            .replace(/\\r/g, '\r')
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, '\\');
+          return { path: pathMatch[1], content: unescaped };
+        }
+      }
+    }
   }
   throw new Error(`No valid JSON found in LLM response. Snippet: ${cleaned.replace(/\s+/g, ' ').slice(0, 220)}`);
 }
@@ -381,7 +409,8 @@ function parseBackendManifest(raw: unknown): BackendManifest {
   const tables = Array.isArray(manifest.tables) ? manifest.tables : [];
   const normalizedTables = tables.slice(0, MAX_BACKEND_ROUTES).map((table) => ({
     ...table,
-    name: SHARED_TABLE_NAME,
+    // Preserve the LLM-specified table name; fall back to SHARED_TABLE_NAME only when absent.
+    name: String(table?.name || SHARED_TABLE_NAME),
     columns: Array.isArray(table?.columns) && table.columns.length > 0 ? table.columns : SHARED_TABLE_COLUMNS,
     purpose: String(table?.purpose || 'Shared storage for project-scoped data'),
   }));
@@ -540,14 +569,16 @@ function backendRouteFileStub(resource: NonNullable<BackendManifest['resources']
   const routeFile = sanitizeRoutePath('', resource.name || 'resource');
   const methods = Array.isArray(resource.methods) && resource.methods.length > 0 ? resource.methods : ['GET', 'POST'];
   const fields = Array.isArray(resource.fields) && resource.fields.length > 0 ? resource.fields : ['name', 'data'];
-  const fieldExtractions = fields.filter((f) => f !== 'id' && f !== 'project_id' && f !== 'created_at')
-    .map((f) => `    const ${f} = req.body?.${f};`).join('\n');
-  const insertFields = ['id', 'project_id', ...fields.filter((f) => !['id', 'project_id'].includes(f))];
+  // created_at is DB-managed so never inserted; exclude from both extraction and INSERT columns.
+  const DB_MANAGED = ['id', 'project_id', 'created_at'];
+  const insertableFields = fields.filter((f) => !DB_MANAGED.includes(f));
+  const fieldExtractions = insertableFields.map((f) => `    const ${f} = req.body?.${f};`).join('\n');
+  const insertFields = ['id', 'project_id', ...insertableFields];
   const insertPlaceholders = insertFields.map((_, i) => `$${i + 1}`).join(', ');
   const insertValues = insertFields.map((f) => {
     if (f === 'id') return 'id';
     if (f === 'project_id') return 'projectId';
-    return f;
+    return f; // matches the extracted const name above
   }).join(', ');
 
   const handlers: string[] = [];
@@ -702,25 +733,31 @@ async function generateJson(
   userPayload: unknown,
   maxTokens: number
 ): Promise<any> {
-  let lastRaw = '';
+  // lastBadJson holds the LLM's response only when the call succeeded but parse failed.
+  // We don't feed it back when the failure was a network/call error (no useful content to correct).
+  let lastBadJson = '';
   for (let jsonAttempt = 1; jsonAttempt <= 3; jsonAttempt++) {
     const messages: Array<{ role: string; content: string }> = [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: JSON.stringify(userPayload) },
     ];
-    if (jsonAttempt > 1 && lastRaw) {
-      messages.push({ role: 'assistant', content: lastRaw.slice(0, 1200) });
-      messages.push({ role: 'user', content: 'Return ONLY a valid JSON object. If you included prose or code fences, remove them. Do not wrap in markdown.' });
+    if (jsonAttempt > 1 && lastBadJson) {
+      messages.push({ role: 'assistant', content: lastBadJson.slice(0, 1200) });
+      messages.push({ role: 'user', content: 'Your previous response was not valid JSON. Return ONLY a valid JSON object with no markdown fences, no prose, and all string values properly escaped.' });
     }
+    let rawContent = '';
     try {
       const completion = await llmProxy.chatCompletion(messages, model, 0.0, 0.9, maxTokens, 60_000);
-      const content: string = completion.choices?.[0]?.message?.content || '';
-      if (!content.trim()) throw new Error(`${label}: LLM returned empty response`);
-      lastRaw = content;
-      return parseJsonSafe(content);
+      rawContent = completion.choices?.[0]?.message?.content || '';
+      if (!rawContent.trim()) throw new Error(`${label}: LLM returned empty response`);
+      lastBadJson = rawContent; // store before parse so we can feed it back on parse failure
+      return parseJsonSafe(rawContent);
     } catch (err) {
+      // Only set lastBadJson when there was a response to correct (parse failure).
+      // For call failures rawContent is empty — don't overwrite a prior useful response.
+      if (rawContent) lastBadJson = rawContent;
       const message = err instanceof Error ? err.message : String(err);
-      logWarn(`${label}:json-attempt-failed:${jsonAttempt}`, { error: message, rawSnippet: lastRaw.slice(0, 240) });
+      logWarn(`${label}:json-attempt-failed:${jsonAttempt}`, { error: message, rawSnippet: lastBadJson.slice(0, 240) });
       if (jsonAttempt === 3) throw err;
     }
   }
@@ -1161,12 +1198,10 @@ export async function codeGenerationAgent(input: any) {
     }
 
     const scaffoldFiles = frontendScaffold(manifest);
-    // When uiSpec provides the authoritative component list, honour it fully.
-    // Otherwise cap at MAX_COMPONENTS to bound LLM-generated lists that may be unbounded.
+    // uiSpec components are authoritative but still bounded; LLM-only lists are capped tighter.
     const hasUiSpecComponents = Array.isArray(uiSpec?.components) && uiSpec.components.length > 0;
-    const componentSpecs = hasUiSpecComponents
-      ? (manifest.components || [])
-      : (manifest.components || []).slice(0, MAX_COMPONENTS);
+    const cap = hasUiSpecComponents ? Math.max(MAX_COMPONENTS, (uiSpec.components as unknown[]).length) : MAX_COMPONENTS;
+    const componentSpecs = (manifest.components || []).slice(0, cap);
 
     const generatedDependencies = new Map<string, string>();
     const componentFiles: GeneratedFile[] = [];
@@ -1178,6 +1213,15 @@ export async function codeGenerationAgent(input: any) {
         events?.emit({ type: 'FILE_WRITTEN', filePath: file.path, message: `Generated ${file.path}`, payload: { path: file.path, content: file.content } });
       } catch (err) {
         logWarn('codeGenerationAgent:component-fallback', { path: component.path, error: (err as Error).message });
+        // Emit a minimal stub so the import in App.jsx resolves at runtime instead of crashing.
+        const compName = sanitizeIdentifier(component.name || path.basename(component.path || '', '.jsx'), 'GeneratedSection');
+        const safePath = sanitizeComponentPath(component.path || '', componentFiles.length);
+        const stubFile: GeneratedFile = {
+          path: safePath,
+          content: `import React from 'react';\nexport default function ${compName}() {\n  return <div className="section">${compName}</div>;\n}\n`,
+        };
+        componentFiles.push(stubFile);
+        events?.emit({ type: 'FILE_WRITTEN', filePath: stubFile.path, message: `Wrote stub ${stubFile.path}`, payload: { path: stubFile.path, content: stubFile.content } });
       }
     }
 
