@@ -97,6 +97,7 @@ export type ClarificationMemory = {
   done: boolean;
   answers: Record<string, string>;
   askedQuestions: string[];
+  lastQuestion?: string;
 };
 
 export type ConfirmationMemory = {

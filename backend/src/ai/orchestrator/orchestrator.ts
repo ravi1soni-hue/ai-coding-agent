@@ -426,12 +426,12 @@ async function runClarificationLoop(
   options: StageOptions
 ): Promise<{ done: boolean; questions: string[] }> {
   const incomingAnswers = { ...(memory.clarifications?.answers || {}), ...(command.clarificationAnswers || {}) };
-  const askedQuestions = memory.clarifications?.askedQuestions || [];
+  const priorAsked = memory.clarifications?.askedQuestions || [];
 
   const result = await stageWrap(
     memory,
     'clarification',
-    { answers: incomingAnswers, askedQuestions },
+    { answers: incomingAnswers, askedQuestions: priorAsked },
     async () => {
       const agentResult = await clarificationAgent({
         requirements: {
@@ -443,7 +443,7 @@ async function runClarificationLoop(
           notes: memory.requirements?.notes,
         },
         clarificationAnswers: incomingAnswers,
-        askedQuestions,
+        askedQuestions: priorAsked,
         projectSpec: undefined,
         modification: command.modification,
       });
@@ -464,12 +464,32 @@ async function runClarificationLoop(
     return { done: false, questions: memory.clarifications?.questions || [] };
   }
 
-  const done = Boolean(memory.clarifications?.done);
-  const questions = memory.clarifications?.questions || [];
-  if (!done && questions.length > 0) {
-    options.adapter?.emit?.({ type: 'clarification_request', stage: 'clarification', questions });
+  if (memory.clarifications?.done) {
+    return { done: true, questions: [] };
   }
-  return { done, questions };
+
+  // Pick the next unanswered, not-yet-asked question
+  const candidates = memory.clarifications?.questions || [];
+  const askedSet = new Set((memory.clarifications?.askedQuestions || []).map((q) => q.trim().toLowerCase()));
+  const answeredSet = new Set(Object.keys(memory.clarifications?.answers || {}).map((q) => q.trim().toLowerCase()));
+  const nextQuestion = candidates.find((q) => {
+    const norm = q.trim().toLowerCase();
+    return norm.length > 0 && !askedSet.has(norm) && !answeredSet.has(norm);
+  });
+
+  if (!nextQuestion) {
+    // Agent did not signal done but produced no askable question; treat as done
+    if (memory.clarifications) memory.clarifications.done = true;
+    return { done: true, questions: [] };
+  }
+
+  if (memory.clarifications) {
+    memory.clarifications.lastQuestion = nextQuestion;
+    memory.clarifications.askedQuestions = Array.from(new Set([...(memory.clarifications.askedQuestions || []), nextQuestion]));
+  }
+
+  options.adapter?.emit?.({ type: 'clarification_request', stage: 'clarification', questions: [nextQuestion] });
+  return { done: false, questions: [nextQuestion] };
 }
 
 async function runConfirmationGate(
@@ -499,6 +519,23 @@ async function runConfirmationGate(
   await persistLastEvent(memory, options.persistence);
   options.adapter?.emit?.({ type: 'confirmation_request', stage: 'confirmation', summary: projectSpec });
   return { confirmed: false };
+}
+
+function assertConsistency(memory: ProjectMemory, command: OrchestrationCommand, activeStage: OrchestrationState): void {
+  const projectSpec = buildProjectSpec(memory, command);
+  const report = validateProjectConsistency({
+    projectSpec,
+    requirementAnalysis: memory.requirements,
+    clarifications: memory.clarifications,
+    systemDesign: memory.systemDesign,
+    uiSpec: memory.uiSpec,
+    blueprint: memory.blueprint?.blueprint,
+    codeGen: memory.code,
+    activeStage,
+  });
+  if (!report.ok) {
+    throw new Error(`Cross-stage consistency validation failed at ${activeStage}:\n${formatConsistencyIssues(report)}`);
+  }
 }
 
 function invalidateDownstream(memory: ProjectMemory, fromStage: OrchestrationState): void {
@@ -583,10 +620,11 @@ export async function runAIOrchestration(
     }
   }
 
-  // 3. Build canonical project spec
+  // 3. Build canonical project spec + post-clarification consistency check
   const projectSpec = buildProjectSpec(memory, command);
   appendHistory(memory, 'clarification', 'project_spec_ready', 'Canonical project spec created', projectSpec);
   await persistLastEvent(memory, persistence);
+  assertConsistency(memory, command, 'clarification');
 
   // 4. Confirmation gate (pause-resume aware)
   const confirmation = await runConfirmationGate(memory, command, projectSpec, { ...opts, percent: 18 });
@@ -611,6 +649,7 @@ export async function runAIOrchestration(
         }
       : await systemDesignAgent({ requirements: memory.requirements, projectSpec });
     setSystemDesign(memory, result.output);
+    assertConsistency(memory, command, 'system_design');
     return result.output;
   }, { ...opts, percent: 25 });
 
@@ -630,6 +669,7 @@ export async function runAIOrchestration(
       },
     });
     setUISpec(memory, { uiSpec: result.output, structuredSpec: result.output });
+    assertConsistency(memory, command, 'ui_spec');
     return result.output;
   }, { ...opts, percent: 35 });
 
@@ -645,6 +685,7 @@ export async function runAIOrchestration(
       modification: command.modification,
     });
     setBlueprint(memory, { blueprint: output });
+    assertConsistency(memory, command, 'blueprint');
     return output;
   }, { ...opts, percent: 50 });
 
@@ -667,6 +708,7 @@ export async function runAIOrchestration(
       user_id: command.sessionId,
     });
     setCode(memory, { files: generated.files || [], patch: generated.patch || '' });
+    assertConsistency(memory, command, 'code_generation');
     return generated;
   }, { ...opts, percent: 65 });
 

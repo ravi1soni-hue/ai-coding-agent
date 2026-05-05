@@ -82,11 +82,15 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
       const restored = json.events
         .map((e) => {
           if (e.role === 'user') return { role: 'user', text: e.message || '' };
-          if (e.event_type === 'stream') return { role: 'assistant', text: e.message || '' };
-          if (e.event_type === 'clarification') return { role: 'assistant', text: e.message || '' };
-          if (e.event_type === 'confirmation') return { role: 'assistant', text: e.message || '' };
-          if (e.event_type === 'error') return { role: 'error', text: e.message || '' };
-          if (e.event_type === 'done') return { role: 'system', text: e.message || '' };
+          if (e.event_type === 'clarification_request') {
+            const qs = e.payload?.questions;
+            if (Array.isArray(qs) && qs.length > 0) return { role: 'assistant', text: qs.join('\n') };
+            return { role: 'assistant', text: e.message || 'Clarification requested.' };
+          }
+          if (e.event_type === 'confirmation_request') return { role: 'assistant', text: 'Confirmation requested.' };
+          if (e.event_type === 'stage_error') return { role: 'error', text: e.message || 'Stage error' };
+          if (e.event_type === 'failed') return { role: 'error', text: e.message || 'Pipeline failed.' };
+          if (e.event_type === 'done') return { role: 'system', text: 'Project complete.' };
           return null;
         })
         .filter((m) => m && m.text);
@@ -161,57 +165,70 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
           pushMessage('system', payload.message || 'Info received.');
           break;
         case 'progress': {
-          const p = Math.max(0, Math.min(1, Number(payload.progress) || 0));
+          const pct = typeof payload.percent === 'number' ? payload.percent : 0;
+          const p = Math.max(0, Math.min(1, pct / 100));
           setProgress(p);
-          setStatusText(payload.status || 'Working');
-          if (typeof payload.stageProgress === 'number') {
-            setStageStatus(`${payload.stage || 'Stage'} ${Math.round(payload.stageProgress * 100)}%`);
-          } else {
-            setStageStatus('');
-          }
-          if (p > 0 && p < 1) setPipelineActive(true);
-          else if (p >= 1) setPipelineActive(false);
+          setStatusText(payload.message || payload.stage || 'Working');
+          setStageStatus(payload.stage ? String(payload.stage) : '');
+          setPipelineActive(p > 0 && p < 1);
           break;
         }
+        case 'stage_start':
+          setCurrentActivity(`Starting ${payload.stage}...`);
+          setPipelineActive(true);
+          pushMessage('system', payload.message || `Starting ${payload.stage}...`);
+          break;
+        case 'stage_complete':
+          setCurrentActivity('');
+          pushMessage('system', `✓ ${payload.stage} complete`);
+          break;
+        case 'stage_error':
+          pushMessage('details', `[${payload.stage}] ${payload.issue?.message || 'Stage error'}`);
+          break;
         case 'stream':
           pushMessage('assistant', payload.token || '');
           break;
-        case 'AGENT_THINKING':
-          setCurrentActivity(payload.message || 'Agent thinking...');
-          pushMessage('system', payload.message || 'Agent thinking...');
-          break;
-        case 'FILE_WRITTEN':
-          if (payload.payload?.file) upsertGeneratedFile(payload.payload.file);
-          if (payload.payload?.path && payload.payload?.content) {
-            upsertGeneratedFile({ path: payload.payload.path, content: payload.payload.content });
+        case 'file_generated':
+          if (payload.filePath) {
+            setCurrentActivity(`Writing ${payload.filePath}...`);
+            upsertGeneratedFile({ path: payload.filePath, content: '' });
+            pushMessage('system', `Wrote ${payload.filePath}`);
           }
-          if (payload.filePath) setCurrentActivity(`Writing ${payload.filePath}...`);
-          pushMessage(
-            'system',
-            payload.filePath
-              ? `Wrote ${payload.filePath}${payload.payload?.content ? ` (${countLines(payload.payload.content)} lines)` : ''}`
-              : (payload.message || 'File written.')
-          );
           break;
-        case 'BUILD_LOG_STREAM':
-          pushMessage('assistant', payload.token || payload.message || '');
+        case 'clarification_request': {
+          const questions = Array.isArray(payload.questions) ? payload.questions : [];
+          if (questions.length === 0) {
+            pushMessage('assistant', 'Please clarify your request.');
+          } else {
+            questions.forEach((q) => pushMessage('assistant', q));
+          }
           break;
-        case 'clarification':
-          pushMessage('assistant', payload.question || 'Please clarify your request.');
+        }
+        case 'confirmation_request': {
+          let summaryText = 'Ready to proceed?';
+          if (payload.summary && typeof payload.summary === 'object') {
+            try { summaryText = `Ready to proceed?\n\n${JSON.stringify(payload.summary, null, 2)}`; } catch { /* ignore */ }
+          }
+          pushMessage('assistant', `${summaryText}\n\nReply "yes" to confirm or "no" to cancel.`);
           break;
-        case 'confirmation':
-          pushMessage('assistant', payload.message || 'Please confirm to proceed.');
-          break;
+        }
         case 'done':
           setProgress(1);
           setStatusText('Complete');
           setPipelineActive(false);
           setCurrentActivity('');
-          pushMessage('system', payload.message || 'Flow finished.');
-          if (payload.frontend_url) pushMessage('system', `🔗 Your deployed app: ${payload.frontend_url}`);
-          if (payload.backend_url) pushMessage('system', `🛠 Backend URL: ${payload.backend_url}`);
-          if (payload.vercel_inspect_url) pushMessage('system', `🔍 Inspect deployment: ${payload.vercel_inspect_url}`);
-          if (payload.frontend_access_warning) pushMessage('details', `Warning: ${payload.frontend_access_warning}`);
+          pushMessage('system', 'Project complete!');
+          if (payload.frontendUrl) pushMessage('system', `🔗 Your deployed app: ${payload.frontendUrl}`);
+          if (payload.backendUrl) pushMessage('system', `🛠 Backend URL: ${payload.backendUrl}`);
+          break;
+        case 'failed':
+          setPipelineActive(false);
+          setCurrentActivity('');
+          {
+            const issues = Array.isArray(payload.issues) ? payload.issues : [];
+            const msg = issues.map((i) => i?.message).filter(Boolean).join('\n') || 'Pipeline failed.';
+            pushMessage('error', msg);
+          }
           break;
         case 'error':
           pushMessage('details', payload.message || 'Unknown error.');
