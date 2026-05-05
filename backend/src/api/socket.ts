@@ -879,7 +879,7 @@ export function createSocketServer(server: http.Server) {
           }
 
           session.deployment = deployResult.data;
-          await persistStageSnapshot('deploy_modification', 'Deployment successful for modification', deployResult.data);
+          await persistStageSnapshot('deploy', 'Deployment successful', deployResult.data);
           await persistDeployment();
           await persistBlackboardState();
 
@@ -944,7 +944,7 @@ export function createSocketServer(server: http.Server) {
           return;
         }
 
-          await setStep('codeGen_modification', 'Starting modification flow');
+          await setStep('clarification', 'Starting modification flow');
 
         // Step 2: Re-run system design if modification is architectural
         sendProgress(ws, session, 'systemDesign', 'Re-evaluating architecture for your changes...');

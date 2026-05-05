@@ -31,9 +31,9 @@ export class LLMProxyClient {
     return status === 408 || status === 429 || status >= 500;
   }
 
-  private buildUrlCandidates(primary?: string, configured?: string): string[] {
-    const values = [primary, configured].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
-    return Array.from(new Set(values.map((value) => value.trim())));
+  private buildUrlCandidates(...values: Array<string | undefined>): string[] {
+    const filtered = values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+    return Array.from(new Set(filtered.map((value) => value.trim())));
   }
 
   private async sleep(ms: number): Promise<void> {
@@ -150,7 +150,10 @@ export class LLMProxyClient {
     const requestTimeoutMs = timeoutMs ?? defaultTimeout;
 
     const modelCandidates = this.buildModelCandidates(selectedModel);
-    const urlCandidates = this.chatUrls.length > 0 ? this.chatUrls : [''];
+    if (this.chatUrls.length === 0) {
+      throw new Error('LLM Proxy chatCompletion failed: No chat URL configured. Set LLM_PROXY_CHAT_URL or pass chatUrl to LLMProxyClient.');
+    }
+    const urlCandidates = this.chatUrls;
     this.log('chatCompletion called', {
       model: selectedModel,
       modelCandidates,
@@ -266,7 +269,11 @@ export class LLMProxyClient {
     this.log('embedding called', { texts, dimensions });
     let lastError: any;
 
-    for (const embeddingUrl of this.embeddingUrls.length > 0 ? this.embeddingUrls : ['']) {
+    if (this.embeddingUrls.length === 0) {
+      throw new Error('LLM Proxy embedding failed: No embedding URL configured. Set LLM_PROXY_EMBEDDING_URL or pass embeddingUrl to LLMProxyClient.');
+    }
+
+    for (const embeddingUrl of this.embeddingUrls) {
       try {
         const response = await fetch(embeddingUrl, {
           method: 'POST',
