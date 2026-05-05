@@ -176,7 +176,7 @@ function fallbackFrontendManifest(requirements: any, uiSpec?: any): FrontendMani
   return { appName, dependencies: {}, apiResources: [], components: components.slice(0, MAX_COMPONENTS), styleNotes: 'Clean responsive application UI.' };
 }
 
-function fallbackFrontendApp(manifest: FrontendManifest, components: GeneratedFile[], hasBackend = false): GeneratedFile {
+function fallbackFrontendApp(_manifest: FrontendManifest, components: GeneratedFile[], hasBackend = false): GeneratedFile {
   const imports = components.map((file) => `import ${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} from './${file.path.replace(/^src\//, '')}';`).join('\n');
   const componentTags = components.map((file) => `        <${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} />`).join('\n');
   const apiInit = hasBackend ? `
@@ -203,14 +203,7 @@ export default function App() {
 ${apiInit}
   return (
     <main className="app-shell">
-      <section className="hero">
-        <p className="eyebrow">${escapeJsxText(manifest.appName, 'Generated App')}</p>
-        <h1>${escapeJsxText(manifest.appName, 'Your App')}</h1>
-        <p>A production-ready React application.</p>
-      </section>
-      <section className="content-grid">
-${componentTags || '        <div className="panel"><h2>Ready</h2><p>Your app scaffold is ready for iteration.</p></div>'}
-      </section>
+${componentTags || '        <div className="content-grid" />'}
 ${apiStatus}
     </main>
   );
@@ -543,8 +536,90 @@ initDb().then(() => app.listen(port, () => console.log(\`Backend on port \${port
   ];
 }
 
-function backendRouteFile(resource: NonNullable<BackendManifest['resources']>[number]): GeneratedFile {
+function backendRouteFileStub(resource: NonNullable<BackendManifest['resources']>[number]): GeneratedFile {
   const routeFile = sanitizeRoutePath('', resource.name || 'resource');
+  const methods = Array.isArray(resource.methods) && resource.methods.length > 0 ? resource.methods : ['GET', 'POST'];
+  const fields = Array.isArray(resource.fields) && resource.fields.length > 0 ? resource.fields : ['name', 'data'];
+  const fieldExtractions = fields.filter((f) => f !== 'id' && f !== 'project_id' && f !== 'created_at')
+    .map((f) => `    const ${f} = req.body?.${f};`).join('\n');
+  const insertFields = ['id', 'project_id', ...fields.filter((f) => !['id', 'project_id'].includes(f))];
+  const insertPlaceholders = insertFields.map((_, i) => `$${i + 1}`).join(', ');
+  const insertValues = insertFields.map((f) => {
+    if (f === 'id') return 'id';
+    if (f === 'project_id') return 'projectId';
+    return f;
+  }).join(', ');
+
+  const handlers: string[] = [];
+
+  if (methods.some((m) => m.toUpperCase() === 'GET')) {
+    handlers.push(`router.get('/', async (req, res, next) => {
+  try {
+    const projectId = String(req.query.project_id || req.query.projectId || '').trim();
+    if (!projectId) return res.status(400).json({ error: 'project_id is required' });
+    const result = await query(\`SELECT * FROM ${SHARED_TABLE_NAME} WHERE project_id = $1 ORDER BY created_at DESC LIMIT 100\`, [projectId]);
+    res.json({ ${resource.name || 'items'}: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});`);
+  }
+
+  if (methods.some((m) => m.toUpperCase() === 'POST')) {
+    handlers.push(`router.post('/', async (req, res, next) => {
+  try {
+    const projectId = String(req.body?.project_id || req.body?.projectId || '').trim();
+    if (!projectId) return res.status(400).json({ error: 'project_id is required' });
+    const id = randomUUID();
+${fieldExtractions}
+    const result = await query(
+      \`INSERT INTO ${SHARED_TABLE_NAME} (${insertFields.join(', ')}) VALUES (${insertPlaceholders}) RETURNING *\`,
+      [${insertValues}]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    next(error);
+  }
+});`);
+  }
+
+  if (methods.some((m) => m.toUpperCase() === 'PUT' || m.toUpperCase() === 'PATCH')) {
+    const updateFields = fields.filter((f) => !['id', 'project_id', 'created_at'].includes(f));
+    const setClauses = updateFields.map((f, i) => `${f} = $${i + 2}`).join(', ');
+    handlers.push(`router.put('/:id', async (req, res, next) => {
+  try {
+    const projectId = String(req.body?.project_id || req.body?.projectId || '').trim();
+    if (!projectId) return res.status(400).json({ error: 'project_id is required' });
+${updateFields.map((f) => `    const ${f} = req.body?.${f};`).join('\n')}
+    const result = await query(
+      \`UPDATE ${SHARED_TABLE_NAME} SET ${setClauses} WHERE id = $1 AND project_id = $${updateFields.length + 2} RETURNING *\`,
+      [req.params.id, ${updateFields.join(', ')}, projectId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    next(error);
+  }
+});`);
+  }
+
+  if (methods.some((m) => m.toUpperCase() === 'DELETE')) {
+    handlers.push(`router.delete('/:id', async (req, res, next) => {
+  try {
+    const projectId = String(req.query.project_id || req.query.projectId || '').trim();
+    if (!projectId) return res.status(400).json({ error: 'project_id is required' });
+    const result = await query(
+      \`DELETE FROM ${SHARED_TABLE_NAME} WHERE id = $1 AND project_id = $2 RETURNING id\`,
+      [req.params.id, projectId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ deleted: result.rows[0].id });
+  } catch (error) {
+    next(error);
+  }
+});`);
+  }
+
   return {
     path: routeFile,
     content: `import express from 'express';
@@ -552,36 +627,50 @@ import { randomUUID } from 'crypto';
 import { query } from '../db/database.ts';
 
 const router = express.Router();
-const tableName = '${SHARED_TABLE_NAME}';
 
-router.get('/', async (req, res, next) => {
-  try {
-    const projectId = String(req.query.project_id || req.query.projectId || '').trim();
-    if (!projectId) return res.status(400).json({ error: 'project_id is required' });
-    const result = await query(\`SELECT * FROM \${tableName} WHERE project_id = $1 ORDER BY created_at DESC LIMIT 100\`, [projectId]);
-    res.json({ items: result.rows });
-  } catch (error) {
-    next(error);
-  }
-});
-
-router.post('/', async (req, res, next) => {
-  try {
-    const projectId = String(req.body?.project_id || req.body?.projectId || '').trim();
-    if (!projectId) return res.status(400).json({ error: 'project_id is required' });
-    const id = randomUUID();
-    const name = String(req.body?.name || 'Untitled');
-    const data = req.body || {};
-    const result = await query(\`INSERT INTO \${tableName} (id, project_id, name, data) VALUES ($1, $2, $3, $4) RETURNING *\`, [id, projectId, name, data]);
-    res.status(201).json(result.rows[0]);
-  } catch (error) {
-    next(error);
-  }
-});
+${handlers.join('\n\n')}
 
 export default router;
-`
+`,
   };
+}
+
+async function backendRouteFile(
+  resource: NonNullable<BackendManifest['resources']>[number],
+  llmProxy: LLMProxyClient,
+  model: string
+): Promise<GeneratedFile> {
+  const routeFile = sanitizeRoutePath('', resource.name || 'resource');
+  const methods = Array.isArray(resource.methods) && resource.methods.length > 0 ? resource.methods : ['GET', 'POST'];
+  const systemPrompt = `Generate a Node.js + Express + TypeScript route file for the resource: "${resource.name}".
+Purpose: ${resource.purpose || resource.name}
+Route path registered by caller: ${resource.routePath || '/api/' + resource.name}
+HTTP methods to implement: ${methods.join(', ')}
+Fields: ${Array.isArray(resource.fields) && resource.fields.length > 0 ? resource.fields.join(', ') : 'flexible — infer from purpose'}
+Database table: ${SHARED_TABLE_NAME} (shared multi-tenant table with project_id column)
+Table columns: id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, data JSONB NOT NULL DEFAULT '{}', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+
+RULES:
+- Always require and validate project_id from req.query (GET/DELETE) or req.body (POST/PUT/PATCH)
+- Use parameterized queries — never string-interpolate user values into SQL
+- Return domain-appropriate response keys (e.g. { orders: [...] } not { items: [...] }) matching the resource name
+- For POST: use randomUUID() for id
+- For GET: ORDER BY created_at DESC LIMIT 100
+- For PUT/PATCH: WHERE id = $1 AND project_id = $N, return 404 if not found
+- For DELETE: WHERE id = $1 AND project_id = $2, return 404 if not found
+- Import { query } from '../db/database.ts'
+- Import { randomUUID } from 'crypto' (only if POST/PUT is implemented)
+- Export as: export default router
+
+Return ONLY JSON: {"path":"${routeFile}","content":"complete TypeScript Express route file"}`;
+
+  try {
+    const parsed = await generateJson(llmProxy, model, `backendRoute:${resource.name}`, systemPrompt, { resource }, 2000);
+    return validateGeneratedFile(parsed, routeFile, 'backend', `backendRoute:${resource.name}`);
+  } catch (err) {
+    logWarn(`backendRouteFile:llm-failed:${resource.name}`, { error: (err as Error).message });
+    return backendRouteFileStub(resource);
+  }
 }
 
 function fallbackBackendManifest(): BackendManifest {
@@ -661,7 +750,7 @@ Return ONLY valid JSON with this exact shape (no markdown fences):
 }
 
 RULES:
-- Always include 2-4 components in the components array that directly implement the user's requested features
+- Include all components needed to fully implement the user's requested features (there is no upper limit — match the scope of the request)
 - Component paths MUST start with src/components/ and end with .jsx
 - If auth is required, include a Login/Auth component${authRequired ? ' — always include authentication UI' : ''}
 - If there are specific pages requested (${pages.join(', ')}), map each to a component
@@ -888,7 +977,7 @@ function buildBackendFilesFromManifest(manifest: BackendManifest): GeneratedFile
   const files = backendRouteFallbackFiles(manifest);
   const resources = (manifest.resources || []).slice(0, MAX_BACKEND_ROUTES);
   for (const resource of resources) {
-    files.push(backendRouteFile(resource));
+    files.push(backendRouteFileStub(resource));
   }
   return files;
 }
@@ -941,13 +1030,13 @@ async function generateBackendFiles(systemDesign: any, requirements: any, projec
     ...(manifest.resources || []).map((resource) => (async () => {
       const expectedPath = sanitizeRoutePath('', resource.name || 'resource');
       try {
-        const route = backendRouteFile(resource);
+        const route = await backendRouteFile(resource, llmProxy, model);
         setFile(partial, route);
         events?.emit({ type: 'FILE_WRITTEN', filePath: route.path, message: `Wrote ${route.path}`, payload: { path: route.path, content: route.content } });
         return { kind: 'route', ok: true, path: route.path, resource: resource.name, expectedPath };
       } catch (err) {
         logWarn('codeGenerationAgent:route-fallback', { resource: resource.name, expectedPath, error: (err as Error).message });
-        const route = backendRouteFallbackFiles(manifest).find((file) => file.path === expectedPath) || backendRouteFile(resource);
+        const route = backendRouteFallbackFiles(manifest).find((file) => file.path === expectedPath) || backendRouteFileStub(resource);
         setFile(partial, route);
         events?.emit({ type: 'FILE_WRITTEN', filePath: route.path, message: `Wrote fallback ${route.path}`, payload: { path: route.path, content: route.content } });
         return { kind: 'route', ok: false, path: route.path, resource: resource.name, expectedPath, error: (err as Error).message };
@@ -1006,7 +1095,12 @@ export async function codeGenerationAgent(input: any) {
     }
 
     const scaffoldFiles = frontendScaffold(manifest);
-    const componentSpecs = (manifest.components || []).slice(0, MAX_COMPONENTS);
+    // When uiSpec provides the authoritative component list, honour it fully.
+    // Otherwise cap at MAX_COMPONENTS to bound LLM-generated lists that may be unbounded.
+    const hasUiSpecComponents = Array.isArray(uiSpec?.components) && uiSpec.components.length > 0;
+    const componentSpecs = hasUiSpecComponents
+      ? (manifest.components || [])
+      : (manifest.components || []).slice(0, MAX_COMPONENTS);
 
     const generatedDependencies = new Map<string, string>();
     const componentFiles: GeneratedFile[] = [];
@@ -1130,9 +1224,3 @@ export async function codeGenerationAgent(input: any) {
   };
 }
 
-function escapeJsxText(value: string | undefined, fallback: string): string {
-  return String(value || fallback)
-    .replace(/&/g, '&')
-    .replace(/</g, '<')
-    .replace(/>/g, '>');
-}

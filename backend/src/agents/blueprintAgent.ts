@@ -119,7 +119,9 @@ export function generateBlueprint(structuredSpec: StructuredSpec, systemDesign: 
       routes: structuredSpec.apiContracts.map((route) => route.path),
     },
     database: {
-      tables: structuredSpec.backend_required ? ['items'] : [],
+      tables: structuredSpec.backend_required
+        ? uniqueSorted(structuredSpec.apiContracts.map((c) => c.tableName).filter((t): t is string => Boolean(t)))
+        : [],
     },
     structure: {
       frontend: {

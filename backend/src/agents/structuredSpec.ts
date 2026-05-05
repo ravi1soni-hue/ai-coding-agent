@@ -470,15 +470,17 @@ export function compileStructuredSpec(input: {
     const endpoint = normalizePathValue(assertString(api.endpoint ?? api.path ?? `/api/resource-${index + 1}`, `uiSpec.apiContract[${index}].endpoint`));
     const name = toPascalCase(String(api.name ?? endpoint.replace(/^\/api\//, '')));
     const routeSlug = endpoint.replace(/^\/api\//, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '') || `resource-${index + 1}`;
+    const rawPurpose = typeof api.purpose === 'string' && api.purpose.trim() ? api.purpose.trim() : null;
+    const rawQueryNotes = typeof api.queryNotes === 'string' && api.queryNotes.trim() ? api.queryNotes.trim() : null;
     apiContracts.push({
       name,
       path: endpoint,
       method: assertString(api.method ?? 'GET', `uiSpec.apiContract[${index}].method`) as StructuredApiContract['method'],
-      purpose: assertString(api.requestShape || api.responseShape ? 'API contract' : 'API', `uiSpec.apiContract[${index}].purpose`),
+      purpose: rawPurpose ?? (endpoint.replace(/^\/api\//, '') + ' resource operations'),
       backendRequired,
       routeFile: `backend/src/routes/${routeSlug}.ts`,
       tableName: 'items',
-      queryNotes: 'Deterministic project-scoped route',
+      queryNotes: rawQueryNotes ?? `Project-scoped CRUD for ${name}`,
     });
   }
 
@@ -487,9 +489,9 @@ export function compileStructuredSpec(input: {
     { path: 'index.html', kind: 'entry', purpose: 'Frontend HTML entry', dependsOn: ['package.json'] },
     { path: 'vite.config.js', kind: 'config', purpose: 'Vite configuration', dependsOn: ['package.json'] },
     { path: 'src/main.jsx', kind: 'entry', purpose: 'React bootstrap', dependsOn: ['src/App.jsx', 'src/index.css'] },
-    { path: 'src/App.jsx', kind: 'entry', purpose: 'Application composition root', dependsOn: componentSchema.map((component) => component.filePath) },
+    { path: 'src/App.jsx', kind: 'entry', purpose: 'Application composition root', dependsOn: componentSchema.filter((c) => c.name !== 'App').map((c) => c.filePath) },
     { path: 'src/index.css', kind: 'style', purpose: 'Global stylesheet', dependsOn: ['src/App.jsx'] },
-    ...componentSchema.map((component) => ({
+    ...componentSchema.filter((component) => component.name !== 'App').map((component) => ({
       path: component.filePath,
       kind: 'component' as const,
       purpose: component.purpose,

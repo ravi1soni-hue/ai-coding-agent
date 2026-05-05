@@ -229,7 +229,7 @@ Generate a JSON array with this exact shape (no markdown fences):
 ]
 
 RULES:
-- Create 2-4 components matching the actual requirements
+- Create as many components as needed to fully implement the requirements (typically 3-8)
 - Each component must have clear, specific props
 - Dependencies should be other component names (for leaf-first generation)
 - renderLogic should describe actual UI output, not generic placeholders
@@ -239,7 +239,7 @@ RULES:
       llmProxy,
       [{ role: 'system', content: componentInterfacePrompt }, { role: 'user', content: '' }],
       model,
-      2500,
+      4000,
       2,
       'componentInterfaces'
     );
@@ -308,7 +308,7 @@ RULES:
       llmProxy,
       [{ role: 'system', content: dataFlowPrompt }, { role: 'user', content: '' }],
       model,
-      2000,
+      3000,
       2,
       'dataFlow'
     );
@@ -361,7 +361,7 @@ RULES:
       llmProxy,
       [{ role: 'system', content: apiContractPrompt }, { role: 'user', content: '' }],
       model,
-      2000,
+      2500,
       2,
       'apiContract'
     );
@@ -412,7 +412,7 @@ RULES:
       llmProxy,
       [{ role: 'system', content: layoutPrompt }, { role: 'user', content: '' }],
       model,
-      1500,
+      2000,
       2,
       'layoutStructure'
     );
