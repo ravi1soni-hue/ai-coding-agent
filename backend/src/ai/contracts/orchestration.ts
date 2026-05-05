@@ -3,6 +3,7 @@ export type DeploymentMode = 'frontend-only' | 'full-stack';
 export type OrchestrationState =
   | 'requirements'
   | 'clarification'
+  | 'confirmation'
   | 'system_design'
   | 'ui_spec'
   | 'blueprint'
@@ -10,6 +11,7 @@ export type OrchestrationState =
   | 'code_generation'
   | 'testing'
   | 'deployment'
+  | 'modification'
   | 'done'
   | 'failed';
 
@@ -97,6 +99,18 @@ export type ClarificationMemory = {
   askedQuestions: string[];
 };
 
+export type ConfirmationMemory = {
+  confirmed: boolean;
+  summary?: unknown;
+  userResponse?: string;
+};
+
+export type ModificationMemory = {
+  modification: string;
+  appliedAt: string;
+  affectedStages: OrchestrationState[];
+};
+
 export type SystemDesignMemory = {
   frontend: unknown;
   backend: unknown;
@@ -170,6 +184,8 @@ export type ProjectMemory = {
   deploymentMode: DeploymentMode;
   requirements?: RequirementsMemory;
   clarifications?: ClarificationMemory;
+  confirmation?: ConfirmationMemory;
+  modification?: ModificationMemory;
   systemDesign?: SystemDesignMemory;
   uiSpec?: UISpecMemory;
   blueprint?: BlueprintMemory;
@@ -200,4 +216,43 @@ export type OrchestrationResult = {
   backendUrl: string | null;
   status: 'completed' | 'partial' | 'failed';
   memory: ProjectMemory;
+};
+
+export type OrchestrationEmitEvent =
+  | { type: 'progress'; stage: OrchestrationState; percent?: number; message?: string }
+  | { type: 'stage_start'; stage: OrchestrationState; message?: string }
+  | { type: 'stage_complete'; stage: OrchestrationState; output?: unknown }
+  | { type: 'stage_error'; stage: OrchestrationState; issue: OrchestrationIssue }
+  | { type: 'stream'; stage: OrchestrationState; token: string }
+  | { type: 'info'; stage: OrchestrationState; message: string }
+  | { type: 'clarification_request'; stage: OrchestrationState; questions: string[] }
+  | { type: 'confirmation_request'; stage: OrchestrationState; summary: unknown }
+  | { type: 'file_generated'; stage: OrchestrationState; filePath: string }
+  | { type: 'done'; projectId: string; frontendUrl: string | null; backendUrl: string | null }
+  | { type: 'failed'; projectId: string; issues: OrchestrationIssue[] };
+
+export type OrchestrationAdapter = {
+  emit?: (event: OrchestrationEmitEvent) => void;
+};
+
+export type CodeRevisionRecord = {
+  projectId: string;
+  files: Array<{ path: string; content: string }>;
+  patch?: string;
+};
+
+export type DeploymentRecord = {
+  projectId: string;
+  frontendUrl: string | null;
+  backendUrl: string | null;
+  raw?: unknown;
+};
+
+export type PersistenceAdapter = {
+  saveSnapshot?: (memory: ProjectMemory) => Promise<void> | void;
+  saveCheckpoint?: (checkpoint: OrchestrationCheckpoint) => Promise<void> | void;
+  loadCheckpoints?: (projectId: string) => Promise<OrchestrationCheckpoint[]> | OrchestrationCheckpoint[];
+  appendEvent?: (event: OrchestrationEvent) => Promise<void> | void;
+  saveCodeRevision?: (input: CodeRevisionRecord) => Promise<void> | void;
+  saveDeployment?: (input: DeploymentRecord) => Promise<void> | void;
 };

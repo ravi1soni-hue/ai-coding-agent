@@ -3,8 +3,10 @@ import type {
   BlueprintMemory,
   ClarificationMemory,
   CodeMemory,
+  ConfirmationMemory,
   DeploymentMemory,
   ExecutionPlan,
+  ModificationMemory,
   OrchestrationCheckpoint,
   OrchestrationEvent,
   OrchestrationIssue,
@@ -111,6 +113,14 @@ export function setRequirements(memory: ProjectMemory, requirements: Requirement
 
 export function setClarifications(memory: ProjectMemory, clarifications: ClarificationMemory): void {
   memory.clarifications = clarifications;
+}
+
+export function setConfirmation(memory: ProjectMemory, confirmation: ConfirmationMemory): void {
+  memory.confirmation = confirmation;
+}
+
+export function setModification(memory: ProjectMemory, modification: ModificationMemory): void {
+  memory.modification = modification;
 }
 
 export function setSystemDesign(memory: ProjectMemory, systemDesign: SystemDesignMemory): void {

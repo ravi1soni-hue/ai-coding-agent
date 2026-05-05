@@ -44,9 +44,11 @@ import {
 } from './recovery';
 import { resolveRecoveryRoute, type PipelineStage } from '../../orchestration/pipelineStateMachine';
 import type {
+  OrchestrationAdapter,
   OrchestrationCommand,
   OrchestrationResult,
   OrchestrationState,
+  PersistenceAdapter,
   ProjectMemory,
   RetryPolicy,
   StageResult,
@@ -55,6 +57,7 @@ import type {
 const DEFAULT_POLICY: Record<OrchestrationState, RetryPolicy> = {
   requirements: { maxAttempts: 2, maxFixAttempts: 1, relaxOnRetry: true, allowFallback: true, allowUserQuestion: false },
   clarification: { maxAttempts: 2, maxFixAttempts: 1, relaxOnRetry: true, allowFallback: true, allowUserQuestion: true },
+  confirmation: { maxAttempts: 1, maxFixAttempts: 0, relaxOnRetry: false, allowFallback: true, allowUserQuestion: true },
   system_design: { maxAttempts: 2, maxFixAttempts: 2, relaxOnRetry: true, allowFallback: true, allowUserQuestion: false },
   ui_spec: { maxAttempts: 2, maxFixAttempts: 2, relaxOnRetry: true, allowFallback: true, allowUserQuestion: false },
   blueprint: { maxAttempts: 2, maxFixAttempts: 2, relaxOnRetry: true, allowFallback: true, allowUserQuestion: false },
@@ -62,12 +65,9 @@ const DEFAULT_POLICY: Record<OrchestrationState, RetryPolicy> = {
   code_generation: { maxAttempts: 2, maxFixAttempts: 3, relaxOnRetry: true, allowFallback: true, allowUserQuestion: false },
   testing: { maxAttempts: 3, maxFixAttempts: 3, relaxOnRetry: true, allowFallback: true, allowUserQuestion: false },
   deployment: { maxAttempts: 2, maxFixAttempts: 2, relaxOnRetry: true, allowFallback: true, allowUserQuestion: false },
+  modification: { maxAttempts: 2, maxFixAttempts: 2, relaxOnRetry: true, allowFallback: true, allowUserQuestion: false },
   done: { maxAttempts: 1, maxFixAttempts: 0, relaxOnRetry: false, allowFallback: true, allowUserQuestion: false },
   failed: { maxAttempts: 1, maxFixAttempts: 0, relaxOnRetry: false, allowFallback: true, allowUserQuestion: false },
-};
-
-export type OrchestrationAdapter = {
-  emit?: (event: { type: string; message?: string; token?: string; filePath?: string; payload?: unknown }) => void;
 };
 
 type RequirementAnalysisShape = RequirementAnalysisOutput;
@@ -289,7 +289,12 @@ async function selfHealWithCodeGeneration(
   recordFix(memory, 'code_generation', 'Applied automated repair after test failure');
 }
 
-export async function runAIOrchestration(command: OrchestrationCommand, adapter: OrchestrationAdapter = {}): Promise<OrchestrationResult> {
+export async function runAIOrchestration(
+  command: OrchestrationCommand,
+  adapter: OrchestrationAdapter = {},
+  persistence: PersistenceAdapter = {}
+): Promise<OrchestrationResult> {
+  void persistence;
   const sessionId = command.sessionId || command.projectId;
   const deploymentMode = command.step === 'deployment' ? 'full-stack' : 'frontend-only';
   const memory = createInitialMemory({
@@ -515,11 +520,9 @@ export async function runAIOrchestration(command: OrchestrationCommand, adapter:
 
   adapter.emit?.({
     type: 'done',
-    payload: {
-      projectId: command.projectId,
-      frontendUrl: memory.deployment?.frontendUrl || null,
-      backendUrl: memory.deployment?.backendUrl || null,
-    },
+    projectId: command.projectId,
+    frontendUrl: memory.deployment?.frontendUrl || null,
+    backendUrl: memory.deployment?.backendUrl || null,
   });
 
   finalizeMemory(memory, true);
