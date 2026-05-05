@@ -1,6 +1,7 @@
 import { getModelConfigForTask } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { debug, error as logError } from '../utils/logger';
+import type { ProjectBlueprint } from './blueprintContract';
 
 export type ClarificationContext = {
   clarificationAnswers: Record<string, string>;
@@ -8,6 +9,23 @@ export type ClarificationContext = {
   modification?: string;
   lastQuestion?: string;
   lastAnswer?: string;
+};
+
+export type BrainState = {
+  activeState: string;
+  projectSpec?: unknown;
+  blueprint?: ProjectBlueprint;
+  consistencyScore?: number;
+  domain?: string;
+  transitions?: string[];
+  metadata?: Record<string, unknown>;
+};
+
+export type StateAwareAgentResult<T> = {
+  updatedState: Partial<BrainState>;
+  nextStateProposal: string;
+  consistencyScore: number;
+  output: T;
 };
 
 export type ClarificationOutput = {
@@ -56,34 +74,39 @@ function filterAskedQuestions(questions: string[], askedQuestions: string[], cla
   });
 }
 
-function shouldAskMoreQuestions(requirements: any, projectSpec: any): boolean {
+function normalizeText(value: unknown): string {
+  return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function calculateSemanticGap(requirements: any, projectSpec: any): number {
   const text = JSON.stringify({ requirements, projectSpec }).toLowerCase();
+  const positive =
+    (/\bpricing page|landing page|dashboard|admin panel|checkout|portfolio|blog|store|saas|ecommerce|marketing site|single page|multi page\b/.test(text) ? 0.2 : 0) +
+    (/\breact|vite|frontend|backend|api|database|auth|postgres|express\b/.test(text) ? 0.2 : 0) +
+    (/\btitle|pages|components|routes|layout|navigation\b/.test(text) ? 0.15 : 0);
+  const negative =
+    (/\bmaybe|some|various|several|etc|and\/or|whatever|something\b/.test(text) ? 0.15 : 0) +
+    (/\btbd|todo|placeholder|unspecified|unknown\b/.test(text) ? 0.2 : 0) +
+    (/\bnot sure|open to suggestions|need help deciding\b/.test(text) ? 0.15 : 0);
+  return Math.max(0, Math.min(1, 0.45 + positive - negative));
+}
 
-  // Ask more questions when the request is specific enough to support follow-up
-  // product decisions, but still lacks a fully consolidated spec.
-  const ambiguitySignals = [
-    /\b(maybe|some|various|several|etc|and\/or|whatever|something)\b/,
-    /\b(soon|later|flexible|optional|possibly|ideally)\b/,
-    /\b(tbd|todo|placeholder|unspecified|unknown)\b/,
-    /\b(what should|which should|how many|how much|which style|what kind)\b/,
-    /\b(need help deciding|open to suggestions|not sure)\b/,
-  ];
-
-  const hasStrongDirectionalSignals =
-    /\b(pricing page|landing page|dashboard|admin panel|checkout|portfolio|blog|store|saas|ecommerce|marketing site|single page|multi page)\b/.test(text) ||
-    /\b(monthly|yearly|toggle|accordion|cards|table|faq|cta|theme|dark mode|light mode|responsive)\b/.test(text) ||
-    /\b(react|vite|frontend|backend|api|database|auth|postg(res|re)|express)\b/.test(text);
-
+function shouldAskMoreQuestions(requirements: any, projectSpec: any): boolean {
   const askedQuestions = Array.isArray(projectSpec?.askedQuestions) ? projectSpec.askedQuestions.length : 0;
   const clarificationAnswers = projectSpec?.clarificationAnswers && typeof projectSpec.clarificationAnswers === 'object'
     ? Object.keys(projectSpec.clarificationAnswers).length
     : 0;
+  const semanticGap = calculateSemanticGap(requirements, projectSpec);
+  if (askedQuestions === 0 && clarificationAnswers === 0 && semanticGap > 0.7) return true;
+  return semanticGap < 0.55;
+}
 
-  if (hasStrongDirectionalSignals && askedQuestions === 0 && clarificationAnswers === 0) {
-    return true;
-  }
-
-  return ambiguitySignals.some((pattern) => pattern.test(text));
+function transitionTo(currentState: string, nextState: string): string {
+  const normalizedCurrent = normalizeText(currentState);
+  const normalizedNext = normalizeText(nextState);
+  if (!normalizedNext) return 'clarification_required';
+  if (!normalizedCurrent) return normalizedNext;
+  return normalizedNext;
 }
 
 function buildClarificationPrompt(input: any, projectSpec: any): string {
@@ -117,33 +140,13 @@ Rules:
 - no markdown, no prose`;
 }
 
-export async function clarificationAgent(input: any): Promise<ClarificationOutput> {
+export async function clarificationAgent(input: any): Promise<StateAwareAgentResult<ClarificationOutput>> {
   debug('clarificationAgent', { input });
   if (!input?.requirements) throw new Error('Input with requirements required');
 
   const clarificationAnswers: Record<string, string> = input.clarificationAnswers || {};
   const askedQuestions: string[] = Array.isArray(input.askedQuestions) ? input.askedQuestions : [];
-
-  // TEMP: single fixed question — ask once, then confirm on next call
-  const FIXED_QUESTION = 'Please share any additional details about your project — features, pages, data, user flows, integrations, or design preferences — so we can build exactly what you need.';
-  const alreadyAnswered = FIXED_QUESTION in clarificationAnswers || askedQuestions.includes(FIXED_QUESTION);
-  if (!alreadyAnswered) {
-    return {
-      questions: [FIXED_QUESTION],
-      confirmed: false,
-      done: false,
-      context: { clarificationAnswers, askedQuestions, modification: input.modification, lastQuestion: FIXED_QUESTION, lastAnswer: input.lastAnswer },
-    };
-  }
-  return {
-    questions: [],
-    confirmed: true,
-    done: true,
-    context: { clarificationAnswers, askedQuestions, modification: input.modification, lastQuestion: input.lastQuestion, lastAnswer: input.lastAnswer },
-  };
-
-  const { model, apiKey } = getModelConfigForTask('clarification');
-  const llmProxy = new LLMProxyClient({ apiKey });
+  const activeState = String(input.activeState || input.globalState?.activeState || 'clarification');
   const projectSpec = input.projectSpec || null;
   const context: ClarificationContext = {
     clarificationAnswers,
@@ -153,6 +156,29 @@ export async function clarificationAgent(input: any): Promise<ClarificationOutpu
     lastAnswer: input.lastAnswer,
   };
 
+  if (!['clarification', 'requirements'].includes(activeState)) {
+    const output: ClarificationOutput = {
+      questions: [],
+      confirmed: false,
+      done: false,
+      context,
+    };
+    return {
+      updatedState: {
+        activeState,
+        domain: 'clarification',
+        consistencyScore: 0,
+        transitions: [...(input.globalState?.transitions || []), `blocked:${activeState}`],
+        metadata: { reason: 'gate_closed' },
+      },
+      nextStateProposal: transitionTo(activeState, 'clarification_required'),
+      consistencyScore: 0,
+      output,
+    };
+  }
+
+  const { model, apiKey } = getModelConfigForTask('clarification');
+  const llmProxy = new LLMProxyClient({ apiKey });
   const systemPrompt = buildClarificationPrompt(input, projectSpec);
 
   const userPrompt = JSON.stringify({
@@ -193,15 +219,31 @@ export async function clarificationAgent(input: any): Promise<ClarificationOutpu
         throw new Error('clarificationAgent: confirmed=true cannot include questions');
       }
 
+      const semanticGap = calculateSemanticGap(input.requirements, projectSpec);
       const shouldContinue = shouldAskMoreQuestions(input.requirements, projectSpec);
       const resolvedQuestions = shouldContinue ? questions : [];
       const resolvedConfirmed = resolvedQuestions.length === 0;
 
-      return {
+      const output: ClarificationOutput = {
         questions: resolvedQuestions,
         confirmed: resolvedConfirmed,
         done: resolvedConfirmed,
         context,
+      };
+
+      const nextStateProposal = resolvedConfirmed ? transitionTo(activeState, 'system_design') : transitionTo(activeState, 'clarification_required');
+
+      return {
+        updatedState: {
+          activeState: nextStateProposal,
+          domain: 'clarification',
+          consistencyScore: semanticGap,
+          transitions: [...(input.globalState?.transitions || []), `clarification:${activeState}->${nextStateProposal}`],
+          metadata: { lastQuestion: input.lastQuestion, semanticGap },
+        },
+        nextStateProposal,
+        consistencyScore: semanticGap,
+        output,
       };
     } catch (err) {
       lastError = (err as Error)?.message ?? String(err);

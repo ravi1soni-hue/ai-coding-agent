@@ -15,6 +15,7 @@ export interface BlueprintHandlerResult<T = any> {
   success: boolean;
   data?: T;
   error?: string;
+  fallback?: any;
 }
 
 function estimateBlueprintTimeoutMs(input: BlueprintInput): number {
@@ -47,8 +48,9 @@ export async function handleBlueprint(input: BlueprintInput): Promise<BlueprintH
       timeoutMs,
       'Blueprint generation'
     );
-    debug('handleBlueprint:done', { projectId: input.projectId, title: result.title, fileCount: (result.files || []).length });
-    return { success: true, data: result };
+    const blueprint = result.output;
+    debug('handleBlueprint:done', { projectId: input.projectId, title: blueprint?.title, fileCount: (blueprint?.files || []).length });
+    return { success: true, data: blueprint, fallback: result.updatedState };
   } catch (err) {
     error('handleBlueprint', err);
     const raw = String((err as any)?.message || '').trim();

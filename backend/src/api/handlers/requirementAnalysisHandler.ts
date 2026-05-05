@@ -31,7 +31,7 @@ export async function handleRequirementAnalysis(
         'Requirement analysis'
       );
       debug('handleRequirementAnalysis:done', { projectId: input.projectId });
-      return { success: true, data: result };
+      return { success: true, data: result.output, fallback: result.updatedState };
     } catch (err) {
       if (attempt < MAX_ATTEMPTS) {
         debug('handleRequirementAnalysis:retry', {

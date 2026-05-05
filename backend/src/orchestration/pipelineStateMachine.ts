@@ -18,15 +18,34 @@ export const PIPELINE_STAGES = [
   'deploy_modification',
   'done',
   'done_modification',
+  'failed',
 ] as const;
 
 export type PipelineStage = typeof PIPELINE_STAGES[number];
 
+export type ErrorRepairLevel = 1 | 2 | 3;
+
+export type RecoveryRoute = {
+  level: ErrorRepairLevel;
+  targetStage: PipelineStage;
+  reason: string;
+};
+
 export const STAGE_ALIASES: Record<string, PipelineStage> = {
   codeGeneration: 'codeGen',
+  code_gen: 'codeGen',
+  codegen: 'codeGen',
   deployment: 'deploy',
+  systemDesign: 'systemDesign',
+  system_design: 'systemDesign',
+  uiSpec: 'uiSpec',
+  ui_spec: 'uiSpec',
+  testFix: 'testFix',
+  test_fix: 'testFix',
   start: 'init',
   complete: 'done',
+  failed: 'failed',
+  done: 'done',
 };
 
 export function normalizePipelineStage(stage: string | undefined | null): PipelineStage {
@@ -74,4 +93,36 @@ export function stageGroup(stage: string | undefined | null): 'analysis' | 'desi
     return 'delivery';
   }
   return 'terminal';
+}
+
+export function resolveRecoveryTarget(level: ErrorRepairLevel): PipelineStage {
+  if (level === 1) return 'codeGen';
+  if (level === 2) return 'blueprint';
+  return 'systemDesign';
+}
+
+export function resolveRecoveryRoute(stage: string | undefined | null, level: ErrorRepairLevel): RecoveryRoute {
+  const normalized = normalizePipelineStage(stage);
+
+  if (level === 1) {
+    return {
+      level,
+      targetStage: normalized === 'deploy' || normalized === 'deploy_modification' ? 'testFix' : 'codeGen',
+      reason: 'syntax_or_missing_file',
+    };
+  }
+
+  if (level === 2) {
+    return {
+      level,
+      targetStage: normalized === 'uiSpec' || normalized === 'uiSpec_modification' ? 'uiSpec' : 'blueprint',
+      reason: 'structural_or_dependency',
+    };
+  }
+
+  return {
+    level,
+    targetStage: 'clarification',
+    reason: 'requirement_mismatch',
+  };
 }

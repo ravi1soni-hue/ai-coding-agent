@@ -220,6 +220,14 @@ export function createSocketServer(server: http.Server) {
       codeGen: any;
       testResult: any;
       deployment: any;
+      brainState: {
+        requirementAnalysis?: any;
+        clarification?: any;
+        systemDesign?: any;
+        uiSpec?: any;
+        blueprint?: any;
+        codeGeneration?: any;
+      };
       context: Record<string, any>;
       modification?: string;
       modificationContext?: any;
@@ -249,6 +257,14 @@ export function createSocketServer(server: http.Server) {
       codeGen: snapshot?.code_gen,
       testResult: snapshot?.test_result,
       deployment: snapshot?.deployment,
+      brainState: {
+        requirementAnalysis: snapshot?.requirements,
+        clarification: snapshot?.clarifications,
+        systemDesign: snapshot?.system_design,
+        uiSpec: snapshot?.ui_spec,
+        blueprint: undefined,
+        codeGeneration: snapshot?.code_gen,
+      },
       context: {},
       modification: undefined,
       modificationContext: undefined,
@@ -266,30 +282,61 @@ export function createSocketServer(server: http.Server) {
 
     // Reset completed projects so a new message starts fresh
     if (session.step === 'done' || session.step === 'done_modification') {
-      setStep('init');
+      void setStep('init', 'Restarting completed session');
       session.progress = 0;
       session.progressStages = {};
       session.stepRetries = {};
     }
 
-    function setStep(next: PipelineStage) {
-      session.step = next;
-      void persistBlackboardState();
+    async function persistStageState(stage: PipelineStage, message: string, payload?: unknown): Promise<void> {
+      await Promise.allSettled([
+        updateProjectSnapshot({
+          projectId,
+          userId: authedUser.id,
+          status: stage === 'done' ? 'completed' : stage === 'failed' ? 'failed' : 'active',
+          currentStep: stage,
+          progress: session.progress,
+          requirements: session.requirements,
+          clarifications: session.clarifications,
+          confirmation: session.confirmation,
+          systemDesign: session.systemDesign,
+          uiSpec: session.uiSpec,
+          structuredSpec: session.uiSpec,
+          blueprint: session.blueprint,
+          codeGen: session.codeGen,
+          testResult: session.testResult,
+          deployment: session.deployment,
+        }),
+        persistBlackboardState(),
+        appendProjectEvent({
+          projectId,
+          userId: authedUser.id,
+          eventType: 'state_transition',
+          role: 'system',
+          message,
+          payload: { stage, payload },
+        }),
+      ]);
     }
 
-    function advanceStep(expected: PipelineStage, next: PipelineStage) {
+    async function setStep(next: PipelineStage, message = `Transitioned to ${next}`, payload?: unknown) {
+      session.step = next;
+      await persistStageState(next, message, payload);
+    }
+
+    async function advanceStep(expected: PipelineStage, next: PipelineStage, message?: string, payload?: unknown) {
       if (session.step === expected) {
-        setStep(next);
+        await setStep(next, message, payload);
       }
     }
 
-    function pauseStep(next: PipelineStage) {
-      setStep(next);
+    async function pauseStep(next: PipelineStage, message?: string, payload?: unknown) {
+      await setStep(next, message, payload);
     }
 
-    function resumeFromCurrentStep() {
+    async function resumeFromCurrentStep() {
       const normalized = normalizePipelineStage(session.step);
-      setStep(normalized);
+      await setStep(normalized, 'Resumed from persisted step');
     }
 
       let clarificationAnswers: Record<string, string> =
@@ -368,6 +415,37 @@ export function createSocketServer(server: http.Server) {
           updatedAt: new Date().toISOString(),
         },
       });
+    }
+
+    async function persistStageSnapshot(stage: string, message: string, payload?: unknown): Promise<void> {
+      await Promise.allSettled([
+        appendProjectEvent({
+          projectId,
+          userId: authedUser.id,
+          eventType: stage,
+          role: 'system',
+          message,
+          payload,
+        }),
+        updateProjectSnapshot({
+          projectId,
+          userId: authedUser.id,
+          status: session.step === 'done' ? 'completed' : session.step === 'failed' ? 'failed' : 'active',
+          currentStep: session.step,
+          progress: session.progress,
+          requirements: session.requirements,
+          clarifications: session.clarifications,
+          confirmation: session.confirmation,
+          systemDesign: session.systemDesign,
+          uiSpec: session.uiSpec,
+          structuredSpec: session.uiSpec,
+          blueprint: session.blueprint,
+          codeGen: session.codeGen,
+          testResult: session.testResult,
+          deployment: session.deployment,
+        }),
+        persistBlackboardState(),
+      ]);
     }
 
     async function rematerializeAndStore(codeGenData: any): Promise<void> {
@@ -475,6 +553,7 @@ export function createSocketServer(server: http.Server) {
       }
 
       session.testResult = tfResult.data;
+      await persistStageSnapshot(flowLabel, 'Build and test succeeded', tfResult.data);
       sendProgress(ws, session, flowLabel, 'Build passed!', 1);
       return true;
     }
@@ -528,6 +607,8 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.requirements = { ...raResult.data, userMessage: userMsg };
+          session.brainState.requirementAnalysis = raResult.fallback || raResult.data;
+          await persistStageSnapshot('requirementAnalysis', 'Requirements analyzed', raResult.data);
           await appendProjectTask({
             projectId,
             userId: authedUser.id,
@@ -580,6 +661,8 @@ export function createSocketServer(server: http.Server) {
           }
 
           session.clarifications = clarResult.data;
+          session.brainState.clarification = clarResult.fallback || clarResult.data;
+          await persistStageSnapshot('clarification', 'Clarification completed', clarResult.data);
           pendingClarificationQuestions = Array.isArray(session.clarifications?.questions) ? [...session.clarifications.questions] : [];
           pendingClarificationIndex = 0;
           debug('socket:clarification', { projectId, questionCount: pendingClarificationQuestions.length });
@@ -615,6 +698,7 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.confirmation = confResult.data;
+          await persistStageSnapshot('confirmation', 'Requirements confirmed', confResult.data);
           const projectSpecAfterConfirmation = buildProjectSpec();
           if (projectSpecAfterConfirmation) {
             assertConsistencyOrThrow(projectSpecAfterConfirmation, { systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint, codeGen: session.codeGen });
@@ -637,8 +721,10 @@ export function createSocketServer(server: http.Server) {
               return;
             }
           session.systemDesign = sdResult.data;
+          await persistStageSnapshot('systemDesign', 'System design generated', sdResult.data);
         } else {
           session.systemDesign = buildFrontendOnlySystemDesign(session.requirements);
+          await persistStageSnapshot('systemDesign', 'Frontend-only system design generated', session.systemDesign);
         }
         const specAfterSystemDesign = buildProjectSpec({ systemDesign: session.systemDesign }, { partial: true });
         if (specAfterSystemDesign) {
@@ -668,6 +754,7 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.uiSpec = uiSpecResult.data;
+          await persistStageSnapshot('uiSpec', 'UI spec generated', uiSpecResult.data);
           const specAfterUiSpec = buildProjectSpec({ systemDesign: session.systemDesign, uiSpec: session.uiSpec }, { partial: true });
           if (specAfterUiSpec) {
             assertConsistencyOrThrow(specAfterUiSpec, { systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint, codeGen: session.codeGen });
@@ -695,6 +782,7 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.blueprint = bpResult.data;
+          await persistStageSnapshot('blueprint', 'Blueprint generated', bpResult.data);
           const specAfterBlueprint = buildProjectSpec({ systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint });
           if (specAfterBlueprint) {
             assertConsistencyOrThrow(specAfterBlueprint, { systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint, codeGen: session.codeGen });
@@ -734,6 +822,7 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.codeGen = cgResult.data;
+          await persistStageSnapshot('codeGen', 'Code generated', cgResult.data);
           const specAfterCodeGen = buildProjectSpec({ systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint });
           if (specAfterCodeGen) {
             assertConsistencyOrThrow(specAfterCodeGen, { systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint, codeGen: session.codeGen });
@@ -790,6 +879,7 @@ export function createSocketServer(server: http.Server) {
           }
 
           session.deployment = deployResult.data;
+          await persistStageSnapshot('deploy_modification', 'Deployment successful for modification', deployResult.data);
           await persistDeployment();
           await persistBlackboardState();
 
@@ -849,12 +939,12 @@ export function createSocketServer(server: http.Server) {
 
         if (clarResult.success && clarResult.data?.question && !clarResult.data?.confirmed) {
           ws.send(JSON.stringify({ type: 'clarification', question: clarResult.data.question }));
-          session.step = 'clarification_wait_modification';
+          await setStep('clarification_wait_modification', 'Awaiting clarification answer for modification', clarResult.data.question);
           session.lastClarificationQuestion = clarResult.data.question;
           return;
         }
 
-        session.step = 'codeGen_modification';
+          await setStep('codeGen_modification', 'Starting modification flow');
 
         // Step 2: Re-run system design if modification is architectural
         sendProgress(ws, session, 'systemDesign', 'Re-evaluating architecture for your changes...');
@@ -969,9 +1059,10 @@ export function createSocketServer(server: http.Server) {
           return;
         }
 
-        session.deployment = deployResult.data;
-        await persistDeployment();
-        await persistBlackboardState();
+          session.deployment = deployResult.data;
+          await persistStageSnapshot('deploy_modification', 'Deployment successful for modification', deployResult.data);
+          await persistDeployment();
+          await persistBlackboardState();
 
         const frontendUrl = session.deployment?.frontend_url || '';
         const backendUrl = session.deployment?.backend_url || '';

@@ -1,5 +1,7 @@
 import path from 'path';
 import { debug } from '../utils/logger';
+import { LLMProxyClient } from './llmProxyClient';
+import { getModelConfigForTask } from './modelRouter';
 import {
   assertBlueprintIntegrationSafety,
   validateProjectBlueprint,
@@ -12,6 +14,23 @@ import {
 } from './blueprintContract';
 import { compileStructuredSpec, validateStructuredSpec, type StructuredSpec } from './structuredSpec';
 
+export type BrainState = {
+  activeState: string;
+  projectSpec?: unknown;
+  blueprint?: ProjectBlueprint;
+  consistencyScore?: number;
+  domain?: string;
+  transitions?: string[];
+  metadata?: Record<string, unknown>;
+};
+
+export type StateAwareAgentResult<T> = {
+  updatedState: Partial<BrainState>;
+  nextStateProposal: string;
+  consistencyScore: number;
+  output: T;
+};
+
 type BlueprintInput = {
   requirements: any;
   systemDesign?: any;
@@ -20,6 +39,8 @@ type BlueprintInput = {
   projectSpec?: any;
   projectId?: string;
   modification?: string;
+  globalState?: BrainState;
+  activeState?: string;
 };
 
 const BLUEPRINT_STACK = { frontend: 'react-vite', backend: 'node-ts', database: 'postgresql' } as const;
@@ -58,6 +79,26 @@ function deriveProjectType(requirements: any, backendRequired: boolean): Project
   if (websiteType === 'landing_page') return 'landing_page';
   if (websiteType === 'dashboard') return 'dashboard';
   return backendRequired ? 'full_app' : 'landing_page';
+}
+
+function transitionTo(currentState: string, nextState: string): string {
+  const normalizedCurrent = String(currentState || '').trim();
+  const normalizedNext = String(nextState || '').trim();
+  if (!normalizedNext) return 'CLARIFICATION_REQUIRED';
+  if (!normalizedCurrent) return normalizedNext;
+  return normalizedNext;
+}
+
+function semanticBlueprintScore(input: { structuredSpec: StructuredSpec; requirements: any; systemDesign?: any; uiSpec?: any }): number {
+  const text = JSON.stringify(input).toLowerCase();
+  const score =
+    0.45 +
+    (/\bproject_id\b/.test(text) ? 0.08 : 0) +
+    (/\bapp\.jsx\b|\bindex\.css\b|\bmain\.jsx\b/.test(text) ? 0.08 : 0) +
+    (/\bapi\b|\broute\b|\bendpoint\b/.test(text) ? 0.08 : 0) +
+    (/\bcomponent\b|\bjsx\b/.test(text) ? 0.08 : 0) +
+    (/\bplaceholder\b|\btodo\b|\btbd\b/.test(text) ? -0.25 : 0);
+  return Math.max(0, Math.min(1, score));
 }
 
 export function generateBlueprint(structuredSpec: StructuredSpec, systemDesign: any, requirements: any): ProjectBlueprint {
@@ -199,9 +240,31 @@ export function generateBlueprint(structuredSpec: StructuredSpec, systemDesign: 
   return assertBlueprintIntegrationSafety(blueprint);
 }
 
-export async function blueprintAgent(input: BlueprintInput): Promise<ProjectBlueprint> {
+export async function blueprintAgent(input: BlueprintInput): Promise<StateAwareAgentResult<ProjectBlueprint>> {
   debug('blueprintAgent:start', { projectId: input.projectId });
   if (!input?.requirements) throw new Error('Blueprint input requires requirements');
+
+  const activeState = String(input.activeState || input.globalState?.activeState || 'blueprint');
+  if (!['blueprint', 'ui_spec', 'system_design', 'execution_plan'].includes(activeState)) {
+    const fallbackBlueprint = generateBlueprint(
+      input.structuredSpec
+        ? validateStructuredSpec(input.structuredSpec)
+        : compileStructuredSpec({ uiSpec: input.uiSpec, systemDesign: input.systemDesign, requirements: input.requirements }),
+      input.systemDesign,
+      input.requirements
+    );
+    return {
+      updatedState: {
+        activeState,
+        domain: 'blueprint',
+        consistencyScore: 0,
+        transitions: [...(input.globalState?.transitions || []), `blocked:${activeState}`],
+      },
+      nextStateProposal: transitionTo(activeState, 'CLARIFICATION_REQUIRED'),
+      consistencyScore: 0,
+      output: fallbackBlueprint,
+    };
+  }
 
   const structuredSpec = input.structuredSpec
     ? validateStructuredSpec(input.structuredSpec)
@@ -212,6 +275,20 @@ export async function blueprintAgent(input: BlueprintInput): Promise<ProjectBlue
       });
 
   const blueprint = generateBlueprint(structuredSpec, input.systemDesign, input.requirements);
-  debug('blueprintAgent:done', { projectId: input.projectId, fileCount: blueprint.files.length, routeCount: blueprint.backendRoutes.length });
-  return blueprint;
+  const semanticScore = semanticBlueprintScore({ structuredSpec, requirements: input.requirements, systemDesign: input.systemDesign, uiSpec: input.uiSpec });
+
+  debug('blueprintAgent:done', { projectId: input.projectId, fileCount: blueprint.files.length, routeCount: blueprint.backendRoutes.length, semanticScore });
+
+  return {
+    updatedState: {
+      activeState: transitionTo(activeState, semanticScore < 0.55 ? 'CLARIFICATION_REQUIRED' : 'UI_SPEC'),
+      domain: 'blueprint',
+      consistencyScore: semanticScore,
+      transitions: [...(input.globalState?.transitions || []), `blueprint:${activeState}`],
+      metadata: { projectId: input.projectId },
+    },
+    nextStateProposal: semanticScore < 0.55 ? 'CLARIFICATION_REQUIRED' : 'UI_SPEC',
+    consistencyScore: semanticScore,
+    output: blueprint,
+  };
 }

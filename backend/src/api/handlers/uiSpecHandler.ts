@@ -15,6 +15,7 @@ export interface HandlerResult<T = any> {
   success: boolean;
   data?: T;
   error?: string;
+  fallback?: any;
 }
 
 const TIMEOUT_MS = 180_000; // 3 minutes
@@ -35,7 +36,7 @@ export async function handleUISpec(input: UISpecInput): Promise<HandlerResult> {
       'UI spec generation'
     );
     debug('handleUISpec:done', { projectId: input.projectId });
-    return { success: true, data: result };
+    return { success: true, data: result.output, fallback: result.updatedState };
   } catch (err) {
     error('handleUISpec', err);
     const message = err instanceof Error ? err.message : 'UI spec generation failed';

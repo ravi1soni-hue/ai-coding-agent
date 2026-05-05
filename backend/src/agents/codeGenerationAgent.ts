@@ -1061,6 +1061,72 @@ async function generateBackendFiles(systemDesign: any, requirements: any, projec
   return files;
 }
 
+export type BrainState = {
+  activeState: string;
+  projectSpec?: unknown;
+  blueprint?: ProjectBlueprint;
+  consistencyScore?: number;
+  domain?: string;
+  transitions?: string[];
+  metadata?: Record<string, unknown>;
+};
+
+export type StateAwareAgentResult<T> = {
+  updatedState: Partial<BrainState>;
+  nextStateProposal: string;
+  consistencyScore: number;
+  output: T;
+};
+
+function normalizeStateName(value: unknown): string {
+  return String(value || '').trim();
+}
+
+function transitionTo(currentState: string, nextState: string): string {
+  const normalizedCurrent = normalizeStateName(currentState);
+  const normalizedNext = normalizeStateName(nextState);
+  if (!normalizedCurrent) return normalizedNext || 'CLARIFICATION_REQUIRED';
+  if (!normalizedNext) return 'CLARIFICATION_REQUIRED';
+  return normalizedNext;
+}
+
+function semanticAlignmentScore(input: {
+  projectSpec?: unknown;
+  blueprint?: ProjectBlueprint;
+  requirements?: unknown;
+  uiSpec?: unknown;
+  output?: unknown;
+}): number {
+  const text = [
+    JSON.stringify(input.projectSpec ?? {}),
+    JSON.stringify(input.blueprint ?? {}),
+    JSON.stringify(input.requirements ?? {}),
+    JSON.stringify(input.uiSpec ?? {}),
+    JSON.stringify(input.output ?? {}),
+  ].join(' ').toLowerCase();
+
+  const score = 0.5
+    + (/\bproject_id\b/.test(text) ? 0.08 : 0)
+    + (/\bapi\b|\broute\b|\bendpoint\b/.test(text) ? 0.08 : 0)
+    + (/\bcomponent\b|\bjsx\b/.test(text) ? 0.08 : 0)
+    + (/\bplaceholder\b|\btodo\b|\btbd\b|\bgeneric text\b/.test(text) ? -0.3 : 0)
+    + (/\bbackend\b|\bpostgres\b|\bdatabase\b/.test(text) ? 0.06 : 0)
+    + (/\bapp\.jsx\b|\bindex\.css\b|\bmain\.jsx\b/.test(text) ? 0.06 : 0);
+
+  return Math.max(0, Math.min(1, score));
+}
+
+function buildBlockedOutput(projectId: string) {
+  return {
+    files: [],
+    patch: '',
+    hasBackend: false,
+    projectId,
+    generationMode: 'state-gated-blocked',
+    project_task_queue: [],
+  };
+}
+
 export async function codeGenerationAgent(input: any) {
   debug('codeGenerationAgent:start', { projectId: input?.projectId });
   if (!input) throw new Error('codeGenerationAgent: input required');
@@ -1223,4 +1289,3 @@ export async function codeGenerationAgent(input: any) {
     project_task_queue: [],
   };
 }
-

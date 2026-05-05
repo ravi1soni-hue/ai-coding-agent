@@ -32,7 +32,7 @@ export async function handleSystemDesign(input: SystemDesignInput): Promise<Hand
       'System design'
     );
     debug('handleSystemDesign:done', { projectId: input.projectId });
-    return { success: true, data: result };
+    return { success: true, data: result.output, fallback: result.updatedState };
   } catch (err) {
     error('handleSystemDesign', err);
     return {

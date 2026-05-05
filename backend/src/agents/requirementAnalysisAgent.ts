@@ -1,8 +1,24 @@
-// Requirement Analysis Agent
-
 import { getModelConfigForTask } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { debug, error as logError } from '../utils/logger';
+import type { ProjectBlueprint } from './blueprintContract';
+
+export type BrainState = {
+  activeState: string;
+  projectSpec?: unknown;
+  blueprint?: ProjectBlueprint;
+  consistencyScore?: number;
+  domain?: string;
+  transitions?: string[];
+  metadata?: Record<string, unknown>;
+};
+
+export type StateAwareAgentResult<T> = {
+  updatedState: Partial<BrainState>;
+  nextStateProposal: string;
+  consistencyScore: number;
+  output: T;
+};
 
 export type RequirementAnalysisOutput = {
   website_type: 'business' | 'portfolio' | 'saas' | 'ecommerce';
@@ -13,45 +29,101 @@ export type RequirementAnalysisOutput = {
   notes?: string;
 };
 
-function shouldForceFrontendOnly(userMessage: string): boolean {
-  const text = userMessage.toLowerCase();
-  const frontendSignals = [
-    'pricing page',
-    'landing page',
-    'marketing page',
-    'static page',
-    'frontend-focused',
-    'front-end focused',
-    'client side',
-    'client-side',
-    'without backend',
-    'no backend',
-    'mock data',
-    'static content',
-  ];
-  const backendSignals = ['api', 'backend', 'database', 'auth', 'login', 'signup', 'webhook', 'admin panel', 'server'];
-  return frontendSignals.some((signal) => text.includes(signal)) && !backendSignals.some((signal) => text.includes(signal));
+function normalizePages(pages: unknown): string[] {
+  if (!Array.isArray(pages)) return [];
+  return Array.from(new Set(pages.map((page) => String(page || '').trim()).filter(Boolean).map((page) => page.replace(/\bpage\b/gi, '').replace(/\s+/g, ' ').trim()).filter(Boolean)));
 }
 
-export async function requirementAnalysisAgent(input: { user_message: string }): Promise<RequirementAnalysisOutput> {
+async function assessSemanticGap(llmProxy: LLMProxyClient, model: string, input: { userMessage: string; result: RequirementAnalysisOutput }): Promise<{ score: number; reason: string; forceFrontendOnly: boolean }> {
+  const prompt = `You are assessing whether a website request and extracted requirements are semantically aligned with a frontend-only, backend-required, or mixed implementation.
+
+Return ONLY JSON with shape:
+{"score":0.0,"reason":"short reason","forceFrontendOnly":true|false}
+
+Heuristics:
+- score closer to 1.0 means strong alignment and low ambiguity.
+- score closer to 0.0 means weak/contradictory requirements.
+- forceFrontendOnly should be true only when the user request clearly implies a static or brochure-style frontend and does not require backend, auth, database, or server state.
+
+User message:
+${input.userMessage}
+
+Extracted requirements:
+${JSON.stringify(input.result, null, 2)}`;
+
+  const completion = await llmProxy.chatCompletion(
+    [
+      { role: 'system', content: prompt },
+      { role: 'user', content: input.userMessage },
+    ],
+    model,
+    0.0,
+    0.2,
+    500
+  );
+
+  const content = String(completion.choices?.[0]?.message?.content || '{}').replace(/```[a-zA-Z]*\s*|```/g, '').trim();
+  const parsed = JSON.parse((content.match(/{[\s\S]*}/) || ['{}'])[0]) as { score?: number; reason?: string; forceFrontendOnly?: boolean };
+  return {
+    score: typeof parsed.score === 'number' ? Math.max(0, Math.min(1, parsed.score)) : 0.5,
+    reason: typeof parsed.reason === 'string' ? parsed.reason : 'semantic-gap-analysis',
+    forceFrontendOnly: Boolean(parsed.forceFrontendOnly),
+  };
+}
+
+function transitionTo(currentState: string, nextState: string): string {
+  const normalizedCurrent = String(currentState || '').trim();
+  const normalizedNext = String(nextState || '').trim();
+  if (!normalizedNext) return 'CLARIFICATION_REQUIRED';
+  if (!normalizedCurrent) return normalizedNext;
+  return normalizedNext;
+}
+
+export async function requirementAnalysisAgent(input: { user_message: string; globalState?: BrainState; activeState?: string }): Promise<StateAwareAgentResult<RequirementAnalysisOutput>> {
   debug('requirementAnalysisAgent', { input });
   try {
     if (!input?.user_message) throw new Error('user_message required');
     const { model, apiKey } = getModelConfigForTask('core_reasoning');
     const llmProxy = new LLMProxyClient({ apiKey });
-    const systemPrompt = `You are an expert requirements analyst. The user may ask for any type of website, web application, or related feature. Your job is to convert that request into a robust website requirements object.
-- If the user message is broad or vague, infer a reasonable website_type and pages set.
-- If the user asks for a feature that is better suited to a web application, still map it to a web-based product.
-- If the request is ambiguous, do not fail silently; choose a safe default and add a short note explaining your assumption.
-- For marketing pages, pricing pages, landing pages, and other clearly frontend-only requests, set backend_required to false unless the user explicitly asks for backend functionality.
+    const activeState = String(input.activeState || input.globalState?.activeState || 'requirements');
+    if (activeState !== 'requirements') {
+      return {
+        updatedState: {
+          activeState,
+          domain: 'requirements',
+          transitions: [...(input.globalState?.transitions || []), `blocked:${activeState}`],
+        },
+        nextStateProposal: transitionTo(activeState, 'CLARIFICATION_REQUIRED'),
+        consistencyScore: 0,
+        output: {
+          website_type: 'business',
+          pages: ['home'],
+          backend_required: false,
+          auth_required: false,
+          deployment_pref: 'auto',
+          notes: 'Blocked until the requirements gate opens.',
+        },
+      };
+    }
+
+    const systemPrompt = `You are an expert requirements analyst. Convert the request into a robust website requirements object.
+- Infer a safe, complete website_type and pages set.
+- If the request is ambiguous, choose a safe default and add a short note.
+- For clearly frontend-only requests, set backend_required to false unless backend is explicitly requested.
 Respond ONLY with valid JSON with keys: website_type, pages, backend_required, auth_required, deployment_pref, notes.
-Do NOT include any Markdown code block markers (no triple backticks or 'json'), just return raw JSON.`;
-    const completion = await llmProxy.chatCompletion([
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: input.user_message }
-    ], model, 0.8, 0.9, 1000);
-    debug('requirementAnalysisAgent:completion', { completion });
-    let content = completion.choices?.[0]?.message?.content || '{}';
+Do NOT include Markdown fences.`;
+    const completion = await llmProxy.chatCompletion(
+      [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: input.user_message },
+      ],
+      model,
+      0.4,
+      0.7,
+      1200
+    );
+
+    let content = String(completion.choices?.[0]?.message?.content || '{}');
     debug('LLM_RAW_CONTENT_REQUIREMENT_ANALYSIS', { content });
     content = content.replace(/```[a-zA-Z]*\s*|```/g, '').trim();
     const jsonMatch = content.match(/{[\s\S]*}/);
@@ -59,25 +131,42 @@ Do NOT include any Markdown code block markers (no triple backticks or 'json'), 
       logError('requirementAnalysisAgent:no-json', { content });
       throw new Error('Malformed LLM output: No JSON object found');
     }
-    let result;
-    try {
-      result = JSON.parse(jsonMatch[0]);
-    } catch (e) {
-      logError('requirementAnalysisAgent:parse-error', { e, content: jsonMatch[0] });
-      throw new Error('Malformed LLM output: ' + jsonMatch[0]);
-    }
-    if (!result.website_type || !Array.isArray(result.pages)) {
-      throw new Error('Malformed requirementAnalysisAgent output');
-    }
 
-    if (shouldForceFrontendOnly(input.user_message)) {
-      result.backend_required = false;
-      result.auth_required = false;
-      result.notes = [result.notes, 'Normalized to frontend-only because the request is clearly static/client-side.'].filter(Boolean).join(' ');
-    }
+    const parsed = JSON.parse(jsonMatch[0]) as RequirementAnalysisOutput;
+    const result: RequirementAnalysisOutput = {
+      website_type: parsed.website_type || 'business',
+      pages: normalizePages(parsed.pages).slice(0, 10) || ['home'],
+      backend_required: Boolean(parsed.backend_required),
+      auth_required: Boolean(parsed.auth_required),
+      deployment_pref: parsed.deployment_pref || 'auto',
+      notes: parsed.notes,
+    };
 
-    debug('requirementAnalysisAgent:result', { result });
-    return result;
+    const semantic = await assessSemanticGap(llmProxy, model, { userMessage: input.user_message, result });
+    const forceFrontendOnly = semantic.forceFrontendOnly && !result.backend_required && !result.auth_required;
+    const alignedResult: RequirementAnalysisOutput = {
+      ...result,
+      backend_required: forceFrontendOnly ? false : result.backend_required,
+      auth_required: forceFrontendOnly ? false : result.auth_required,
+      notes: [result.notes, semantic.reason, forceFrontendOnly ? 'Semantic analysis indicates a frontend-only request.' : null].filter(Boolean).join(' ') || undefined,
+    };
+
+    const nextStateProposal = semantic.score < 0.55 ? transitionTo(activeState, 'CLARIFICATION_REQUIRED') : transitionTo(activeState, 'SYSTEM_DESIGN');
+    const output: RequirementAnalysisOutput = alignedResult;
+
+    debug('requirementAnalysisAgent:result', { output, semantic });
+    return {
+      updatedState: {
+        activeState: nextStateProposal,
+        domain: 'requirements',
+        consistencyScore: semantic.score,
+        transitions: [...(input.globalState?.transitions || []), `requirements:${activeState}->${nextStateProposal}`],
+        metadata: { semanticReason: semantic.reason },
+      },
+      nextStateProposal,
+      consistencyScore: semantic.score,
+      output,
+    };
   } catch (err) {
     logError('requirementAnalysisAgent', err);
     throw err;

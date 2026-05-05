@@ -43,7 +43,7 @@ export async function handleClarification(
         'Clarification'
       );
       debug('handleClarification:done', { projectId: input.projectId });
-      return { success: true, data: result };
+      return { success: true, data: result.output, fallback: result.updatedState };
     } catch (err) {
       if (attempt < MAX_ATTEMPTS) {
         debug('handleClarification:retry', { projectId: input.projectId, attempt, error: String((err as any)?.message || err) });

@@ -2,554 +2,910 @@
 
 ## 1. Purpose
 
-This document describes the current low-level architecture, runtime behavior, data flow, contracts, storage model, deployment model, validation rules, and safety boundaries of the AI autonomous website builder system.
+This document describes the runtime architecture, data flow, orchestration model, storage model, deployment model, and safety boundaries of the AI autonomous website builder.
 
-It is intended for reviewers and automated auditors that need to verify architectural completeness, cross-stage consistency, isolation guarantees, and runtime correctness.
+It is intended to provide a complete implementation-level view of the system, including:
+- total runtime components
+- how components communicate
+- what data each component owns or consumes
+- how generated projects remain isolated from the base app
+- how the system self-heals and resumes after failures
 
 ---
 
 ## 2. System Summary
 
-The platform is an AI-orchestrated website builder that converts a user request into a deployable web application by running a deterministic multi-stage pipeline.
+The platform is a session-driven AI orchestration system that converts a user request into a deployable web application.
 
-### Primary pipeline
-1. requirementAnalysis
-2. clarification
-3. confirmation
-4. systemDesign
-5. uiSpec
-6. blueprint
-7. codeGen
-8. testFix
-9. deploy
+The system has two isolated domains:
 
-### Runtime stack
-- Frontend runtime: React 18 + Vite
-- Frontend language: JavaScript / JSX
-- Backend runtime: Node.js + TypeScript
-- Backend framework for generated services: Express
-- Persistent storage: PostgreSQL
-- Transient session/cache layer: Redis
-- Frontend deployment: Vercel
-- Backend deployment: Railway
-- Interactive transport: WebSocket
+1. **Base App**
+   - permanent control plane
+   - runs socket server, orchestration, agents, persistence, deployment, validation
+   - must remain immutable during generated project creation
+
+2. **Generated Project**
+   - per-session ephemeral output
+   - exists in memory first
+   - may be materialized under `/tmp/project-{projectId}`
+   - destroyed after deployment
+
+The base app never stores generated source code inside its own repository tree.
 
 ---
 
-## 3. Architectural Goals
+## 3. Fixed Stack
 
-### 3.1 Primary goals
-- Convert natural language requirements into production-ready apps
-- Maintain strict project isolation
-- Produce deterministic intermediate artifacts
-- Ensure code generation is schema-driven
-- Enforce deployment safety and build verification
-- Support multi-project generation without cross-contamination
-- Fail closed when validation or build guarantees are not met
-
-### 3.2 Non-goals
-- No user selection of framework or language
-- No generation outside the fixed stack
-- No shared mutable project workspace
-- No permanent project state in Redis
-- No deployment from outside the workspace
-- No per-project database table creation pattern
-- No backend source generation in `.js` files
-
----
-
-## 4. Fixed Stack
-
-### Frontend
+### Frontend stack
 - React 18
 - Vite
-- JavaScript / JSX generation only
+- JavaScript / JSX
 
-### Backend
+### Backend stack
 - Node.js
 - TypeScript
-- Express runtime for generated backend services
-- PostgreSQL persistence
-- Redis session/cache support
+- Express for generated backend services
+- PostgreSQL for persistent multi-tenant data
+- Redis for transient state only
 
-### Deployment
+### Deployment targets
 - Frontend: Vercel
 - Backend: Railway
 
-### Enforcement
-The system rejects stack drift:
-- Frontend must remain React/Vite
-- Backend must remain Node.js/TypeScript
-- Generated backend files must use `.ts`
-- Alternative frontend or backend frameworks are not accepted
+---
+
+## 4. Top-Level Runtime Architecture
+
+The system is organized into the following major subsystems:
+
+1. **Client UI**
+2. **WebSocket Gateway**
+3. **HTTP API Layer**
+4. **Authentication Layer**
+5. **Orchestration Engine**
+6. **Agent Layer**
+7. **Workspace Materializer**
+8. **Build Worker**
+9. **Deployment Layer**
+10. **Persistence Layer**
+11. **Redis Transient State**
+12. **Template / Scaffold Layer**
+13. **Logging / Error Handling / Recovery**
+14. **State Machine / Session Controller**
 
 ---
 
-## 5. High-Level Component Diagram
+## 5. Component Inventory
 
-### 5.1 Runtime components
-- Web client / chat UI
-- WebSocket gateway
-- Pipeline orchestrator
-- Requirement analysis agent
-- Clarification agent
-- Confirmation gate
-- System design agent
-- UI spec agent
-- Blueprint agent
-- Code generation agent
-- Test/fix agent
-- Build worker
-- Deployment agent
-- Project store
-- Redis cache
-- PostgreSQL database
-- Workspace materializer
-- Project consistency validator
-- Model routing layer
-- LLM proxy client
-- Error/logging utilities
+This section lists the total major components and their responsibilities.
 
-### 5.2 Data flow summary
-User message → WebSocket → requirement analysis → clarification → confirmation → system design → UI spec → blueprint → code generation → build/test repair → deployment → final URLs returned over WebSocket
+### 5.1 Frontend components
+- `frontend/src/App.jsx`
+- `frontend/src/components/AuthPage.jsx`
+- `frontend/src/components/ChatWorkspace.jsx`
+- `frontend/src/components/ProjectHistory.jsx`
+- `frontend/src/main.jsx`
+- `frontend/src/styles.css`
+- `frontend/src/utils/helpers.js`
 
----
+### 5.2 Backend control-plane components
+- `backend/src/index.ts`
+- `backend/src/api/server.ts`
+- `backend/src/api/routes.ts`
+- `backend/src/api/socket.ts`
+- `backend/src/api/projectRoutes.ts`
+- `backend/src/api/authRoutes.ts`
+- `backend/src/api/frontendProxy.ts`
+- `backend/src/api/middleware.ts`
 
-## 6. Core Runtime Boundaries
+### 5.3 Handlers
+- `backend/src/api/handlers/requirementAnalysisHandler.ts`
+- `backend/src/api/handlers/clarificationHandler.ts`
+- `backend/src/api/handlers/confirmationHandler.ts`
+- `backend/src/api/handlers/systemDesignHandler.ts`
+- `backend/src/api/handlers/uiSpecHandler.ts`
+- `backend/src/api/handlers/blueprintHandler.ts`
+- `backend/src/api/handlers/codeGenerationHandler.ts`
+- `backend/src/api/handlers/testFixHandler.ts`
+- `backend/src/api/handlers/deploymentHandler.ts`
 
-### 6.1 Workspace isolation
-Each request must create a unique project workspace.
+### 5.4 AI orchestration layer
+- `backend/src/ai/index.ts`
+- `backend/src/ai/contracts/orchestration.ts`
+- `backend/src/ai/orchestrator/orchestrator.ts`
+- `backend/src/ai/orchestrator/memory.ts`
+- `backend/src/ai/orchestrator/errorClassifier.ts`
+- `backend/src/ai/orchestrator/executionPlan.ts`
+- `backend/src/ai/orchestrator/recovery.ts`
 
-- `projectId = uuid()`
-- `workspaceRoot = /projects/{projectId}`
+### 5.5 Pipeline / flow control
+- `backend/src/orchestration/pipelineStateMachine.ts`
+- `backend/src/orchestration/langgraph.ts`
 
-Workspace rules:
-- Copy template from the immutable starter template location
-- Never modify templates during generation
-- Never write outside `/projects/{projectId}`
-- Never use parent traversal paths (`../`)
-- All generation and build operations must use the workspace root
+### 5.6 Agents
+- `backend/src/agents/requirementAnalysisAgent.ts`
+- `backend/src/agents/clarificationAgent.ts`
+- `backend/src/agents/confirmationGate.ts`
+- `backend/src/agents/systemDesignAgent.ts`
+- `backend/src/agents/uiSpecAgent.ts`
+- `backend/src/agents/blueprintAgent.ts`
+- `backend/src/agents/codeGenerationAgent.ts`
+- `backend/src/agents/testFixAgent.ts`
+- `backend/src/agents/deploymentAgent.ts`
+- `backend/src/agents/reviewerAgent.ts`
+- `backend/src/agents/projectSpec.ts`
+- `backend/src/agents/projectConsistency.ts`
+- `backend/src/agents/structuredSpec.ts`
+- `backend/src/agents/blueprintContract.ts`
+- `backend/src/agents/modelRouter.ts`
+- `backend/src/agents/llmProxyClient.ts`
+- `backend/src/agents/vercelDeploy.ts`
 
-### 6.2 Persistent data separation
-- PostgreSQL stores permanent project/session/task/deployment data
-- Redis stores only transient session/pipeline state
-- No permanent project artifacts in Redis
+### 5.7 Workspace / build / deploy
+- `backend/src/factory/projectFactory.ts`
+- `backend/src/workers/buildWorker.ts`
+- `backend/src/deploy/railwayDeploy.ts`
+- `backend/src/tools/fsTools.ts`
 
-### 6.3 Revision isolation
-Each project session supports a single active revision.
+### 5.8 Persistence and infra
+- `backend/src/db/database.ts`
+- `backend/src/db/postgres.ts`
+- `backend/src/db/schema.ts`
+- `backend/src/db/projectStore.ts`
+- `backend/src/db/auditLog.ts`
+- `backend/src/db/vectorStore.ts`
+- `backend/src/auth/authService.ts`
+- `backend/src/cache/redis.ts`
+- `backend/src/jobs/jobQueue.ts`
+- `backend/src/config/env.ts`
+- `backend/src/utils/logger.ts`
+- `backend/src/utils/errors.ts`
+- `backend/src/utils/timeout.ts`
+- `backend/src/utils/ttlSet.ts`
 
-- `active_revision_id` is stored on `project_sessions`
-- revision locking prevents concurrent generation runs from overwriting one another
-- generation must acquire a lock before mutating a project workspace
-
----
-
-## 7. End-to-End Pipeline Design
-
-## 7.1 Stage: requirementAnalysis
-### Input
-- User product description
-
-### Responsibility
-- Infer:
-  - website type
-  - page list
-  - backend requirement
-  - auth requirement
-  - deployment preference
-
-### Output
-`RequirementAnalysisOutput`
-- `website_type`
-- `pages`
-- `backend_required`
-- `auth_required`
-- `deployment_pref`
-- `notes`
-
-### Validation
-- Must return JSON only
-- Must include pages
-- For frontend-only requests, backend can be disabled
-- For clearly frontend-only requests such as pricing pages or static pages, backend is forced off unless the request explicitly asks for backend functionality
-- Must be consistent with the downstream fixed stack
-
-### Current implementation notes
-The requirement analysis agent uses the LLM output and then applies a frontend-only override when the request contains strong frontend signals such as:
-- pricing page
-- landing page
-- marketing page
-- static page
-- client-side
-- without backend
-- no backend
-- mock data
-- static content
-
-If those signals are present and no backend signal is present, the agent forces:
-- `backend_required = false`
-- `auth_required = false`
+### 5.9 Templates
+- `backend/src/templates/frontend/*`
+- `backend/src/templates/backend/*`
 
 ---
 
-## 7.2 Stage: clarification
-### Input
-- requirementAnalysis output
-- prior asked questions
-- any clarification answers
-- optional modification context
+## 6. Architectural Boundaries
 
-### Responsibility
-- Ask 0–3 blocking questions
-- Avoid duplicates
-- Resolve ambiguity that affects:
-  - data model
-  - auth
-  - API contracts
-  - architecture
-- Skip clarification when confidence is high enough to proceed
+## 6.1 Base app boundary
+The base app is the immutable control plane.
 
-### Output
-`ClarificationOutput`
-- `questions`
-- `confirmed`
-- `done`
-- `context`
+It owns:
+- orchestration
+- socket transport
+- pipeline state machine
+- AI agents
+- persistence
+- deployment integration
+- workspace materialization
+- build and test execution
 
-### Important rules
-- Do not repeat asked/answered questions
-- If sufficient detail exists, return `confirmed=true`
-- Questions must be specific and answerable
-- Clarification should only block the pipeline when ambiguity materially impacts generation decisions
+The base app must not persist generated source code inside the repository tree.
 
----
+## 6.2 Generated project boundary
+The generated project is isolated and ephemeral.
 
-## 7.3 Stage: confirmation
-### Input
-- clarification output
+Rules:
+- exists only in memory or `/tmp/project-{projectId}`
+- no cross-session sharing
+- disposable after deployment
+- code generation and fix loops operate only on generated files
 
-### Responsibility
-- Convert clarification state into a confirmed project execution gate
-
-### Output
-- Confirmation status / approval state
-
-### Role in pipeline
-- Prevent downstream generation unless the request is confirmed or safely inferred
+## 6.3 Data isolation boundary
+- `projectId` scopes session-level generated outputs
+- `userId` scopes ownership and authorization
+- `project_id` scopes all persisted project data in PostgreSQL
+- Redis stores only transient state
 
 ---
 
-## 7.4 Stage: systemDesign
-### Input
-- requirements
-- canonical project spec
-- modification (if any)
+## 7. Data Sets and Ownership
 
-### Responsibility
-- Produce a technical architecture JSON:
-  - frontend framework
-  - frontend pages/components
-  - backend framework/routes/middleware/features
-  - database tables
-  - auth strategy
-  - hosting strategy
+This system operates on several distinct data sets.
 
-### Output constraints
-- JSON only
-- Must always declare React/Vite frontend
-- Must use Railway for backend when backend exists
-- Must use Vercel for frontend
-- Must be consistent with projectSpec
-- Must remain deterministic for the same canonical inputs
+### 7.1 User auth data set
+Owned by:
+- `users`
+- `auth_sessions`
 
-### Current implementation notes
-The system design agent:
-- Reads canonical project spec context if provided
-- Derives backend/auth requirements from input or projectSpec
-- Enforces:
-  - `frontend.framework = react-vite`
-  - `hosting.frontend = vercel`
-  - `hosting.backend = railway` when backend is required
-- Normalizes malformed JSON from the LLM before returning
-- Fails if backend is required but the backend section is missing
+Purpose:
+- authentication
+- session validation
+- ownership checks
 
----
+### 7.2 Project session data set
+Owned by:
+- `project_sessions`
 
-## 7.5 Stage: uiSpec
-### Input
-- systemDesign
-- requirements
-- canonical projectSpec
-- modification
+Purpose:
+- session status
+- pipeline step
+- progress
+- current artifacts
+- lock state
+- deployment status
 
-### Responsibility
-- Generate UI component specification
-- Define:
-  - component interfaces
-  - data flow
-  - API contract
-  - layout structure
-  - generation order
+### 7.3 Blackboard state data set
+Owned by:
+- `project_blackboards`
 
-### Output
-`UISpec`
-- `appName`
-- `components[]`
-- `dataFlow[]`
-- `layoutStructure`
-- `apiContract[]`
-- `generationOrder[]`
-- `navigationStrategy`
-- `stateManagementStrategy`
+Purpose:
+- project session blackboard snapshot
+- current stage snapshot
+- task queue snapshot
+- deployment snapshot
 
-### Key role
-- This stage determines component dependency order and the UI contract for code generation
+### 7.4 Task data set
+Owned by:
+- `project_tasks`
 
----
+Purpose:
+- generated task queue
+- phase/action tracking
+- retries
+- per-task payloads
 
-## 7.6 Stage: blueprint
-### Input
-- requirements
-- systemDesign
-- uiSpec
-- canonical projectSpec
-
-### Responsibility
-- Create the machine-readable project blueprint
-- Validate cross-stage consistency
-- Enforce stack, files, routing, backend route scope, and project isolation
-
-### Current enforced blueprint shape
-Top-level:
-- `strict`
-- `metadata`
-- `files`
-- `dependencies`
-- `backendRoutes`
-
-`strict` must contain:
-- `projectType`
-- `modules`
-- `frontend`
-- `backend`
-- `database`
-- `structure`
-
-`metadata` is optional and used for compatibility, diagnostics, and routing hints.
-
-### Blueprint invariants
-- Must be strict JSON
-- Must be deterministic
-- Must be internally consistent
-- Must include frontend and backend structure
-- Must include project_id isolation rules
-- Must use `backend/src/index.ts` and `backend/src/db/database.ts` for backend entry/scaffold references
-- Must not use `.js` backend generation paths
-
-### Current implementation notes
-The blueprint agent:
-- Requires canonical `projectSpec`
-- Rejects mismatched website types
-- Ensures canonical pages are present
-- Retries up to three times on validation errors
-- Uses a fixed system prompt and only accepts JSON
-- Validates the output with `validateProjectBlueprint`
-- Rejects blueprints missing required files or violating stack rules
-- Rejects backend routes when the canonical request is frontend-only
-
----
-
-## 7.7 Stage: codeGen
-### Input
-- validated blueprint
-- uiSpec
-- requirements
-- systemDesign
-- projectSpec
-- modification context
-
-### Responsibility
-- Generate source files in the workspace
-- Generate frontend scaffold
-- Generate backend scaffold
-- Generate components in dependency order
-- Generate App and CSS
-- Ensure import correctness
-- Ensure files are within allowed paths only
-- Ensure generated backend code is TypeScript-only
-- Ensure backend routes query shared tables with `project_id`
-
-### Output
-- file list
-- patch reference
-- generation metadata
-- project task queue
-
-### Generation rules
-- No full project generation in one call
-- Generate per file / per module
-- Dependency order matters
-- App must compose generated components
-- Backend routes must be project-scoped
-- Backend generation must only use `.ts` files
-- Shared tables are mandatory; no `{projectId}_table` naming
-
----
-
-## 7.8 Stage: testFix
-### Input
-- generated files
-- build function
-- optional fix function
-
-### Responsibility
-- Run build/test loop
-- Auto-remediate dependency or build issues
-- Retry up to a bounded number of times
-- Fail closed if build cannot be fixed
-
-### Build safeguards
-- Install dependencies only inside the workspace
-- Run frontend and backend builds in their respective directories
-- Ensure frontend build output exists
-- Ensure backend build only runs when backend package exists
-- Preserve workspace isolation
-
-### Limits
-- max retries per stage
-- max build attempts per project
-- max LLM calls per project
-
----
-
-## 7.9 Stage: deploy
-### Input
-- build output directory
-- backend workspace directory
-- projectId
-- revisionId
-- backend presence flag
-
-### Responsibility
-- Deploy frontend to Vercel
-- Deploy backend to Railway
-- Initialize database schema before backend deployment
-- Probe frontend for deployment protection status
-- Persist deployment metadata
-
-### Output
-- `frontend_url`
-- `backend_url`
-- deployment IDs/log URLs/statuses
-- frontend accessibility warning if protected
-
----
-
-## 8. WebSocket Protocol Design
-
-### 8.1 Connection lifecycle
-1. client connects
-2. server checks origin
-3. server validates session cookie
-4. server resolves authenticated user
-5. server resolves or creates project session
-6. server attaches event persistence wrapper to socket send
-7. server begins or resumes pipeline
-
-### 8.2 Message categories
-- `info`
-- `stream`
-- `progress`
-- `clarification`
-- `confirmation`
-- `error`
-- `done`
-
-### 8.3 Server outbound payload patterns
-#### info
-- connection status
-- general state updates
-
-#### stream
-- user-facing narrative and logs
-
-#### progress
-- stage and overall progress percentage
-
-#### clarification
-- question prompt
-
-#### error
-- user-facing error with retryability
-
-#### done
-- final completion payload including URLs
-
-### 8.4 Persistence hook
-Outgoing WebSocket messages are persisted to:
+### 7.5 Event stream data set
+Owned by:
 - `project_events`
-- project snapshot fields
-- blackboard state
+
+Purpose:
+- all user/system/assistant events
+- WebSocket message history
+- orchestration narrative log
+
+### 7.6 Revision data set
+Owned by:
+- `project_code_revisions`
+
+Purpose:
+- archive metadata
+- workspace path
+- patch path
+- source hash
+- generation payload
+
+### 7.7 Deployment data set
+Owned by:
+- `project_deployments`
+
+Purpose:
+- Vercel / Railway deployment metadata
+- deploy logs
+- URLs
+- source archive hashes
+- backend/frontend service IDs
+
+### 7.8 Redis transient state set
+Owned by:
+- session state keys
+- pipeline status keys
+- temporary coordination keys
+
+Purpose:
+- short-lived orchestration cache
+- never source of truth
 
 ---
 
-## 9. Project Session and State Machine
+## 8. End-to-End Flow Diagram
 
-### 9.1 Pipeline stages
-Defined stages:
-- init
-- requirementAnalysis
-- clarification
-- clarification_wait
-- clarification_wait_modification
-- confirmation
-- confirmation_wait
-- systemDesign
-- uiSpec
-- uiSpec_modification
-- blueprint
-- codeGen
-- codeGen_modification
-- testFix
-- testFix_modification
-- deploy
-- deploy_modification
-- done
-- done_modification
+### 8.1 System flow
+```text
+User
+  |
+  v
+Frontend SPA (React/Vite)
+  |
+  +--> HTTP API ------------------------------+
+  |                                           |
+  +--> WebSocket connection                   |
+                                              v
+                                      WebSocket Gateway
+                                              |
+                                              v
+                                     Session Resolver
+                                              |
+                                              v
+                                 Orchestration Controller
+                                              |
+              +-------------------------------+-------------------------------+
+              |                               |                               |
+              v                               v                               v
+     Requirement Analysis               Clarification                    Confirmation Gate
+              |                               |                               |
+              +-------------------------------+-------------------------------+
+                                              |
+                                              v
+                                       System Design
+                                              |
+                                              v
+                                            UI Spec
+                                              |
+                                              v
+                                          Blueprint
+                                              |
+                                              v
+                                       Code Generation
+                                              |
+                                              v
+                                   In-Memory File Map
+                                              |
+                                              v
+                              Materialize /tmp/project-{projectId}
+                                              |
+                                              v
+                                  Build Worker / Test Loop
+                                              |
+                                              v
+                                    Deployment Layer
+                                   /                    \
+                                  v                      v
+                               Vercel                 Railway
+                                  \                    /
+                                   v                  v
+                                   Deployment Metadata
+                                              |
+                                              v
+                                        Final Result
+```
 
-### 9.2 Stage grouping
+---
+
+## 9. Communication Diagram
+
+### 9.1 Major communication paths
+```text
+Frontend SPA
+  -> WebSocket Gateway
+  -> API Routes
+  -> Auth Service
+  -> Project Session Store
+  -> Orchestrator
+
+Orchestrator
+  -> Requirement Analysis Agent
+  -> Clarification Agent
+  -> Confirmation Gate
+  -> System Design Agent
+  -> UI Spec Agent
+  -> Blueprint Agent
+  -> Code Generation Agent
+  -> Test/Fix Agent
+  -> Workspace Materializer
+  -> Build Worker
+  -> Deployment Agent
+  -> Event Store / Snapshot Store
+
+Code Generation Agent
+  -> LLM Proxy Client
+  -> Model Router
+  -> Reviewer Agent
+  -> Blueprint Contract
+
+Build Worker
+  -> filesystem in /tmp/project-{projectId}
+  -> frontend package manager
+  -> backend package manager
+  -> compiler/test tools
+
+Deployment Agent
+  -> Vercel deploy adapter
+  -> Railway deploy adapter
+  -> PostgreSQL init SQL
+```
+
+---
+
+## 10. Pipeline State Machine
+
+The pipeline is state-machine driven.
+
+### 10.1 States
+- `init`
+- `requirementAnalysis`
+- `clarification`
+- `clarification_wait`
+- `clarification_wait_modification`
+- `confirmation`
+- `confirmation_wait`
+- `systemDesign`
+- `uiSpec`
+- `uiSpec_modification`
+- `blueprint`
+- `codeGen`
+- `codeGen_modification`
+- `testFix`
+- `testFix_modification`
+- `deploy`
+- `deploy_modification`
+- `done`
+- `done_modification`
+- `failed`
+
+### 10.2 State groups
 - analysis
 - design
 - generation
 - delivery
 - terminal
 
-### 9.3 Stage transitions
-- Each stage must advance only when successful
-- Paused states wait for user input
-- Failure states can retry or reset depending on step
-- Completed projects can start a new request by resetting to init
-
-### 9.4 Progress model
-- Weighted progress per stage
-- Progress is updated once per stage
-- Stage-level completion does not exceed 1.0
+### 10.3 Transition rules
+- transitions are explicit
+- retryable stages can re-enter safely
+- failed validation blocks deployment
+- deployed projects transition to terminal states
+- completed projects can restart with a fresh request
 
 ---
 
-## 10. Data Model Design
+## 11. Session Lifecycle
 
-## 10.1 PostgreSQL schema
+### 11.1 Session initialization
+1. client connects
+2. origin is validated
+3. cookie is parsed
+4. user is resolved
+5. current or new project session is selected
+6. blackboard snapshot is loaded
+7. current pipeline state is restored
 
-### Core user/auth tables
-#### users
+### 11.2 Session execution
+The orchestrator processes the current request through the pipeline stages.
+
+### 11.3 Session pause
+If clarification or confirmation is needed:
+- session state is persisted
+- the WebSocket waits for user response
+- the pipeline resumes from the paused state
+
+### 11.4 Session completion
+Once deployed:
+- deployment metadata is saved
+- final result is emitted
+- temporary workspace is cleaned up
+
+### 11.5 Session reset
+If the user starts a new request after completion:
+- pipeline resets to `init`
+- transient state is cleared
+- new generation flow begins
+
+---
+
+## 12. Memory Model
+
+The orchestrator uses a memory-first model.
+
+### 12.1 In-memory stores
+- requirements memory
+- clarification memory
+- system design memory
+- UI spec memory
+- blueprint memory
+- execution plan memory
+- code memory
+- test memory
+- deployment memory
+- issue history
+- fix history
+- checkpoints
+
+### 12.2 Memory constraints
+- session scoped
+- project scoped
+- discarded on completion or cancel
+- not shared across sessions
+
+### 12.3 What memory contains
+- generated file list
+- patch text
+- build logs
+- deployment metadata
+- validation state
+- error classifications
+- repair attempts
+
+---
+
+## 13. Detailed Component Responsibilities
+
+### 13.1 Frontend SPA
+Responsibility:
+- render chat and project history UI
+- connect to WebSocket
+- send user messages
+- display progress, clarification prompts, errors, URLs
+
+Consumes:
+- project history API
+- project event stream
+- session state
+- deployment status
+
+### 13.2 WebSocket Gateway
+Responsibility:
+- transport for interactive orchestration
+- origin and auth validation
+- session resolution
+- event persistence wrapper
+- progress/error/done payload emission
+
+Consumes:
+- auth cookie
+- projectId query parameter
+- user messages
+
+Produces:
+- persistent project events
+- pipeline control messages
+- snapshot updates
+
+### 13.3 HTTP API
+Responsibility:
+- project CRUD-like operations
+- history retrieval
+- project selection
+- redeploy
+- event listing
+- auth flows
+
+Consumes:
+- authenticated session
+- project ownership
+
+Produces:
+- project metadata
+- event history
+- deployment status
+- redeploy responses
+
+### 13.4 Requirement Analysis Agent
+Responsibility:
+- infer website type
+- infer pages
+- infer backend/auth need
+- infer deployment preference
+- detect frontend-only signals
+
+Consumes:
+- raw user request
+
+Produces:
+- structured requirements
+
+### 13.5 Clarification Agent
+Responsibility:
+- ask blocking questions only when needed
+- avoid duplicate questions
+- carry prior answers
+- preserve asked history
+
+Consumes:
+- requirements
+- prior clarification answers
+- asked questions
+- modification context
+
+Produces:
+- questions
+- confirmed flag
+- completion flag
+- clarification context
+
+### 13.6 Confirmation Gate
+Responsibility:
+- convert clarification result into a safe execution gate
+
+Consumes:
+- clarification memory
+
+Produces:
+- approval state
+
+### 13.7 System Design Agent
+Responsibility:
+- produce architecture JSON
+- enforce React/Vite frontend
+- enforce Railway backend when backend exists
+- enforce Vercel frontend
+
+Consumes:
+- requirements
+- project spec
+
+Produces:
+- frontend design
+- backend design
+- database design
+- auth design
+- hosting design
+
+### 13.8 UI Spec Agent
+Responsibility:
+- define components
+- define component dependencies
+- define navigation
+- define state management
+- define API wiring expectations
+
+Consumes:
+- system design
+- requirements
+- project spec
+
+Produces:
+- UI spec
+- structured spec
+
+### 13.9 Blueprint Agent
+Responsibility:
+- validate cross-stage consistency
+- generate machine-readable blueprint
+- enforce file registry
+- enforce route scoping
+- enforce project_id isolation
+
+Consumes:
+- requirements
+- system design
+- UI spec
+- project spec
+
+Produces:
+- blueprint contract
+- file plan
+- route plan
+
+### 13.10 Code Generation Agent
+Responsibility:
+- generate frontend and backend files
+- honor blueprint
+- operate file-by-file
+- preserve project_id scoping
+- avoid base app coupling
+
+Consumes:
+- blueprint
+- UI spec
+- system design
+- requirements
+- project spec
+- modification context
+
+Produces:
+- in-memory file map
+- patch
+- project task queue
+
+### 13.11 Test/Fix Agent
+Responsibility:
+- run build/test loop
+- repair generated files only
+- fix dependencies or missing scaffolds
+- never touch base app code
+
+Consumes:
+- generated file map
+- workspace directory
+- build results
+
+Produces:
+- build result
+- repaired file set
+- logs
+
+### 13.12 Workspace Materializer
+Responsibility:
+- sanitize projectId
+- create temporary workspace
+- copy templates
+- write generated files
+- archive workspace
+- compute source hash
+- apply patch if present
+
+Consumes:
+- projectId
+- code generation output
+
+Produces:
+- workspace path
+- archive path
+- hash
+- patch metadata
+
+### 13.13 Build Worker
+Responsibility:
+- validate generated project structure
+- install dependencies
+- run build/test
+- verify outputs
+- clean dist directories
+- protect workspace boundary
+
+Consumes:
+- workspace path
+
+Produces:
+- build logs
+- build directory
+- backend directory
+
+### 13.14 Deployment Agent
+Responsibility:
+- deploy frontend to Vercel
+- deploy backend to Railway
+- run DB init SQL
+- probe frontend accessibility
+- collect deployment metadata
+
+Consumes:
+- build output
+- backend workspace
+- revision metadata
+- projectId
+
+Produces:
+- frontend URL
+- backend URL
+- provider metadata
+- access warnings
+
+### 13.15 Project Store
+Responsibility:
+- persist project events, snapshots, tasks, revisions, deployments
+
+Consumes:
+- orchestration output
+- deployment output
+- blackboard state
+
+Produces:
+- queryable project history
+- session persistence
+
+---
+
+## 14. Data Flow by Stage
+
+### 14.1 Requirement analysis stage
+Input:
+- raw user message
+
+Output:
+- requirements object
+
+Storage:
+- `project_sessions.requirements`
+- `project_events`
+- `project_blackboards`
+
+### 14.2 Clarification stage
+Input:
+- requirements
+- prior answers
+
+Output:
+- questions or clarified result
+
+Storage:
+- `project_sessions.clarifications`
+- `project_events`
+
+### 14.3 Confirmation stage
+Input:
+- clarification output
+
+Output:
+- approved execution gate
+
+Storage:
+- `project_sessions.confirmation`
+
+### 14.4 System design stage
+Input:
+- requirements
+- project spec
+
+Output:
+- system design JSON
+
+Storage:
+- `project_sessions.system_design`
+
+### 14.5 UI spec stage
+Input:
+- system design
+- requirements
+
+Output:
+- UI spec / structured spec
+
+Storage:
+- `project_sessions.ui_spec`
+- `project_sessions.structured_spec`
+
+### 14.6 Blueprint stage
+Input:
+- requirements
+- system design
+- UI spec
+
+Output:
+- blueprint JSON
+
+Storage:
+- `project_sessions.blueprint`
+
+### 14.7 Code generation stage
+Input:
+- blueprint
+- system design
+- UI spec
+- requirements
+
+Output:
+- file map
+- patch
+- task queue
+
+Storage:
+- `project_sessions.code_gen`
+- `project_code_revisions`
+
+### 14.8 Test and fix stage
+Input:
+- generated file map
+- workspace path
+
+Output:
+- build result
+- logs
+- repaired files
+
+Storage:
+- `project_sessions.test_result`
+- `project_events`
+
+### 14.9 Deployment stage
+Input:
+- build output
+- backend output
+- workspace path
+
+Output:
+- deployment URLs
+- provider metadata
+
+Storage:
+- `project_sessions.deployment`
+- `project_deployments`
+
+---
+
+## 15. Backend Data Model
+
+### 15.1 `users`
+Purpose:
+- authenticated user identity
+
+Fields:
 - id
 - name
 - email
 - password_hash
 - created_at
 
-#### auth_sessions
+### 15.2 `auth_sessions`
+Purpose:
+- login session storage
+
+Fields:
 - id
 - user_id
 - token_hash
@@ -559,8 +915,11 @@ Defined stages:
 - expires_at
 - revoked_at
 
-### Project orchestration tables
-#### project_sessions
+### 15.3 `project_sessions`
+Purpose:
+- main orchestration state
+
+Fields:
 - id
 - user_id
 - status
@@ -574,6 +933,7 @@ Defined stages:
 - confirmation
 - system_design
 - ui_spec
+- structured_spec
 - blueprint
 - task_queue
 - terminal_logs
@@ -583,7 +943,11 @@ Defined stages:
 - created_at
 - last_active_at
 
-#### project_blackboards
+### 15.4 `project_blackboards`
+Purpose:
+- current snapshot of a project session
+
+Fields:
 - id
 - project_id
 - user_id
@@ -591,7 +955,11 @@ Defined stages:
 - created_at
 - updated_at
 
-#### project_tasks
+### 15.5 `project_tasks`
+Purpose:
+- generation task queue persistence
+
+Fields:
 - id
 - project_id
 - user_id
@@ -606,7 +974,11 @@ Defined stages:
 - created_at
 - updated_at
 
-#### project_events
+### 15.6 `project_events`
+Purpose:
+- event log for WebSocket and orchestration messages
+
+Fields:
 - id
 - project_id
 - user_id
@@ -616,7 +988,11 @@ Defined stages:
 - payload
 - created_at
 
-#### project_deployments
+### 15.7 `project_deployments`
+Purpose:
+- deployment metadata
+
+Fields:
 - id
 - project_id
 - user_id
@@ -636,7 +1012,11 @@ Defined stages:
 - raw_payload
 - created_at
 
-#### project_code_revisions
+### 15.8 `project_code_revisions`
+Purpose:
+- source archive metadata for a generated revision
+
+Fields:
 - id
 - project_id
 - user_id
@@ -644,444 +1024,319 @@ Defined stages:
 - source_archive_path
 - source_hash
 - patch_path
-- patch_apply_log
 - patch_applied
+- patch_apply_log
 - generation_payload
 - created_at
 
-### 10.2 Schema access rules
-- All project queries filter by both `project_id` and `user_id`
-- All deployment and revision tables are project-scoped
-- Queries must never mix tenants
-- Active revision locking must prevent concurrent writes for the same project
-
 ---
 
-## 11. Redis Design
+## 16. Redis Design
 
-### Allowed use cases
+Redis is only for transient data.
+
+### Allowed
 - session state
 - pipeline state
-- transient events
-- deployment status cache
-- short-lived coordination values
+- temporary coordination
+- temporary deployment status cache
 
-### Forbidden use cases
-- permanent project data
-- source code artifacts
-- archived build outputs
-- deployment history source of truth
+### Forbidden
+- generated source code
+- permanent history
+- deployment source of truth
+- archived build artifacts
 
-### Redis keying pattern
-Recommended:
+### Keying pattern
 - `session:{sessionId}:status`
 - `project:{projectId}:pipeline`
 - `project:{projectId}:temp:*`
 
-### Safety
-- TTL should be used for transient entries
-- Redis can be disabled if unavailable without breaking core persistence
+---
+
+## 17. Workspace Materialization Flow
+
+### 17.1 Workspace creation
+- sanitize `projectId`
+- create `/tmp/project-{projectId}`
+- ensure parent directories exist
+- copy templates
+
+### 17.2 File write flow
+- write generated files only
+- validate paths
+- prevent traversal
+- ensure no writes outside workspace
+
+### 17.3 Archive flow
+- optionally apply patch
+- create source archive
+- compute source hash
+- persist revision metadata
+
+### 17.4 Cleanup flow
+- remove temporary workspace after deployment
+- keep only persisted metadata
 
 ---
 
-## 12. Workspace Materialization Design
+## 18. Build Worker Flow
 
-### 12.1 Input
-- `projectId`
-- code generation output
+1. resolve workspace root
+2. verify it is under `/tmp`
+3. validate generated project files
+4. clean stale build outputs
+5. install frontend dependencies
+6. run frontend build
+7. run frontend tests if present
+8. install backend dependencies if backend exists
+9. run backend build if build script exists
+10. run backend tests if present
+11. return build directories
 
-### 12.2 Steps
-1. sanitize project ID segment
-2. create `/projects/{projectId}`
-3. create or reuse workspace directory
-4. copy template
-5. write generated files
-6. write generated patch file
-7. optionally apply patch
-8. archive workspace
-9. hash workspace contents
-
-### 12.3 Workspace output artifacts
-- workspace directory
-- archive path
-- source hash
-- patch path
-- patch applied flag
-- patch apply log
-
-### 12.4 Safety rules
-- no writes outside workspace
-- no template modification
-- no traversal paths
-- archive excludes `node_modules`, `dist`, `.git`, `source.tgz`
+### Build safety rules
+- never operate on base app source
+- never scan unrelated repository files
+- never permit traversal outside workspace
+- fail closed on invalid workspace structure
 
 ---
 
-## 13. Build Worker Design
+## 19. Deployment Flow
 
-### Frontend build
-- install dependencies in frontend workspace
-- run build
-- optional tests
-- verify dist output exists
+### 19.1 Frontend deployment
+- deploy build output to Vercel
+- derive project name from projectId
+- store deployment metadata
 
-### Backend build
-- install dependencies in backend workspace
-- run build if build script exists
-- optional tests
+### 19.2 Backend deployment
+- run DB init SQL against shared PostgreSQL
+- deploy backend source to Railway
+- store backend metadata
 
-### Validation
-- workspace root must be under `/projects`
-- frontend must have required files
-- backend must have required files if backend exists
-- backend build must fail if legacy `.js` backend entrypoints are present
+### 19.3 Health probe
+- probe frontend URL after deployment
+- detect access protection
+- return warning if blocked by deployment protection
 
-### Failure handling
-- return logs and error summary
-- do not deploy if build fails
-
----
-
-## 14. Deployment Design
-
-## 14.1 Frontend deployment
-- build output deployed to Vercel
-- frontend project name derived from projectId
-- deployment metadata persisted
-
-## 14.2 Backend deployment
-- backend source deployed to Railway
-- backend service name derived from projectId
-- DB init SQL run before backend deployment
-
-## 14.3 Health/protection probe
-- probe deployed frontend URL
-- detect 401/403 deployment protection
-- expose warning back to user
+### 19.4 Final output contract
+```json
+{
+  "projectId": "...",
+  "frontendUrl": "...",
+  "backendUrl": "..." 
+}
+```
+`backendUrl` may be `null` for frontend-only projects.
 
 ---
 
-## 15. Blueprint Contract Design
+## 20. Error Handling and Recovery
 
-### 15.1 Strict contract goals
-- machine-readable
-- deterministic
-- no prose
-- complete and consistent
+### 20.1 Error classification
+Typical categories:
+- parsing error
+- schema mismatch
+- missing data
+- semantic inconsistency
+- build error
+- deployment error
+- state transition error
+- access or authorization error
+- unknown error
 
-### 15.2 Required top-level logical shape
-The current blueprint contract enforces:
-- `strict`
-- `metadata`
-- `files`
-- `dependencies`
-- `backendRoutes`
+### 20.2 Recovery options
+- retry
+- repair
+- ask user
+- fallback
+- skip non-critical step
 
-### 15.3 Required strict shape
-`strict` must include:
-- `projectType`
-- `modules`
-- `frontend`
-- `backend`
-- `database`
-- `structure`
+### 20.3 Recovery strategy
+The orchestrator decides recovery by:
+- error type
+- stage
+- retry count
+- whether user input is required
+- whether fallback is safe
 
-### 15.4 Compatibility metadata
-`metadata` currently preserves compatibility and routing hints such as:
-- `title`
-- `stack`
-- `buildCriticalFiles`
-- `entrypoints`
-- `state`
-- `navigation`
-- `invariants`
-
-### 15.5 Validation rules
-- frontend pages/components cannot be empty
-- backend required implies backend routes/modules cannot be empty
-- backend routes must be project-scoped
-- `src/App.jsx` must exist when frontend composition is built
-- if backend exists, App must include fetch/API wiring references
-- invariants must include `project_id` isolation
-- required build files must be present in the file registry
-- backend file registry entries must use `.ts` paths
-
-### 15.6 Current implementation notes
-The blueprint validator:
-- enforces required strict fields
-- rejects placeholder text
-- validates navigation and file registry rules
-- requires build-critical frontend files
-- requires backend source files when backend is required
-- normalizes all file paths before validation
-- rejects path traversal and invalid paths
+### 20.4 Fail-closed rules
+- never deploy broken builds
+- never proceed with invalid blueprint
+- never mutate base app as a repair action
+- never continue after workspace safety violation
 
 ---
 
-## 16. Code Generation Rules
+## 21. Consistency Rules
 
-### 16.1 File generation rules
-- one file per component / utility / route / schema
-- keep files focused
-- avoid giant monolithic outputs
-- ensure every file path is safe and workspace-local
-- code generation must only write files listed in the blueprint file registry
+The system validates consistency across stages.
 
-### 16.2 Frontend scaffolding rules
-Required files:
-- `package.json`
-- `index.html`
-- `vite.config.js`
-- `src/main.jsx`
-- `src/App.jsx`
-- `src/index.css`
-
-### 16.3 Backend scaffolding rules
-Required files:
-- `backend/package.json`
-- `backend/src/index.ts`
-- `backend/src/db/database.ts`
-- `backend/db/init.sql`
-
-### 16.4 Component generation rules
-- generate in dependency order
-- every component must export default function
-- no placeholder text
-- meaningful props/state/effects
-- valid imports only
-
-### 16.5 App generation rules
-- compose all generated components
-- if backend exists, use API_BASE or fetch
-- support loading/error states when data fetching exists
-
-### 16.6 Backend data access rules
-- backend routes must query shared tables
-- each query must include `project_id`
-- no per-project table naming pattern is allowed
-- route handlers must reject requests missing `project_id` when the route is project scoped
-
----
-
-## 17. Security and Isolation Rules
-
-### 17.1 Mandatory rules
-- never ask user for stack/framework/language
-- never write outside workspace
-- never modify templates
-- never deploy from base repo
-- never mix project data across project IDs
-- never store permanent project data in Redis
-
-### 17.2 Project ID scoping
-- all database tables are scoped by `project_id`
-- deployment records are project-scoped
-- events and tasks are project-scoped
-- workspace directory is project-scoped
-
-### 17.3 Auth/session rules
-- WebSocket requires session cookie
-- project access requires ownership validation
-- unauthorized project requests create or redirect to owned scope only
-
----
-
-## 18. Error Handling Strategy
-
-### 18.1 LLM failures
-- retry bounded number of times
-- parse JSON strictly
-- fail closed if output is invalid
-- fall back to deterministic scaffolds where appropriate
-- do not silently coerce schema mismatches
-
-### 18.2 Build failures
-- retry build/fix loops
-- stream logs back to UI
-- stop deployment if build fails
-
-### 18.3 Deployment failures
-- return provider-specific deployment metadata
-- do not hide Railway/Vercel failures
-- preserve successful frontend deployment even if backend deploy fails when possible
-
-### 18.4 Validation failures
-- return structured validation errors
-- include exact issue description
-- avoid silent coercion
-
----
-
-## 19. Logging and Observability
-
-### 19.1 Logs stored in project workspace
-- workspace root
-- file writes
-- build cwd
-- deployment paths
-
-### 19.2 Runtime logs
-- pipeline transitions
-- stage retries
-- event persistence
-- deployment statuses
-- workspace materialization details
-- revision lock acquisition/release events
-
-### 19.3 Verification targets
-A verifier should inspect:
-- stage correctness
-- workspace boundaries
-- data isolation
-- build execution context
-- blueprint contract consistency
-- deployment consistency
-- revision locking correctness
-
----
-
-## 20. Public API Surface
-
-### 20.1 WebSocket
-Primary interactive pipeline transport.
-
-### 20.2 HTTP routes
-The backend exposes project/auth routes for:
-- current project resolution
-- new project creation
-- project history
-- project selection
-- event listing
-- redeploy
-- job queue compatibility
-- deployment status lookup
-
-### 20.3 Frontend SPA
-- React/Vite UI renders chat/workspace
-- communicates with WebSocket backend
-- consumes project history and status endpoints
-
----
-
-## 21. Component Responsibilities
-
-### Backend core
-- `socket.ts`: pipeline orchestrator and WebSocket broker
-- `projectFactory.ts`: workspace materialization and archiving
-- `buildWorker.ts`: install/build/test execution
-- `deploymentAgent.ts`: Vercel/Railway deployment
-- `blueprintContract.ts`: strict blueprint validation and compatibility logic
-- `blueprintAgent.ts`: blueprint generation
-- `codeGenerationAgent.ts`: multi-file code generation
-- `testFixAgent.ts`: build/test repair loop
-- `systemDesignAgent.ts`: architecture generation
-- `uiSpecAgent.ts`: UI spec generation
-- `clarificationAgent.ts`: clarification logic
-- `requirementAnalysisAgent.ts`: requirement parsing
-- `projectConsistency.ts`: cross-stage consistency checks
-- `projectStore.ts`: persistence layer
-- `modelRouter.ts`: model selection by task
-- `llmProxyClient.ts`: LLM provider abstraction
-
-### Frontend core
-- `App.jsx`: UI shell
-- `ChatWorkspace.jsx`: interactive chat/pipeline interface
-- `AuthPage.jsx`: auth UI
-- `ProjectHistory.jsx`: history interface
-
----
-
-## 22. Validation and Consistency Rules
-
-### 22.1 Cross-stage consistency
-The system validates that:
-- requirement pages are reflected in system design
-- UI spec components are wired into the blueprint
+### Checks
+- requirements pages are reflected in system design
+- UI spec components are present in blueprint
 - blueprint file registry includes required files
-- generated code contains expected files for the UI spec
-- App uses the expected export form
-- backend-required projects have backend architecture and routes
-
-### 22.2 Current normalization behavior
-The consistency validator now normalizes page labels before comparing them. This prevents false mismatches such as:
-- `pricing page`
-- `Pricing`
-
-The normalization removes the literal word `page` and compares lowercase normalized labels.
-
-### 22.3 Validation scope
-- consistency validation is staged
-- checks run only after the relevant pipeline stage has completed
-- validation returns a structured issue list with stage names and messages
+- generated code includes required frontend and backend scaffolds
+- App imports resolve to generated components
+- backend routes are project scoped
+- database queries include `project_id`
+- generated backend files are TypeScript-only
+- page labels are normalized before comparison
 
 ---
 
-## 23. Verification Checklist for External Reviewer
+## 22. Cross-Component Communication Matrix
 
-A separate verifier should confirm:
-
-1. Workspace writes only occur under `/projects/{projectId}`
-2. Templates remain read-only
-3. Pipeline stages advance correctly
-4. Blueprint output matches strict machine-readable contract
-5. Backend routes are project-scoped
-6. Redis is only used transiently
-7. PostgreSQL stores all permanent data
-8. Build worker uses workspace-local cwd
-9. Deployment only happens after successful build/test
-10. Frontend/backend stack is fixed to React/Vite + Node/TypeScript
-11. App composition includes generated components
-12. All generated imports resolve
-13. Project isolation is enforced in all persistence paths
-14. WebSocket message flow persists state and events correctly
-15. Shared-table database queries always filter by `project_id`
-16. Backend generation never emits `.js` files
-17. Requirement pages and system design pages use normalized comparison
-18. Blueprint retry prompts are clean and valid text
-
----
-
-## 24. Known Gaps / Review Targets
-
-Areas a separate verifier should inspect closely:
-- Whether blueprint contract metadata is still more permissive than desired
-- Whether backend route scoping is enforced everywhere at query-time
-- Whether `socket.ts` cleanup and retry flows can leave stale state
-- Whether build/test/deploy logs are fully persisted and correlated by project/revision
-- Whether frontend deployment warnings are surfaced clearly enough to users
-- Whether Redis fallbacks are safe when unavailable
-- Whether path sanitization is enforced consistently across all generators
-- Whether revision locking is held for the full mutation window
+| Component | Sends To | Data Sent |
+|---|---|---|
+| Frontend SPA | WebSocket Gateway | user message, clarification answer, modification request |
+| Frontend SPA | HTTP API | project history, project selection, auth calls |
+| WebSocket Gateway | Orchestrator | user request context, project/session identity |
+| Orchestrator | Requirement Agent | raw user requirement |
+| Orchestrator | Clarification Agent | requirements, prior answers |
+| Orchestrator | Confirmation Gate | clarification state |
+| Orchestrator | System Design Agent | requirements, project spec |
+| Orchestrator | UI Spec Agent | system design, requirements |
+| Orchestrator | Blueprint Agent | requirements, system design, UI spec |
+| Orchestrator | Code Generation Agent | blueprint, UI spec, system design |
+| Orchestrator | Workspace Materializer | generated file map, patch |
+| Orchestrator | Build Worker | workspace path |
+| Orchestrator | Deployment Agent | build output, revision metadata |
+| Build Worker | Package Managers | install/build/test commands |
+| Deployment Agent | Vercel | frontend build directory |
+| Deployment Agent | Railway | backend source directory |
+| Project Store | DB | events, snapshots, tasks, deployments |
+| Redis | Orchestrator | transient progress/state cache |
 
 ---
 
-## 25. Suggested Follow-Up Hardening
+## 23. What Data Each Agent Uses
 
-Recommended next steps:
-- split blueprint compatibility metadata from strict generation contract even further if needed
-- require explicit route-to-table mapping for every backend route
-- store formal pipeline audit logs in a dedicated table
-- add unit tests for contract validation and workspace safety
-- add integration tests for WebSocket stage transitions
-- add build verification for generated project workspaces
-- add deployment contract tests for Vercel/Railway response parsing
-- add concurrency tests for revision locking
-- add regression tests for page normalization in consistency checks
+### Requirement analysis
+Uses:
+- user text
+
+Produces:
+- structured requirements
+
+### Clarification
+Uses:
+- requirements
+- asked questions
+- answers
+- modification context
+
+Produces:
+- questions or confirmed clarification
+
+### System design
+Uses:
+- requirements
+- project spec
+
+Produces:
+- architecture JSON
+
+### UI spec
+Uses:
+- requirements
+- system design
+- project spec
+
+Produces:
+- component and navigation spec
+
+### Blueprint
+Uses:
+- requirements
+- system design
+- UI spec
+- project spec
+
+Produces:
+- validated file and route blueprint
+
+### Code generation
+Uses:
+- blueprint
+- UI spec
+- system design
+- requirements
+- project spec
+
+Produces:
+- generated file map
+- patch
+- task queue
+
+### Test/fix
+Uses:
+- workspace files
+- build logs
+- generated file set
+
+Produces:
+- repaired files
+- success/failure logs
+
+### Deployment
+Uses:
+- build output
+- backend source
+- workspace path
+- project/revision metadata
+
+Produces:
+- deployment URLs
+- provider IDs
+- warnings
 
 ---
 
-## 26. Final Note
+## 24. Safety Guarantees
 
-This system is designed to be verified by an external agent. The most important invariants to validate are:
+The system enforces:
 
-- workspace isolation
-- fixed stack enforcement
-- strict blueprint determinism
-- backend route project scoping
-- shared-table database usage
-- build/deploy gating
-- persistence correctness
-- revision locking correctness
-- cross-stage consistency normalization
+- no generated code is written into the base app repo
+- no generated code depends on base app internals
+- no cross-session source sharing
+- no database access without `project_id`
+- no deployment without successful validation/build
+- no state machine jump without explicit transition
+- no workspace writes outside `/tmp/project-{projectId}`
+- no permanent storage of generated source in Redis
 
-Any deviation from those invariants should be treated as a system gap.
+---
+
+## 25. Known Critical Integration Points
+
+These are the places a reviewer should inspect closely:
+
+1. **Socket server ↔ project session store**
+2. **Orchestrator ↔ state machine**
+3. **Blueprint ↔ code generation contract**
+4. **Code generation ↔ materializer**
+5. **Materializer ↔ build worker**
+6. **Build worker ↔ deployment agent**
+7. **Deployment agent ↔ PostgreSQL/Railway/Vercel**
+8. **Event persistence ↔ WebSocket send wrapper**
+9. **Project consistency ↔ generated file set**
+10. **Workspace cleanup ↔ post-deployment completion**
+
+---
+
+## 26. Final Summary
+
+The architecture is a fully isolated, session-aware, self-healing generation pipeline.
+
+The most important system invariants are:
+
+- the base app is immutable during project generation
+- generated projects are ephemeral and project-scoped
+- all generated code is in-memory first
+- workspace materialization only occurs under `/tmp/project-{projectId}`
+- all persistent project data is scoped by `project_id`
+- build, validation, and deployment operate only on generated artifacts
+- failures are classified and recovered without crashing the pipeline
+
+This document should be used as the implementation reference for runtime behavior, control flow, persistence, and deployment isolation.

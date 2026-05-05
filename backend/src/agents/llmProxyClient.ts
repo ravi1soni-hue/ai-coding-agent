@@ -81,15 +81,19 @@ export class LLMProxyClient {
     try {
       return { data: JSON.parse(raw), isHtml: looksLikeHtml, snippet };
     } catch (parseErr) {
+      const bodyLooksHtml = /<html|<!doctype html|<head|<body|<title/i.test(lower);
       this.log(`${context} invalid JSON response`, {
         status: response.status,
         statusText: response.statusText,
         contentType,
-        isHtmlResponse: looksLikeHtml,
+        isHtmlResponse: looksLikeHtml || bodyLooksHtml,
         raw: raw.slice(0, 800),
         snippet,
         parseError: String(parseErr),
       });
+      if (bodyLooksHtml) {
+        throw new Error(this.describeHtmlResponse(response.status, response.statusText, raw, contentType, 'unknown', context));
+      }
       throw new Error(`LLM Proxy ${context} returned invalid JSON response (${response.status} ${response.statusText}). ${snippet}`);
     }
   }
@@ -196,17 +200,23 @@ export class LLMProxyClient {
             try {
               ({ data } = this.parseResponseBody(raw, response, 'chatCompletion'));
             } catch (parseError: any) {
-              if (!response.ok && this.shouldRetryStatus(response.status) && attempt < 2) {
-                this.log('chatCompletion retrying after invalid upstream response', {
+              const contentType = response.headers.get('content-type');
+              const isHtmlResponse = /text\/html|application\/xhtml\+xml/i.test(contentType || '') || /^\s*</.test(raw) || /<!doctype html|<html/i.test(raw);
+              if (isHtmlResponse || !response.ok) {
+                this.log('chatCompletion invalid upstream response', {
                   modelCandidate,
                   attempt: attempt + 1,
                   status: response.status,
                   statusText: response.statusText,
-                  contentType: response.headers.get('content-type'),
+                  contentType,
                   chatUrl,
+                  reason: parseError instanceof Error ? parseError.message : String(parseError),
                 });
-                await this.sleep(750 * (attempt + 1));
-                continue;
+                if (attempt < 2) {
+                  await this.sleep(750 * (attempt + 1));
+                  continue;
+                }
+                break;
               }
               throw parseError;
             }
@@ -269,7 +279,26 @@ export class LLMProxyClient {
           body: JSON.stringify({ texts, dimensions }),
         });
         const raw = await response.text();
-        const { data } = this.parseResponseBody(raw, response, 'embedding');
+        let data: any;
+        try {
+          ({ data } = this.parseResponseBody(raw, response, 'embedding'));
+        } catch (parseError: any) {
+          const contentType = response.headers.get('content-type');
+          const isHtmlResponse = /text\/html|application\/xhtml\+xml/i.test(contentType || '') || /^\s*</.test(raw) || /<!doctype html|<html/i.test(raw);
+          if (isHtmlResponse || !response.ok) {
+            lastError = parseError;
+            this.log('embedding invalid upstream response', {
+              status: response.status,
+              embeddingUrl,
+              contentType,
+              reason: parseError instanceof Error ? parseError.message : String(parseError),
+            });
+            if (this.shouldRetryStatus(response.status)) {
+              continue;
+            }
+          }
+          throw parseError;
+        }
         this.log('embedding response', { status: response.status, embeddingUrl, data });
         if (!response.ok) {
           this.log('embedding error', { status: response.status, embeddingUrl, data });
@@ -280,7 +309,7 @@ export class LLMProxyClient {
           throw new Error(`LLM Proxy embedding failed: ${response.status} ${JSON.stringify(data)}`);
         }
         return data.embeddings.map((e: any) => Array.isArray(e) ? e.map(Number) : [Number(e)]);
-        } catch (err: any) {
+      } catch (err: any) {
         lastError = err;
         const retryableNetworkErr = err?.name === 'AbortError' || /network|timeout|fetch failed/i.test(String(err?.message || ''));
         if (retryableNetworkErr) {

@@ -47,7 +47,7 @@ export async function handleDeployment(input: DeploymentInput): Promise<HandlerR
         hasBackend: input.hasBackend,
       });
       debug('handleDeployment:done', { projectId: input.projectId, url: result.frontend_url });
-      return { success: true, data: result };
+      return { success: true, data: result, fallback: null };
     } catch (err) {
       if (attempt < MAX_ATTEMPTS) {
         debug('handleDeployment:retry', { projectId: input.projectId, attempt, error: String((err as any)?.message || err) });

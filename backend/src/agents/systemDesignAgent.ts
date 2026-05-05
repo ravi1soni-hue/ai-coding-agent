@@ -2,7 +2,44 @@ import { getModelConfigForTask } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { debug, error as logError } from '../utils/logger';
 
-export async function systemDesignAgent(input: any) {
+export type BrainState = {
+  activeState: string;
+  projectSpec?: unknown;
+  consistencyScore?: number;
+  domain?: string;
+  transitions?: string[];
+  metadata?: Record<string, unknown>;
+};
+
+export type StateAwareAgentResult<T> = {
+  updatedState: Partial<BrainState>;
+  nextStateProposal: string;
+  consistencyScore: number;
+  output: T;
+};
+
+function transitionTo(currentState: string, nextState: string): string {
+  const normalizedCurrent = String(currentState || '').trim();
+  const normalizedNext = String(nextState || '').trim();
+  if (!normalizedNext) return 'CLARIFICATION_REQUIRED';
+  if (!normalizedCurrent) return normalizedNext;
+  return normalizedNext;
+}
+
+function semanticSystemDesignScore(input: { projectSpec: unknown; result: unknown }): number {
+  const text = JSON.stringify(input).toLowerCase();
+  const score =
+    0.52 +
+    (/\breact-vite\b/.test(text) ? 0.08 : 0) +
+    (/\bvercel\b/.test(text) ? 0.05 : 0) +
+    (/\brailway\b/.test(text) ? 0.05 : 0) +
+    (/\bpostgres\b|\bdatabase\b/.test(text) ? 0.08 : 0) +
+    (/\bapi\b|\broute\b/.test(text) ? 0.08 : 0) +
+    (/\bplaceholder\b|\btodo\b|\btbd\b/.test(text) ? -0.24 : 0);
+  return Math.max(0, Math.min(1, score));
+}
+
+export async function systemDesignAgent(input: any): Promise<StateAwareAgentResult<any>> {
   debug('systemDesignAgent', { input });
   try {
     if (!input) throw new Error('Input required');
@@ -120,8 +157,21 @@ RULES:
       throw new Error('System design: backend required but backend field is null');
     }
 
-    debug('systemDesignAgent:result', { result });
-    return result;
+    const consistencyScore = semanticSystemDesignScore({ projectSpec, result });
+
+    debug('systemDesignAgent:result', { result, consistencyScore });
+    return {
+      updatedState: {
+        activeState: consistencyScore < 0.58 ? transitionTo(input.activeState || input.globalState?.activeState || 'system_design', 'CLARIFICATION_REQUIRED') : transitionTo(input.activeState || input.globalState?.activeState || 'system_design', 'UI_SPEC'),
+        domain: 'system_design',
+        consistencyScore,
+        transitions: [...(input.globalState?.transitions || []), `systemDesign:${String(input.activeState || input.globalState?.activeState || 'system_design')}`],
+        metadata: { backendRequired, authRequired },
+      },
+      nextStateProposal: consistencyScore < 0.58 ? 'CLARIFICATION_REQUIRED' : 'UI_SPEC',
+      consistencyScore,
+      output: result,
+    };
   } catch (err) {
     logError('systemDesignAgent', err);
     throw err;

@@ -24,7 +24,7 @@ type MaterializeInput = {
   codeGen: any;
 };
 
-const PROJECTS_ROOT = path.resolve(__dirname, '../../../projects');
+const PROJECTS_ROOT = path.resolve('/tmp');
 const TEMPLATE_ROOT = path.resolve(__dirname, '../../../templates/fullstack-starter');
 const FALLBACK_FRONTEND_TEMPLATE_DIR = path.resolve(__dirname, '../templates/frontend');
 const FALLBACK_BACKEND_TEMPLATE_DIR = path.resolve(__dirname, '../templates/backend');
@@ -145,7 +145,7 @@ async function writeGeneratedFile(workspaceRoot: string, file: GeneratedFile): P
 
 export async function materializeProjectWorkspace(input: MaterializeInput): Promise<MaterializedRevision> {
   const projectSegment = sanitizeSegment(input.projectId);
-  const workspaceRoot = path.join(PROJECTS_ROOT, projectSegment);
+  const workspaceRoot = path.join(PROJECTS_ROOT, `project-${projectSegment}`);
   const revisionId = crypto.randomUUID();
   await fs.mkdir(workspaceRoot, { recursive: true });
   await materializeTemplate(workspaceRoot);

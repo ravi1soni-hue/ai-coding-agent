@@ -11,7 +11,7 @@
 
 import { getModelConfigForTask } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
-import { compileStructuredSpec } from './structuredSpec';
+import { compileStructuredSpec, validateStructuredSpec, type StructuredSpec } from './structuredSpec';
 import { debug, error as logError } from '../utils/logger';
 
 export interface ComponentInterface {
@@ -69,6 +69,23 @@ export interface UISpec {
   navigationStrategy: string;
   stateManagementStrategy: string;
 }
+
+export type BrainState = {
+  activeState: string;
+  projectSpec?: unknown;
+  uiSpec?: unknown;
+  consistencyScore?: number;
+  domain?: string;
+  transitions?: string[];
+  metadata?: Record<string, unknown>;
+};
+
+export type StateAwareAgentResult<T> = {
+  updatedState: Partial<BrainState>;
+  nextStateProposal: string;
+  consistencyScore: number;
+  output: T;
+};
 
 async function callLLMWithRetry(
   llmProxy: LLMProxyClient,
@@ -161,7 +178,20 @@ function calculateComponentDependencies(
   return { order, dependencies: depMap };
 }
 
-export async function uiSpecAgent(input: any): Promise<any> {
+function semanticUISpecScore(input: { systemDesign: unknown; requirements: unknown; projectSpec: unknown; uiSpec: UISpec }): number {
+  const text = JSON.stringify(input).toLowerCase();
+  const score =
+    0.5 +
+    (/\bproject_id\b/.test(text) ? 0.08 : 0) +
+    (/\bapp\b/.test(text) ? 0.04 : 0) +
+    (/\bcomponent\b/.test(text) ? 0.04 : 0) +
+    (/\bapi\b|\bendpoint\b/.test(text) ? 0.08 : 0) +
+    (/\bnavigation\b|\brouting\b/.test(text) ? 0.06 : 0) +
+    (/\bplaceholder\b|\btodo\b|\btbd\b/.test(text) ? -0.2 : 0);
+  return Math.max(0, Math.min(1, score));
+}
+
+export async function uiSpecAgent(input: any): Promise<StateAwareAgentResult<StructuredSpec>> {
   debug('uiSpecAgent', { input });
   try {
     if (!input || !input.systemDesign) {
@@ -467,8 +497,27 @@ RULES:
       requirements,
     });
 
-    debug('uiSpecAgent:final', { structuredSpec });
-    return structuredSpec;
+    const consistencyScore = semanticUISpecScore({
+      systemDesign,
+      requirements,
+      projectSpec,
+      uiSpec,
+    });
+
+    debug('uiSpecAgent:final', { structuredSpec, consistencyScore });
+
+    return {
+      updatedState: {
+        activeState: consistencyScore < 0.55 ? 'BLUEPRINT_REQUIRED' : 'UI_SPEC',
+        domain: 'ui_spec',
+        consistencyScore,
+        transitions: [String(input.globalState?.activeState || 'system_design'), 'ui_spec'],
+        metadata: { projectId: input.projectId },
+      },
+      nextStateProposal: consistencyScore < 0.55 ? 'BLUEPRINT_REQUIRED' : 'UI_SPEC',
+      consistencyScore,
+      output: structuredSpec,
+    };
   } catch (err) {
     logError('uiSpecAgent', err);
     throw err;

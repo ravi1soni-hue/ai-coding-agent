@@ -22,11 +22,11 @@ function resolveWorkspaceRoot(payload: BuildWorkerPayload): string | undefined {
 }
 
 function assertInsideProjectsRoot(workspaceRoot: string): void {
-  const projectsRoot = path.resolve(__dirname, '../../../projects');
+  const projectsRoot = path.resolve('/tmp');
   const normalizedRoot = path.resolve(workspaceRoot);
   const relative = path.relative(projectsRoot, normalizedRoot);
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
-    throw new Error(`Refusing to operate outside /projects: ${workspaceRoot}`);
+    throw new Error(`Refusing to operate outside /tmp: ${workspaceRoot}`);
   }
 }
 
