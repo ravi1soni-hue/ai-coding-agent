@@ -240,6 +240,12 @@ export type CodeRevisionRecord = {
   projectId: string;
   files: Array<{ path: string; content: string }>;
   patch?: string;
+  workspacePath?: string;
+  sourceArchivePath?: string;
+  sourceHash?: string;
+  patchPath?: string;
+  patchApplied?: boolean;
+  patchApplyLog?: string;
 };
 
 export type DeploymentRecord = {
@@ -247,6 +253,17 @@ export type DeploymentRecord = {
   frontendUrl: string | null;
   backendUrl: string | null;
   raw?: unknown;
+  vercelDeploymentId?: string;
+  vercelInspectUrl?: string;
+  vercelStatus?: string;
+  vercelLogUrl?: string;
+  railwayDeploymentId?: string;
+  railwayStatus?: string;
+  railwayLogUrl?: string;
+  railwayDashboardUrl?: string;
+  codeRevisionId?: string;
+  sourceArchivePath?: string;
+  sourceHash?: string;
 };
 
 export type PersistenceAdapter = {

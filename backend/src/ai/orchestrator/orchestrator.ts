@@ -684,6 +684,12 @@ export async function runAIOrchestration(
         projectId: command.projectId,
         files: memory.code.files,
         patch: memory.code.patch,
+        workspacePath: materializedRevision.workspaceDir,
+        sourceArchivePath: materializedRevision.archivePath,
+        sourceHash: materializedRevision.sourceHash,
+        patchPath: materializedRevision.patchPath,
+        patchApplied: materializedRevision.patchApplied,
+        patchApplyLog: materializedRevision.patchApplyLog,
       });
     } catch { /* best-effort */ }
   }
@@ -729,12 +735,23 @@ export async function runAIOrchestration(
   if (deploymentResult.status !== 'success') return finalizeResult(memory, deploymentResult, null, null);
 
   if (persistence.saveDeployment && memory.deployment) {
+    const raw = (memory.deployment.raw || {}) as Record<string, unknown>;
     try {
       await persistence.saveDeployment({
         projectId: command.projectId,
         frontendUrl: memory.deployment.frontendUrl,
         backendUrl: memory.deployment.backendUrl,
         raw: memory.deployment.raw,
+        vercelDeploymentId: typeof raw.vercel_deployment_id === 'string' ? raw.vercel_deployment_id : undefined,
+        vercelInspectUrl: typeof raw.vercel_inspect_url === 'string' ? raw.vercel_inspect_url : undefined,
+        vercelStatus: typeof raw.vercel_status === 'string' ? raw.vercel_status : undefined,
+        vercelLogUrl: typeof raw.vercel_log_url === 'string' ? raw.vercel_log_url : undefined,
+        railwayDeploymentId: typeof raw.railway_deployment_id === 'string' ? raw.railway_deployment_id : undefined,
+        railwayStatus: typeof raw.railway_status === 'string' ? raw.railway_status : undefined,
+        railwayLogUrl: typeof raw.railway_log_url === 'string' ? raw.railway_log_url : undefined,
+        railwayDashboardUrl: typeof raw.railway_dashboard_url === 'string' ? raw.railway_dashboard_url : undefined,
+        sourceArchivePath: materializedRevision.archivePath,
+        sourceHash: materializedRevision.sourceHash,
       });
     } catch { /* best-effort */ }
   }
