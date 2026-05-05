@@ -121,11 +121,29 @@ export async function clarificationAgent(input: any): Promise<ClarificationOutpu
   debug('clarificationAgent', { input });
   if (!input?.requirements) throw new Error('Input with requirements required');
 
-  const { model, apiKey } = getModelConfigForTask('clarification');
-  const llmProxy = new LLMProxyClient({ apiKey });
-
   const clarificationAnswers: Record<string, string> = input.clarificationAnswers || {};
   const askedQuestions: string[] = Array.isArray(input.askedQuestions) ? input.askedQuestions : [];
+
+  // TEMP: single fixed question — ask once, then confirm on next call
+  const FIXED_QUESTION = 'Please share any additional details about your project — features, pages, data, user flows, integrations, or design preferences — so we can build exactly what you need.';
+  const alreadyAnswered = FIXED_QUESTION in clarificationAnswers || askedQuestions.includes(FIXED_QUESTION);
+  if (!alreadyAnswered) {
+    return {
+      questions: [FIXED_QUESTION],
+      confirmed: false,
+      done: false,
+      context: { clarificationAnswers, askedQuestions, modification: input.modification, lastQuestion: FIXED_QUESTION, lastAnswer: input.lastAnswer },
+    };
+  }
+  return {
+    questions: [],
+    confirmed: true,
+    done: true,
+    context: { clarificationAnswers, askedQuestions, modification: input.modification, lastQuestion: input.lastQuestion, lastAnswer: input.lastAnswer },
+  };
+
+  const { model, apiKey } = getModelConfigForTask('clarification');
+  const llmProxy = new LLMProxyClient({ apiKey });
   const projectSpec = input.projectSpec || null;
   const context: ClarificationContext = {
     clarificationAnswers,
@@ -186,7 +204,7 @@ export async function clarificationAgent(input: any): Promise<ClarificationOutpu
         context,
       };
     } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
+      lastError = (err as Error)?.message ?? String(err);
       logError('clarificationAgent:attempt-failed', { attempt, error: lastError });
       if (attempt < MAX_ATTEMPTS) {
         continue;
