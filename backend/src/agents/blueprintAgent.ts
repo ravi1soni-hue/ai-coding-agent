@@ -61,7 +61,9 @@ function deriveProjectType(requirements: any, backendRequired: boolean): Project
 }
 
 export function generateBlueprint(structuredSpec: StructuredSpec, systemDesign: any, requirements: any): ProjectBlueprint {
-  const componentFiles = structuredSpec.componentSchema.map((component) =>
+  const rootComponent = structuredSpec.componentSchema.find((component) => component.name === 'App');
+  const generatedComponents = structuredSpec.componentSchema.filter((component) => component.name !== 'App');
+  const componentFiles = generatedComponents.map((component) =>
     toBlueprintFile(
       component.filePath,
       'component',
@@ -101,15 +103,25 @@ export function generateBlueprint(structuredSpec: StructuredSpec, systemDesign: 
     structuredSpec.filePlan.map((entry) => [entry.path, uniqueSorted(entry.dependsOn)])
   );
 
-  const frontendPages = structuredSpec.componentSchema.map((component) => component.name).filter((name) => name !== 'App');
+  const requirementPages = Array.isArray(requirements?.pages)
+    ? requirements.pages
+        .map((page: unknown) => String(page).trim())
+        .filter(Boolean)
+    : [];
+  const layoutPages = structuredSpec.layoutTree.children
+    .filter((node) => node.type === 'page' || node.type === 'route' || generatedComponents.some((component) => component.name === node.component))
+    .map((node) => node.component)
+    .filter((name) => name !== 'App');
+  const frontendPages = uniqueSorted([...layoutPages, ...requirementPages]);
+  const frontendComponents = uniqueSorted([rootComponent?.name || 'App', ...generatedComponents.map((component) => component.name)]);
   const backendModules = structuredSpec.backend_required ? structuredSpec.apiContracts.map((route) => path.basename(route.routeFile, '.ts')) : [];
 
   const strict: ProjectBlueprintStrict = {
     projectType: deriveProjectType(requirements, structuredSpec.backend_required),
-    modules: uniqueSorted([...frontendPages, ...backendModules]),
+    modules: uniqueSorted([...(frontendPages.length > 0 ? frontendPages : ['App']), ...backendModules]),
     frontend: {
-      pages: frontendPages,
-      components: frontendPages,
+      pages: frontendPages.length > 0 ? frontendPages : ['App'],
+      components: frontendComponents,
       routing: true,
       stateManagement: 'context',
     },

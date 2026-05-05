@@ -212,7 +212,7 @@ export function validateProjectBlueprint(raw: unknown, context?: { requirements?
   if (!modules.length) throw new Error('strict.modules cannot be empty');
   if (backend.required && !backendModules.length) throw new Error('strict.backend.modules cannot be empty when backend.required is true');
   if (backend.required && !backendRouteStrings.length) throw new Error('strict.backend.routes cannot be empty when backend.required is true');
-  if (!tables.length) throw new Error('strict.database.tables cannot be empty');
+  if (backend.required && !tables.length) throw new Error('strict.database.tables cannot be empty when backend.required is true');
 
   const invariants = metadata?.invariants ? assertStringArray(metadata.invariants, 'metadata.invariants') : [];
   if (invariants.length > 0 && !invariants.some((rule) => /project_id/i.test(rule))) throw new Error('metadata.invariants must include a project_id isolation rule');

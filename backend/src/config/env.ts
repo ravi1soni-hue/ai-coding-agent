@@ -15,8 +15,8 @@ export const config = {
   RAILWAY_ENVIRONMENT_ID: process.env.RAILWAY_ENVIRONMENT_ID || '',
   RAILWAY_PUBLIC_URL: process.env.RAILWAY_PUBLIC_URL || process.env.RAILWAY_STATIC_URL || process.env.RAILWAY_SERVICE_URL || '',
   RAILWAY_GRAPHQL_URL: process.env.RAILWAY_GRAPHQL_URL || 'https://backboard.railway.app/graphql/v2',
-  LLM_PROXY_CHAT_URL: process.env.LLM_PROXY_CHAT_URL || 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/chat/completions',
-  LLM_PROXY_EMBEDDING_URL: process.env.LLM_PROXY_EMBEDDING_URL || 'https://quasarmarket.coforge.com/qag/llmrouter-api/v2/text/embeddings',
+  LLM_PROXY_CHAT_URL: process.env.LLM_PROXY_CHAT_URL || '',
+  LLM_PROXY_EMBEDDING_URL: process.env.LLM_PROXY_EMBEDDING_URL || '',
   // Model aliases/slugs used as the request `model` value.
   GPT4O_MINI_MODEL: process.env.GPT4O_MINI_MODEL || '',
   GPT5_MINI_MODEL: process.env.GPT5_MINI_MODEL || '',
