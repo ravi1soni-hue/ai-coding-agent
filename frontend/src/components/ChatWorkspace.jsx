@@ -56,6 +56,7 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
   const [currentActivity, setCurrentActivity] = useState('');
   const [pipelineActive, setPipelineActive] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [brainState, setBrainState] = useState({});
 
   const wsRef = useRef(null);
   const msgEndRef = useRef(null);
@@ -202,6 +203,9 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
         case 'confirmation':
           pushMessage('assistant', payload.message || 'Please confirm to proceed.');
           break;
+        case 'brainState':
+          setBrainState(payload.brainState || {});
+          break;
         case 'done':
           setProgress(1);
           setStatusText('Complete');
@@ -313,6 +317,13 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
           </div>
           {stageStatus ? <div className="socketSubStatus" title={stageStatus}>{stageStatus}</div> : null}
           {currentActivity ? <div className="currentActivityRow">Currently: {currentActivity}</div> : null}
+
+          <div className="brainStateDebugPanel" style={{ margin: '14px 0 18px', padding: '12px', borderRadius: '12px', border: '1px solid rgba(148, 163, 184, 0.35)', background: '#111827' }}>
+            <div style={{ marginBottom: '8px', fontSize: '0.92rem', fontWeight: 600, color: '#f8fafc' }}>Debug: brainState payload</div>
+            <pre style={{ margin: 0, maxHeight: '210px', overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#e2e8f0', fontSize: '0.82rem' }}>
+              {Object.keys(brainState).length ? JSON.stringify(brainState, null, 2) : 'No brainState received yet.'}
+            </pre>
+          </div>
 
           <div className="buildHint">Describe what to build and follow live progress below.</div>
 
