@@ -8,7 +8,8 @@ import { materializeProjectWorkspace } from './factory/projectFactory';
 type GeneratedFile = { path: string; content: string };
 
 async function createTempDir(prefix: string): Promise<string> {
-  return fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  // buildWorker is intentionally restricted to work under /tmp
+  return fs.mkdtemp(path.join('/tmp', prefix));
 }
 
 async function writeFiles(rootDir: string, files: GeneratedFile[]): Promise<void> {
@@ -23,51 +24,54 @@ async function testSuccessfulBuild(): Promise<void> {
   const rootDir = await createTempDir('ai-builder-build-');
   await writeFiles(rootDir, [
     {
-      path: 'package.json',
+      path: 'frontend/package.json',
       content: JSON.stringify({
         name: 'e2e-success',
         private: true,
         type: 'module',
         scripts: { build: 'node ./build.mjs' },
         dependencies: {
-          react: 'file:./stubs/react',
-        },
-        devDependencies: {
-          'react-dom': 'file:./stubs/react-dom',
+          react: '^18.3.1',
+          'react-dom': '^18.3.1',
         },
       }, null, 2),
     },
     {
-      path: 'index.html',
+      path: 'frontend/index.html',
       content: '<!doctype html><html><body><div id="root"></div></body></html>',
     },
     {
-      path: 'src/main.jsx',
+      path: 'frontend/src/main.jsx',
       content: 'console.log("hello");',
     },
     {
-      path: 'build.mjs',
+      path: 'frontend/build.mjs',
       content: 'import fs from "fs/promises"; await fs.mkdir("dist", { recursive: true }); await fs.writeFile("dist/index.html", "<!doctype html><html><body>ok</body></html>");',
     },
     {
-      path: 'stubs/react/package.json',
+      path: 'frontend/stubs/react/package.json',
       content: JSON.stringify({ name: 'react', version: '0.0.0', main: 'index.js' }, null, 2),
     },
     {
-      path: 'stubs/react/index.js',
+      path: 'frontend/stubs/react/index.js',
       content: 'export default {};',
     },
     {
-      path: 'stubs/react-dom/package.json',
+      path: 'frontend/stubs/react-dom/package.json',
       content: JSON.stringify({ name: 'react-dom', version: '0.0.0', main: 'index.js' }, null, 2),
     },
     {
-      path: 'stubs/react-dom/index.js',
+      path: 'frontend/stubs/react-dom/index.js',
       content: 'export default {};',
     },
   ]);
 
   const result = await runBuildWorker({ workspaceDir: rootDir });
+  if (!result.success) {
+    // Helps debug pre-validation/build failures in CI-like environments.
+    // eslint-disable-next-line no-console
+    console.error('[e2e-success] buildWorker logs:\n', result.logs);
+  }
   assert.strictEqual(result.success, true, 'expected build to succeed');
   assert.ok(result.buildDir?.endsWith('dist'), 'expected frontend build directory');
 }
@@ -96,7 +100,7 @@ async function testBuildFailurePath(): Promise<void> {
   const rootDir = await createTempDir('ai-builder-fail-');
   await writeFiles(rootDir, [
     {
-      path: 'package.json',
+      path: 'frontend/package.json',
       content: JSON.stringify({
         name: 'e2e-fail',
         private: true,
@@ -105,11 +109,11 @@ async function testBuildFailurePath(): Promise<void> {
       }, null, 2),
     },
     {
-      path: 'index.html',
+      path: 'frontend/index.html',
       content: '<!doctype html><html><body><div id="root"></div></body></html>',
     },
     {
-      path: 'src/main.jsx',
+      path: 'frontend/src/main.jsx',
       content: 'console.log("hello");',
     },
   ]);

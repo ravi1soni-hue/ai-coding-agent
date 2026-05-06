@@ -92,6 +92,15 @@ function calculateSemanticGap(requirements: any, projectSpec: any): number {
   return Math.max(0, Math.min(1, 0.45 + positive - negative));
 }
 
+function targetClarificationCount(semanticGap: number): number {
+  // Desired total number of clarifying questions (across rounds).
+  // User asked: "2–5 depending upon clarity".
+  if (semanticGap >= 0.75) return 5;
+  if (semanticGap >= 0.62) return 4;
+  if (semanticGap >= 0.48) return 3;
+  return 2;
+}
+
 function shouldAskMoreQuestions(
   requirements: any,
   projectSpec: any,
@@ -99,15 +108,18 @@ function shouldAskMoreQuestions(
   clarificationAnswersMap: Record<string, string> = {}
 ): boolean {
   const askedFromSpec = Array.isArray(projectSpec?.askedQuestions) ? projectSpec.askedQuestions.length : 0;
-  const askedQuestions = Math.max(askedFromSpec, askedQuestionsList.length);
-  if (askedQuestions >= MAX_CLARIFICATION_ROUNDS) return false;
-  const answersFromSpec = projectSpec?.clarificationAnswers && typeof projectSpec.clarificationAnswers === 'object'
-    ? Object.keys(projectSpec.clarificationAnswers).length
-    : 0;
-  const clarificationAnswers = Math.max(answersFromSpec, Object.keys(clarificationAnswersMap).length);
+
+  // Total questions already asked (best-effort, since spec/state may disagree).
+  const totalAsked = Math.max(askedFromSpec, askedQuestionsList.length);
+
+  // Hard cap on clarification rounds to avoid infinite loops.
+  if (totalAsked >= MAX_CLARIFICATION_ROUNDS) return false;
+
   const semanticGap = calculateSemanticGap(requirements, projectSpec);
-  if (askedQuestions === 0 && clarificationAnswers === 0) return semanticGap > 0.7;
-  return semanticGap > 0.55;
+  const targetCount = targetClarificationCount(semanticGap);
+
+  // If we haven't reached the target questions yet, keep asking.
+  return totalAsked < targetCount;
 }
 
 function transitionTo(currentState: string, nextState: string): string {
@@ -230,6 +242,13 @@ export async function clarificationAgent(input: any): Promise<StateAwareAgentRes
 
       const semanticGap = calculateSemanticGap(input.requirements, projectSpec);
       const shouldContinue = shouldAskMoreQuestions(input.requirements, projectSpec, askedQuestions, clarificationAnswers);
+
+      // Hard guardrail: if we still believe we need clarifications, we must not
+      // "confirm/done" with an empty question set (otherwise the orchestration loop skips).
+      if (shouldContinue && questions.length === 0) {
+        throw new Error('clarificationAgent:shouldContinue=true but LLM returned no questions');
+      }
+
       const resolvedQuestions = shouldContinue ? questions : [];
       const resolvedConfirmed = resolvedQuestions.length === 0;
 
