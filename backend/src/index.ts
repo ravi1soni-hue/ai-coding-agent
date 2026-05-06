@@ -17,9 +17,13 @@ if (!config.OPENAI_API_KEY || config.OPENAI_API_KEY.length < 10) {
 async function start() {
   try {
     await connectRedis();
-    await connectPostgres();
-    await ensureCoreTables();
-    await ensureVectorTable();
+    if (config.POSTGRES_URL) {
+      await connectPostgres();
+      await ensureCoreTables();
+      await ensureVectorTable();
+    } else {
+      console.warn('[WARNING] POSTGRES_URL not set — skipping DB initialization (core tables & vector store).');
+    }
   } catch (err) {
     console.error('Fatal error initializing infra:', err);
     process.exit(1);

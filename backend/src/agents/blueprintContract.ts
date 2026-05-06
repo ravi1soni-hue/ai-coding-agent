@@ -188,6 +188,14 @@ export function validateProjectBlueprint(raw: unknown, context?: { requirements?
   const backendModules = assertStringArray(backend.modules, 'strict.backend.modules');
   const backendRouteStrings = assertStringArray(backend.routes, 'strict.backend.routes');
   const tables = assertStringArray(database.tables, 'strict.database.tables');
+
+  // Stability: do not hard-fail generation when backend.required is set but backend
+  // sections are empty. Instead, downgrade backend.required to false.
+  let effectiveBackendRequired = backend.required;
+  if (effectiveBackendRequired && backendModules.length === 0) effectiveBackendRequired = false;
+  if (effectiveBackendRequired && backendRouteStrings.length === 0) effectiveBackendRequired = false;
+  if (effectiveBackendRequired && tables.length === 0) effectiveBackendRequired = false;
+
   if (typeof structure.frontend !== 'object' || Array.isArray(structure.frontend)) throw new Error('strict.structure.frontend must be an object');
   if (typeof structure.backend !== 'object' || Array.isArray(structure.backend)) throw new Error('strict.structure.backend must be an object');
 
@@ -204,15 +212,12 @@ export function validateProjectBlueprint(raw: unknown, context?: { requirements?
     const frontendEntrypoints = assertStringArray(entrypoints.frontend, 'metadata.entrypoints.frontend');
     const backendEntrypoints = assertStringArray(entrypoints.backend, 'metadata.entrypoints.backend');
     if (!frontendEntrypoints.includes('src/main.jsx') || !frontendEntrypoints.includes('src/App.jsx')) throw new Error('metadata.entrypoints.frontend must include src/main.jsx and src/App.jsx');
-    if (backend.required && !backendEntrypoints.includes('backend/src/index.ts')) throw new Error('metadata.entrypoints.backend must include backend/src/index.ts');
+    if (effectiveBackendRequired && !backendEntrypoints.includes('backend/src/index.ts')) throw new Error('metadata.entrypoints.backend must include backend/src/index.ts');
   }
 
   if (!pages.length) throw new Error('strict.frontend.pages cannot be empty');
   if (!components.length) throw new Error('strict.frontend.components cannot be empty');
   if (!modules.length) throw new Error('strict.modules cannot be empty');
-  if (backend.required && !backendModules.length) throw new Error('strict.backend.modules cannot be empty when backend.required is true');
-  if (backend.required && !backendRouteStrings.length) throw new Error('strict.backend.routes cannot be empty when backend.required is true');
-  if (backend.required && !tables.length) throw new Error('strict.database.tables cannot be empty when backend.required is true');
 
   const invariants = metadata?.invariants ? assertStringArray(metadata.invariants, 'metadata.invariants') : [];
   if (invariants.length > 0 && !invariants.some((rule) => /project_id/i.test(rule))) throw new Error('metadata.invariants must include a project_id isolation rule');
@@ -224,7 +229,7 @@ export function validateProjectBlueprint(raw: unknown, context?: { requirements?
   const filePaths = dedupeSorted(files.map((file) => file.path));
   if (filePaths.length !== files.length) throw new Error('Blueprint files must be unique');
   for (const required of REQUIRED_BUILD_FILES) if (!filePaths.includes(required)) throw new Error(`Blueprint files missing required frontend file: ${required}`);
-  for (const required of REQUIRED_BACKEND_FILES) if (backend.required && !filePaths.includes(required)) throw new Error(`Blueprint files missing required backend file: ${required}`);
+  for (const required of REQUIRED_BACKEND_FILES) if (effectiveBackendRequired && !filePaths.includes(required)) throw new Error(`Blueprint files missing required backend file: ${required}`);
 
   const dependencies = assertRecord(blueprint.dependencies ?? {}, 'dependencies');
   for (const [fileName, deps] of Object.entries(dependencies)) {
@@ -253,7 +258,7 @@ export function validateProjectBlueprint(raw: unknown, context?: { requirements?
         stateManagement: frontend.stateManagement as ProjectBlueprintStrict['frontend']['stateManagement'],
       },
       backend: {
-        required: backend.required,
+        required: effectiveBackendRequired,
         modules: backendModules,
         routes: backendRouteStrings,
       },

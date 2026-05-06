@@ -4,7 +4,12 @@ import { Pool } from 'pg';
 let pool: Pool | null = null;
 
 export async function connectPostgres() {
-  if (!config.POSTGRES_URL) throw new Error('POSTGRES_URL not set');
+  if (!config.POSTGRES_URL) {
+    console.warn('[WARNING] POSTGRES_URL not set — Postgres disabled. DB features will be unavailable.');
+    pool = null;
+    return;
+  }
+
   // Railway Postgres requires SSL — rejectUnauthorized: false for their self-signed cert
   const sslConfig = config.NODE_ENV === 'production' ? { ssl: { rejectUnauthorized: false } } : {};
   pool = new Pool({ connectionString: config.POSTGRES_URL, ...sslConfig });
