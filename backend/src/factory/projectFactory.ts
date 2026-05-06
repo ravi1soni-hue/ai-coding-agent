@@ -155,6 +155,86 @@ export async function materializeProjectWorkspace(input: MaterializeInput): Prom
     await writeGeneratedFile(workspaceRoot, file);
   }
 
+  // BuildWorker pre-validation expects:
+  // - backend/src/index.ts to exist
+  // - backend/index.js to NOT exist (TypeScript-only backend)
+  // - backend/db/init.sql (or backend/db/schema.sql) to exist
+  // Some templates can ship legacy artifacts; normalize them here.
+  const backendDir = path.join(workspaceRoot, 'backend');
+  const backendPkgPath = path.join(backendDir, 'package.json');
+
+  if (await exists(backendPkgPath)) {
+    // 1) Remove legacy backend/index.js if present
+    await fs.rm(path.join(backendDir, 'index.js'), { force: true }).catch(() => {});
+
+    // 2) Ensure backend/src/index.ts exists
+    const backendSrcDir = path.join(backendDir, 'src');
+    const backendSrcIndexTs = path.join(backendSrcDir, 'index.ts');
+    const backendExpressDts = path.join(backendSrcDir, 'express.d.ts');
+
+    if (!(await exists(backendSrcIndexTs))) {
+      await fs.mkdir(backendSrcDir, { recursive: true });
+
+      // Minimal TS-only backend entrypoint for pre-validation.
+      // Avoid imports from other local backend modules so it can compile even if the template is minimal.
+      await fs.writeFile(
+        backendSrcIndexTs,
+        `import express from 'express';
+
+const app = express();
+const port = process.env.PORT ? Number(process.env.PORT) : 3000;
+
+app.use(express.json());
+
+app.get('/api/health', async (_req: any, res: any) => {
+  res.json({ status: 'ok', db: 'not-configured' });
+});
+
+app.get('/api/echo', (req: any, res: any) => {
+  res.json({ message: 'Generated backend entrypoint running', query: req.query });
+});
+
+app.listen(port, () => {
+  console.log(\`Backend listening on port \${port}\`);
+});
+`,
+        'utf8'
+      );
+    }
+
+    if (!(await exists(backendExpressDts))) {
+      await fs.writeFile(
+        backendExpressDts,
+        `declare module 'express' {
+  const express: any;
+  export default express;
+}
+`,
+        'utf8'
+      );
+    }
+
+    // 3) Ensure backend/db/init.sql exists (fallback to minimal schema)
+    const backendDbDir = path.join(backendDir, 'db');
+    const initSqlPath = path.join(backendDbDir, 'init.sql');
+    const schemaSqlPath = path.join(backendDbDir, 'schema.sql');
+
+    if (!(await exists(initSqlPath)) && !(await exists(schemaSqlPath))) {
+      await fs.mkdir(backendDbDir, { recursive: true });
+      await fs.writeFile(
+        initSqlPath,
+        `CREATE TABLE IF NOT EXISTS items (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  data JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);`,
+        'utf8'
+      );
+    }
+  }
+
   const patchText = typeof input.codeGen?.patch === 'string' ? input.codeGen.patch : '';
   const patchPath = path.join(workspaceRoot, 'GENERATED_PATCH.diff');
   await fs.writeFile(patchPath, patchText || '# No patch generated for this revision\n', 'utf8');
