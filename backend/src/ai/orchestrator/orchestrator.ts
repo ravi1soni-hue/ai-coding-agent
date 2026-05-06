@@ -327,6 +327,7 @@ async function selfHealWithCodeGeneration(
     systemDesign: memory.systemDesign,
     uiSpec: memory.uiSpec?.structuredSpec,
     structuredSpec: memory.uiSpec?.structuredSpec,
+    blueprint: memory.blueprint?.blueprint,
     requirements: memory.requirements,
     modification: `Fix the build errors below and regenerate complete files:\n${String(logs).slice(-4000)}`,
     projectSpec,
@@ -676,7 +677,7 @@ export async function runAIOrchestration(
   if (uiSpecResult.status !== 'success') return finalizeResult(memory, uiSpecResult, null, null);
 
   const blueprintResult = await stageWrap(memory, 'blueprint', memory.uiSpec, async () => {
-    const output = await blueprintAgent({
+    const result = await blueprintAgent({
       requirements: memory.requirements,
       systemDesign: memory.systemDesign,
       uiSpec: memory.uiSpec,
@@ -684,9 +685,9 @@ export async function runAIOrchestration(
       projectId: command.projectId,
       modification: command.modification,
     });
-    setBlueprint(memory, { blueprint: output });
+    setBlueprint(memory, { blueprint: result.output });
     assertConsistency(memory, command, 'blueprint');
-    return output;
+    return result.output;
   }, { ...opts, percent: 50 });
 
   if (blueprintResult.status !== 'success') return finalizeResult(memory, blueprintResult, null, null);

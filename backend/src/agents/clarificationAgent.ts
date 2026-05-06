@@ -92,12 +92,19 @@ function calculateSemanticGap(requirements: any, projectSpec: any): number {
   return Math.max(0, Math.min(1, 0.45 + positive - negative));
 }
 
-function shouldAskMoreQuestions(requirements: any, projectSpec: any): boolean {
-  const askedQuestions = Array.isArray(projectSpec?.askedQuestions) ? projectSpec.askedQuestions.length : 0;
+function shouldAskMoreQuestions(
+  requirements: any,
+  projectSpec: any,
+  askedQuestionsList: string[] = [],
+  clarificationAnswersMap: Record<string, string> = {}
+): boolean {
+  const askedFromSpec = Array.isArray(projectSpec?.askedQuestions) ? projectSpec.askedQuestions.length : 0;
+  const askedQuestions = Math.max(askedFromSpec, askedQuestionsList.length);
   if (askedQuestions >= MAX_CLARIFICATION_ROUNDS) return false;
-  const clarificationAnswers = projectSpec?.clarificationAnswers && typeof projectSpec.clarificationAnswers === 'object'
+  const answersFromSpec = projectSpec?.clarificationAnswers && typeof projectSpec.clarificationAnswers === 'object'
     ? Object.keys(projectSpec.clarificationAnswers).length
     : 0;
+  const clarificationAnswers = Math.max(answersFromSpec, Object.keys(clarificationAnswersMap).length);
   const semanticGap = calculateSemanticGap(requirements, projectSpec);
   if (askedQuestions === 0 && clarificationAnswers === 0) return semanticGap > 0.7;
   return semanticGap > 0.55;
@@ -192,7 +199,7 @@ export async function clarificationAgent(input: any): Promise<StateAwareAgentRes
     lastQuestion: input.lastQuestion || null,
     lastAnswer: input.lastAnswer || null,
     questionBudget: MAX_QUESTIONS,
-    askMoreQuestions: shouldAskMoreQuestions(input.requirements, projectSpec),
+    askMoreQuestions: shouldAskMoreQuestions(input.requirements, projectSpec, askedQuestions, clarificationAnswers),
   });
 
   let lastError = 'Unknown clarification error';
@@ -222,7 +229,7 @@ export async function clarificationAgent(input: any): Promise<StateAwareAgentRes
       }
 
       const semanticGap = calculateSemanticGap(input.requirements, projectSpec);
-      const shouldContinue = shouldAskMoreQuestions(input.requirements, projectSpec);
+      const shouldContinue = shouldAskMoreQuestions(input.requirements, projectSpec, askedQuestions, clarificationAnswers);
       const resolvedQuestions = shouldContinue ? questions : [];
       const resolvedConfirmed = resolvedQuestions.length === 0;
 

@@ -65,6 +65,12 @@ function sanitizeIdentifier(value: string, fallback: string): string {
   return cleaned && /^[a-zA-Z_$]/.test(cleaned) ? cleaned : fallback;
 }
 
+function toComponentName(rawName: unknown, fallback: string): string {
+  const str = typeof rawName === 'string' ? rawName : fallback;
+  const id = sanitizeIdentifier(str, fallback);
+  return id.charAt(0).toUpperCase() + id.slice(1) || fallback;
+}
+
 function isAllowedPath(filePath: string, scope: 'frontend' | 'backend'): boolean {
   const p = normalizePath(filePath);
   if (p.includes('..') || path.isAbsolute(p)) return false;
@@ -285,10 +291,11 @@ function validateManifestSemantics(manifest: FrontendManifest, requirements: any
     seenNames.add(name);
   }
 
-  const resources = Array.isArray(manifest.apiResources) ? manifest.apiResources : [];
-  for (const resource of resources) {
-    if (!resource?.name || !resource?.path || !String(resource.path).startsWith('/api/')) {
-      throw new Error(`frontendManifest: invalid apiResource ${resource?.name || '(missing)'}`);
+  if (Array.isArray(manifest.apiResources)) {
+    for (const resource of manifest.apiResources) {
+      if (!resource?.name || !resource?.path || !String(resource.path).startsWith('/api/')) {
+        logWarn('codeGenerationAgent:manifest-invalid-api-resource-skipped', { name: resource?.name, path: resource?.path });
+      }
     }
   }
 
@@ -819,11 +826,11 @@ RULES:
 
   const normalizedComponents = components.map((component, index) => {
     const fallbackName = `GeneratedSection${index + 1}`;
-    const safeName = sanitizeIdentifier(component?.name || fallbackName, fallbackName);
+    const componentName = toComponentName(component?.name, fallbackName);
     return {
       ...component,
-      path: sanitizeComponentPath(component?.path || '', index),
-      name: safeName,
+      path: sanitizeComponentPath(component?.path || `src/components/${componentName}.jsx`, index),
+      name: componentName,
     };
   });
 
@@ -835,11 +842,10 @@ RULES:
     const missing = (uiSpec.components as Array<{ name?: string; path?: string; purpose?: string }>)
       .filter((c) => c.name && !manifestNames.has(c.name));
     if (missing.length > 0) {
-      const extra = missing.map((c) => ({
-        path: `src/components/${c.name}.jsx`,
-        name: c.name!,
-        purpose: String(c.purpose || `${c.name} component`),
-      }));
+      const extra = missing.flatMap((c, idx) => {
+        const safeName = toComponentName(c.name, `Section${idx + 1}`);
+        return [{ path: `src/components/${safeName}.jsx`, name: safeName, purpose: String(c.purpose || `${safeName} component`) }];
+      });
       manifest.components = [...manifest.components, ...extra];
       logWarn('codeGenerationAgent:manifest-reconciled-uispec', { added: extra.map((c) => c.name) });
     }
@@ -862,7 +868,7 @@ async function generateFrontendComponent(
   generatedDependencies?: Map<string, string>
 ): Promise<GeneratedFile> {
   const expectedPath = sanitizeComponentPath(component.path, 0);
-  const componentName = sanitizeIdentifier(component.name || path.basename(expectedPath, '.jsx'), path.basename(expectedPath, '.jsx'));
+  const componentName = toComponentName(component.name || path.basename(expectedPath, '.jsx'), path.basename(expectedPath, '.jsx'));
   const userMessage = String(requirements?.userMessage || '').slice(0, 400);
   const componentSpec = uiSpec?.components?.find((c: any) => c.name === componentName);
   const dependencyCode = componentSpec?.dependencies
@@ -1221,8 +1227,8 @@ export async function codeGenerationAgent(input: any) {
       } catch (err) {
         logWarn('codeGenerationAgent:component-fallback', { path: component.path, error: (err as Error).message });
         // Emit a minimal stub so the import in App.jsx resolves at runtime instead of crashing.
-        const compName = sanitizeIdentifier(component.name || path.basename(component.path || '', '.jsx'), 'GeneratedSection');
-        const safePath = sanitizeComponentPath(component.path || '', componentFiles.length);
+        const compName = toComponentName(component.name || path.basename(component.path || '', '.jsx'), 'GeneratedSection');
+        const safePath = sanitizeComponentPath(component.path || `src/components/${compName}.jsx`, componentFiles.length);
         const stubFile: GeneratedFile = {
           path: safePath,
           content: `import React from 'react';\nexport default function ${compName}() {\n  return <div className="section">${compName}</div>;\n}\n`,
