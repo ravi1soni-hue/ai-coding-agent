@@ -367,7 +367,7 @@ function buildProjectSpec(memory: ProjectMemory, command: OrchestrationCommand) 
       userMessage: command.userMessage,
       requirements: {
         website_type: (memory.requirements?.website_type || 'business') as 'business' | 'portfolio' | 'saas' | 'ecommerce',
-        pages: memory.requirements?.pages || [],
+        pages: (Array.isArray(memory.requirements?.pages) && memory.requirements!.pages.length > 0) ? memory.requirements!.pages : ['home'],
         backend_required: Boolean(memory.requirements?.backend_required),
         auth_required: Boolean(memory.requirements?.auth_required),
         deployment_pref: memory.requirements?.deployment_pref || 'auto',
@@ -491,6 +491,46 @@ async function runClarificationLoop(
 
   options.adapter?.emit?.({ type: 'clarification_request', stage: 'clarification', questions: [nextQuestion] });
   return { done: false, questions: [nextQuestion] };
+}
+
+async function refineRequirementsFromClarifications(
+  memory: ProjectMemory,
+  command: OrchestrationCommand,
+  options: StageOptions
+): Promise<void> {
+  const answers = memory.clarifications?.answers || {};
+  const answerEntries = Object.entries(answers).filter(([q, a]) => q?.trim() && typeof a === 'string' && a.trim());
+  if (answerEntries.length === 0) return;
+
+  const augmentedMessage = [
+    command.userMessage.trim(),
+    '',
+    'Clarifications:',
+    ...answerEntries.map(([q, a]) => `Q: ${q}\nA: ${a}`),
+  ].join('\n');
+
+  try {
+    const result = await requirementAnalysisAgent({ user_message: augmentedMessage });
+    const refined = toRequirementAnalysisOutput(
+      (result as { output?: RequirementAnalysisShape }).output || (result as unknown as RequirementAnalysisShape)
+    );
+    const existingPages = Array.isArray(memory.requirements?.pages) ? memory.requirements!.pages : [];
+    const mergedPages = Array.from(new Set([...existingPages, ...refined.pages].filter((p) => typeof p === 'string' && p.trim())));
+    setRequirements(memory, {
+      userMessage: command.userMessage,
+      website_type: refined.website_type || memory.requirements?.website_type || 'business',
+      pages: mergedPages.length > 0 ? mergedPages : (existingPages.length > 0 ? existingPages : ['home']),
+      backend_required: typeof refined.backend_required === 'boolean' ? refined.backend_required : Boolean(memory.requirements?.backend_required),
+      auth_required: typeof refined.auth_required === 'boolean' ? refined.auth_required : Boolean(memory.requirements?.auth_required),
+      deployment_pref: refined.deployment_pref || memory.requirements?.deployment_pref || 'auto',
+      notes: [memory.requirements?.notes, refined.notes].filter(Boolean).join(' ') || undefined,
+    });
+    appendHistory(memory, 'clarification', 'requirements_refined', 'Requirements refined from clarification answers', memory.requirements);
+    await persistMemory(memory, options.persistence);
+    options.adapter?.emit?.({ type: 'progress', stage: 'clarification', percent: options.percent || 16, message: 'requirements refined from clarifications' });
+  } catch {
+    // Refinement is best-effort; downstream defensive fallback covers empty pages.
+  }
 }
 
 async function runConfirmationGate(
@@ -620,6 +660,10 @@ export async function runAIOrchestration(
       return finalizePartial(memory, 'clarification', persistence);
     }
   }
+
+  // 2b. Refine requirements with clarification answers so downstream stages
+  // see an updated pages/backend/auth picture instead of the initial extraction.
+  await refineRequirementsFromClarifications(memory, command, { ...opts, percent: 16 });
 
   // 3. Build canonical project spec + post-clarification consistency check
   const projectSpec = buildProjectSpec(memory, command);

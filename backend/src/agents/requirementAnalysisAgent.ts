@@ -44,7 +44,7 @@ function coercePageName(page: unknown): string {
 
 function normalizePages(pages: unknown): string[] {
   if (!Array.isArray(pages)) return [];
-  return Array.from(new Set(pages.map(coercePageName).filter(Boolean).map((page) => page.replace(/\bpage\b/gi, '').replace(/\s+/g, ' ').trim()).filter(Boolean)));
+  return Array.from(new Set(pages.map(coercePageName).filter(Boolean).map((page) => page.replace(/\s+page\s*$/i, '').replace(/\s+/g, ' ').trim()).filter(Boolean)));
 }
 
 async function assessSemanticGap(llmProxy: LLMProxyClient, model: string, input: { userMessage: string; result: RequirementAnalysisOutput }): Promise<{ score: number; reason: string; forceFrontendOnly: boolean }> {
@@ -146,9 +146,10 @@ Do NOT include Markdown fences.`;
     }
 
     const parsed = JSON.parse(jsonMatch[0]) as RequirementAnalysisOutput;
+    const normalizedPages = normalizePages(parsed.pages).slice(0, 10);
     const result: RequirementAnalysisOutput = {
       website_type: parsed.website_type || 'business',
-      pages: normalizePages(parsed.pages).slice(0, 10) || ['home'],
+      pages: normalizedPages.length > 0 ? normalizedPages : ['home'],
       backend_required: Boolean(parsed.backend_required),
       auth_required: Boolean(parsed.auth_required),
       deployment_pref: parsed.deployment_pref || 'auto',
