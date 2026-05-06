@@ -76,7 +76,7 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
 
     async function loadProjectEvents() {
       if (!projectId) return;
-      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/events`);
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/events`, { credentials: 'include' });
       const json = await readJson(res);
       if (!active || !res.ok || !Array.isArray(json.events)) return;
 

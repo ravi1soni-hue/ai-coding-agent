@@ -69,7 +69,7 @@ export function buildSessionCookie(token: string, isSecure: boolean) {
     `sid=${encodeURIComponent(token)}`,
     'Path=/',
     'HttpOnly',
-    'SameSite=Lax',
+    `SameSite=${isSecure ? 'None' : 'Lax'}`,
     `Max-Age=${SESSION_MAX_AGE_SECONDS}`,
   ];
   if (isSecure) parts.push('Secure');
@@ -77,7 +77,7 @@ export function buildSessionCookie(token: string, isSecure: boolean) {
 }
 
 export function buildClearedSessionCookie(isSecure: boolean) {
-  const parts = ['sid=', 'Path=/', 'HttpOnly', 'SameSite=Lax', 'Max-Age=0'];
+  const parts = ['sid=', 'Path=/', 'HttpOnly', `SameSite=${isSecure ? 'None' : 'Lax'}`, 'Max-Age=0'];
   if (isSecure) parts.push('Secure');
   return parts.join('; ');
 }

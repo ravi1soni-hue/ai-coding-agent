@@ -29,6 +29,26 @@ async function start() {
     logger: { level: 'info' },
   });
 
+  fastify.addHook('onRequest', async (req, reply) => {
+    const origin = String(req.headers.origin || '');
+    const allowedOrigins = config.WS_ALLOWED_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean);
+    const originAllowed = origin && (allowedOrigins.length === 0 || allowedOrigins.includes(origin));
+
+    if (originAllowed) {
+      reply.header('Access-Control-Allow-Origin', origin);
+      reply.header('Access-Control-Allow-Credentials', 'true');
+      reply.header('Access-Control-Allow-Headers', 'Content-Type');
+      reply.header('Vary', 'Origin');
+    }
+
+    if (req.method === 'OPTIONS') {
+      if (originAllowed) {
+        reply.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+      }
+      return reply.status(204).send();
+    }
+  });
+
   fastify.register(fastifyStatic, {
     root: path.join(__dirname, '../../frontend/dist'),
     prefix: '/',

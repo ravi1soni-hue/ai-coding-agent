@@ -20,7 +20,7 @@ export default function App() {
   const [redeployError, setRedeployError] = useState('');
 
   async function loadCurrentProject() {
-    const res = await fetch('/api/projects/current');
+    const res = await fetch('/api/projects/current', { credentials: 'include' });
     const json = await readJson(res);
     if (!res.ok) throw new Error(json.error || 'Could not load project session.');
     setProjectId(json.projectId || '');
@@ -30,7 +30,7 @@ export default function App() {
   async function loadProjectHistory() {
     setHistoryLoading(true);
     try {
-      const res = await fetch('/api/projects/history');
+      const res = await fetch('/api/projects/history', { credentials: 'include' });
       const json = await readJson(res);
       if (res.ok && Array.isArray(json.projects)) setProjectHistory(json.projects);
     } finally {
@@ -42,7 +42,7 @@ export default function App() {
     let active = true;
     async function boot() {
       try {
-        const res = await fetch('/api/auth/me');
+        const res = await fetch('/api/auth/me', { credentials: 'include' });
         if (!res.ok) { if (active) setLoading(false); return; }
         const json = await readJson(res);
         if (active && json.user) {
@@ -73,6 +73,7 @@ export default function App() {
         : { email: form.email.trim(), password: form.password };
       const res = await fetch(endpoint, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
@@ -90,7 +91,7 @@ export default function App() {
   }
 
   async function onLogout() {
-    await fetch('/api/auth/logout', { method: 'POST' });
+    await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
     setUser(null);
     setProjectId('');
     setProjectHistory([]);
@@ -98,7 +99,7 @@ export default function App() {
   }
 
   async function onNewProject() {
-    const res = await fetch('/api/projects/new', { method: 'POST' });
+    const res = await fetch('/api/projects/new', { method: 'POST', credentials: 'include' });
     const json = await readJson(res);
     if (res.ok && json.projectId) {
       setProjectId(json.projectId);
@@ -109,6 +110,7 @@ export default function App() {
   async function onSelectProject(nextProjectId) {
     const res = await fetch('/api/projects/select', {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ projectId: nextProjectId }),
     });
@@ -124,7 +126,7 @@ export default function App() {
     setRedeployStatus('');
     setRedeployingProjectId(projectIdToRedeploy);
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(projectIdToRedeploy)}/redeploy`, { method: 'POST' });
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectIdToRedeploy)}/redeploy`, { method: 'POST', credentials: 'include' });
       const json = await readJson(res);
       if (!res.ok) throw new Error(json.error || 'Redeploy failed.');
       setRedeployStatus(`Redeploy started successfully. New URL: ${json.deployment?.frontend_url || 'See history for updates.'}`);
