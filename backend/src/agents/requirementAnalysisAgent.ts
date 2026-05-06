@@ -65,11 +65,27 @@ function escapeControlCharsInJsonStrings(raw: string): string {
   return out;
 }
 
+function repairJsonString(raw: string): string {
+  let out = raw;
+
+  // Normalize common “smart quotes” into normal quotes
+  out = out.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'");
+
+  // Remove trailing commas before } or ]
+  out = out.replace(/,\s*}/g, '}').replace(/,\s*]/g, ']');
+
+  // Escape control chars inside JSON strings
+  out = escapeControlCharsInJsonStrings(out);
+
+  return out;
+}
+
 function parseLlmJson<T>(text: string): T {
   try {
     return JSON.parse(text) as T;
   } catch {
-    return JSON.parse(escapeControlCharsInJsonStrings(text)) as T;
+    // Try minimal deterministic repairs for common LLM JSON issues.
+    return JSON.parse(repairJsonString(text)) as T;
   }
 }
 
@@ -169,27 +185,42 @@ export async function requirementAnalysisAgent(input: { user_message: string; gl
 - For clearly frontend-only requests, set backend_required to false unless backend is explicitly requested.
 Respond ONLY with valid JSON with keys: website_type, pages, backend_required, auth_required, deployment_pref, notes.
 Do NOT include Markdown fences.`;
-    const completion = await llmProxy.chatCompletion(
-      [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: input.user_message },
-      ],
-      model,
-      0.4,
-      0.7,
-      1200
-    );
+    async function runRequirementAnalysisOnce(system: string, temperature: number): Promise<RequirementAnalysisOutput> {
+      const completion = await llmProxy.chatCompletion(
+        [
+          { role: 'system', content: system },
+          { role: 'user', content: input.user_message },
+        ],
+        model,
+        0.0,
+        temperature,
+        1200
+      );
 
-    let content = String(completion.choices?.[0]?.message?.content || '{}');
-    debug('LLM_RAW_CONTENT_REQUIREMENT_ANALYSIS', { content });
-    content = content.replace(/```[a-zA-Z]*\s*|```/g, '').trim();
-    const jsonMatch = content.match(/{[\s\S]*}/);
-    if (!jsonMatch) {
-      logError('requirementAnalysisAgent:no-json', { content });
-      throw new Error('Malformed LLM output: No JSON object found');
+      let content = String(completion.choices?.[0]?.message?.content || '{}');
+      debug('LLM_RAW_CONTENT_REQUIREMENT_ANALYSIS', { content });
+      content = content.replace(/```[a-zA-Z]*\s*|```/g, '').trim();
+
+      // Extract the widest JSON object substring
+      const jsonMatch = content.match(/{[\s\S]*}/);
+      if (!jsonMatch) {
+        logError('requirementAnalysisAgent:no-json', { content });
+        throw new Error('Malformed LLM output: No JSON object found');
+      }
+
+      // Parse with repair attempts
+      return parseLlmJson<RequirementAnalysisOutput>(jsonMatch[0]);
     }
 
-    const parsed = parseLlmJson<RequirementAnalysisOutput>(jsonMatch[0]);
+    let parsed: RequirementAnalysisOutput;
+    try {
+      parsed = await runRequirementAnalysisOnce(systemPrompt, 0.4);
+    } catch (e) {
+      // One retry with stricter JSON-only instructions + lower randomness.
+      const retryPrompt = `${systemPrompt}
+Return ONLY JSON. No trailing commas. No extra keys. Do not include any text before/after the JSON object.`;
+      parsed = await runRequirementAnalysisOnce(retryPrompt, 0.15);
+    }
     const normalizedPages = normalizePages(parsed.pages).slice(0, 10);
     const result: RequirementAnalysisOutput = {
       website_type: parsed.website_type || 'business',
