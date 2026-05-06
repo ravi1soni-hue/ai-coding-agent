@@ -4,14 +4,18 @@ function getBackendOrigin() {
 
   const { protocol, hostname, port } = window.location;
   const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1';
+  const viteBackendPort = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_BACKEND_PORT
+    ? String(import.meta.env.VITE_BACKEND_PORT)
+    : '';
 
-  // In dev the frontend usually runs on Vite (5173) while the backend runs on 3000.
-  // If we stay on the frontend origin, the socket connects to the wrong server and
-  // immediately disconnects or fails the upgrade.
+  // In dev the frontend usually runs on Vite (5173) while the backend may run on a separate port.
+  // Use VITE_BACKEND_URL or VITE_BACKEND_PORT when provided, otherwise fall back to the default 3000 backend port.
+  if (isLocalhost && viteBackendPort) {
+    return `${protocol}//${hostname}:${viteBackendPort}`;
+  }
+
   if (isLocalhost && port && port !== '3000') {
-    const backendPort = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_BACKEND_PORT
-      ? String(import.meta.env.VITE_BACKEND_PORT)
-      : '3000';
+    const backendPort = viteBackendPort || '3000';
     return `${protocol}//${hostname}:${backendPort}`;
   }
 
