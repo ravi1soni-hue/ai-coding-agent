@@ -56,7 +56,7 @@ export function validateProjectSpec(spec: ProjectSpec, options?: { partial?: boo
   if (!Array.isArray(spec.requirements?.pages) || spec.requirements.pages.length === 0) errors.push('requirements.pages cannot be empty');
   if (!spec.clarifications || typeof spec.clarifications !== 'object') errors.push('clarifications are required');
 
-  if (spec.requirements?.backend_required && !spec.systemDesign) {
+  if (spec.requirements?.backend_required && !spec.systemDesign && !options?.partial) {
     errors.push('systemDesign is required when backend_required is true');
   }
 
