@@ -29,6 +29,50 @@ export type RequirementAnalysisOutput = {
   notes?: string;
 };
 
+function escapeControlCharsInJsonStrings(raw: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    const code = raw.charCodeAt(i);
+    if (escaped) {
+      out += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && inString) {
+      out += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      out += ch;
+      continue;
+    }
+    if (inString && code < 0x20) {
+      if (ch === '\n') out += '\\n';
+      else if (ch === '\r') out += '\\r';
+      else if (ch === '\t') out += '\\t';
+      else if (ch === '\b') out += '\\b';
+      else if (ch === '\f') out += '\\f';
+      else out += '\\u' + code.toString(16).padStart(4, '0');
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+function parseLlmJson<T>(text: string): T {
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return JSON.parse(escapeControlCharsInJsonStrings(text)) as T;
+  }
+}
+
 function coercePageName(page: unknown): string {
   if (page == null) return '';
   if (typeof page === 'string') return page.trim();
@@ -76,7 +120,7 @@ ${JSON.stringify(input.result, null, 2)}`;
   );
 
   const content = String(completion.choices?.[0]?.message?.content || '{}').replace(/```[a-zA-Z]*\s*|```/g, '').trim();
-  const parsed = JSON.parse((content.match(/{[\s\S]*}/) || ['{}'])[0]) as { score?: number; reason?: string; forceFrontendOnly?: boolean };
+  const parsed = parseLlmJson<{ score?: number; reason?: string; forceFrontendOnly?: boolean }>((content.match(/{[\s\S]*}/) || ['{}'])[0]);
   return {
     score: typeof parsed.score === 'number' ? Math.max(0, Math.min(1, parsed.score)) : 0.5,
     reason: typeof parsed.reason === 'string' ? parsed.reason : 'semantic-gap-analysis',
@@ -145,7 +189,7 @@ Do NOT include Markdown fences.`;
       throw new Error('Malformed LLM output: No JSON object found');
     }
 
-    const parsed = JSON.parse(jsonMatch[0]) as RequirementAnalysisOutput;
+    const parsed = parseLlmJson<RequirementAnalysisOutput>(jsonMatch[0]);
     const normalizedPages = normalizePages(parsed.pages).slice(0, 10);
     const result: RequirementAnalysisOutput = {
       website_type: parsed.website_type || 'business',

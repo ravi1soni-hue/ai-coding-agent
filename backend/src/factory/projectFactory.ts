@@ -168,14 +168,44 @@ export async function materializeProjectWorkspace(input: MaterializeInput): Prom
     patchApplyLog = `${apply.stdout}\n${apply.stderr}`.trim();
   }
 
+  // Create a snapshot of the workspace to avoid "file changed as we read it" race condition
+  // Archive from the snapshot instead of the live workspace
+  const snapshotId = crypto.randomUUID();
+  const snapshotDir = path.join(PROJECTS_ROOT, `snapshot-${snapshotId}`);
   const archivePath = path.join(workspaceRoot, `${revisionId}.tgz`);
-  const tar = await runCommand('tar', ['-czf', archivePath, '--exclude=.git', '--exclude=node_modules', '--exclude=dist', '--exclude=source.tgz', '.'], workspaceRoot, 30_000);
-  if (tar.exitCode !== 0) {
-    logError('materializeProjectWorkspace:archive', tar.stderr || tar.stdout);
-    throw new Error(`Failed to archive generated source: ${tar.stderr || tar.stdout}`);
+  
+  debug('materializeProjectWorkspace:creating-snapshot', { snapshotDir });
+  
+  try {
+    await copyDir(workspaceRoot, snapshotDir);
+    debug('materializeProjectWorkspace:snapshot-copied', { snapshotDir });
+    
+    // Archive the snapshot from its parent directory to ensure stable read
+    // Using absolute path for archive output
+    const tar = await runCommand(
+      'tar',
+      ['-czf', archivePath, '--exclude=.git', '--exclude=node_modules', '--exclude=dist', '--exclude=source.tgz', '-C', path.dirname(snapshotDir), path.basename(snapshotDir)],
+      path.dirname(snapshotDir),
+      30_000
+    );
+    
+    if (tar.exitCode !== 0) {
+      logError('materializeProjectWorkspace:archive', tar.stderr || tar.stdout);
+      throw new Error(`Failed to archive generated source: ${tar.stderr || tar.stdout}`);
+    }
+    
+    debug('materializeProjectWorkspace:snapshot-archived', { archivePath });
+  } finally {
+    // Clean up snapshot directory to avoid accumulation
+    try {
+      await fs.rm(snapshotDir, { recursive: true, force: true });
+      debug('materializeProjectWorkspace:snapshot-cleaned', { snapshotDir });
+    } catch (err) {
+      logError('materializeProjectWorkspace:snapshot-cleanup-failed', String(err));
+    }
   }
 
   const sourceHash = await hashDirectory(workspaceRoot);
 
-  return { revisionId, workspaceDir: workspaceRoot, archivePath, sourceHash, patchPath, patchApplied, patchApplyLog };
+  return { revisionId, workspaceDir: workspaceRoot, archivePath: path.join(workspaceRoot, `${revisionId}.tgz`), sourceHash, patchPath, patchApplied, patchApplyLog };
 }
