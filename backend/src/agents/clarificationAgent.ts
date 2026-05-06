@@ -37,6 +37,7 @@ export type ClarificationOutput = {
 
 const MAX_QUESTIONS = 3;
 const MAX_ATTEMPTS = 3;
+const MAX_CLARIFICATION_ROUNDS = 5;
 
 function stripCodeFences(content: string): string {
   return content.replace(/```[a-zA-Z]*\s*/g, '').replace(/```/g, '').trim();
@@ -93,12 +94,13 @@ function calculateSemanticGap(requirements: any, projectSpec: any): number {
 
 function shouldAskMoreQuestions(requirements: any, projectSpec: any): boolean {
   const askedQuestions = Array.isArray(projectSpec?.askedQuestions) ? projectSpec.askedQuestions.length : 0;
+  if (askedQuestions >= MAX_CLARIFICATION_ROUNDS) return false;
   const clarificationAnswers = projectSpec?.clarificationAnswers && typeof projectSpec.clarificationAnswers === 'object'
     ? Object.keys(projectSpec.clarificationAnswers).length
     : 0;
   const semanticGap = calculateSemanticGap(requirements, projectSpec);
-  if (askedQuestions === 0 && clarificationAnswers === 0 && semanticGap > 0.7) return true;
-  return semanticGap < 0.55;
+  if (askedQuestions === 0 && clarificationAnswers === 0) return semanticGap > 0.7;
+  return semanticGap > 0.55;
 }
 
 function transitionTo(currentState: string, nextState: string): string {
