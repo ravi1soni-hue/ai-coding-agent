@@ -105,6 +105,14 @@ export function createSocketServer(server: http.Server) {
     ws.send(JSON.stringify(payload));
   }
 
+  function sendBrainState(ws: any, session: any) {
+    ws.send(JSON.stringify({
+      type: 'brainState',
+      brainState: session.brainState,
+      step: session.step,
+    }));
+  }
+
   function sendError(ws: any, session: any, message: string, retryable = true) {
     ws.send(JSON.stringify({
       type: 'error',
@@ -115,10 +123,27 @@ export function createSocketServer(server: http.Server) {
   }
 
   wss.on('connection', async (ws, request) => {
+    const remoteAddr = request.socket?.remoteAddress || 'unknown';
+    const requestUrl = request.url || '';
+    const origin = String(request.headers.origin || '');
+    debug('socket:connection-request', {
+      origin,
+      url: requestUrl,
+      remoteAddr,
+      cookieHeaderPresent: Boolean(request.headers.cookie),
+      forwardedFor: request.headers['x-forwarded-for'],
+      websocketProtocol: request.headers['sec-websocket-protocol'],
+    });
+
     // Origin check
     const allowedOrigins = config.WS_ALLOWED_ORIGINS.split(',').map(o => o.trim()).filter(Boolean);
-    const origin = request.headers.origin || '';
     if (allowedOrigins.length > 0 && (!origin || !allowedOrigins.includes(origin))) {
+      logError('socket:origin-rejected', {
+        origin,
+        allowedOrigins,
+        url: requestUrl,
+        remoteAddr,
+      });
       ws.send(JSON.stringify({ type: 'error', message: 'WebSocket origin not allowed.' }));
       ws.close();
       return;
@@ -128,12 +153,24 @@ export function createSocketServer(server: http.Server) {
     const cookies = parseCookie(request.headers.cookie);
     const token = cookies.sid;
     if (!token) {
+      logError('socket:auth-missing', {
+        origin,
+        url: requestUrl,
+        remoteAddr,
+        cookieHeaderPresent: Boolean(request.headers.cookie),
+      });
       ws.send(JSON.stringify({ type: 'error', message: 'Authentication required.' }));
       ws.close();
       return;
     }
     const user = await getUserFromSessionToken(token);
     if (!user) {
+      logError('socket:auth-invalid', {
+        origin,
+        url: requestUrl,
+        remoteAddr,
+        tokenPresent: Boolean(token),
+      });
       ws.send(JSON.stringify({ type: 'error', message: 'Session expired. Please login again.' }));
       ws.close();
       return;
@@ -287,6 +324,8 @@ export function createSocketServer(server: http.Server) {
       session.progressStages = {};
       session.stepRetries = {};
     }
+
+    sendBrainState(ws, session);
 
     async function persistStageState(stage: PipelineStage, message: string, payload?: unknown): Promise<void> {
       await Promise.allSettled([
@@ -608,6 +647,7 @@ export function createSocketServer(server: http.Server) {
           }
           session.requirements = { ...raResult.data, userMessage: userMsg };
           session.brainState.requirementAnalysis = raResult.fallback || raResult.data;
+          sendBrainState(ws, session);
           await persistStageSnapshot('requirementAnalysis', 'Requirements analyzed', raResult.data);
           await appendProjectTask({
             projectId,
@@ -662,6 +702,7 @@ export function createSocketServer(server: http.Server) {
 
           session.clarifications = clarResult.data;
           session.brainState.clarification = clarResult.fallback || clarResult.data;
+          sendBrainState(ws, session);
           await persistStageSnapshot('clarification', 'Clarification completed', clarResult.data);
           pendingClarificationQuestions = Array.isArray(session.clarifications?.questions) ? [...session.clarifications.questions] : [];
           pendingClarificationIndex = 0;
@@ -721,9 +762,13 @@ export function createSocketServer(server: http.Server) {
               return;
             }
           session.systemDesign = sdResult.data;
+          session.brainState.systemDesign = sdResult.fallback || sdResult.data;
+          sendBrainState(ws, session);
           await persistStageSnapshot('systemDesign', 'System design generated', sdResult.data);
         } else {
           session.systemDesign = buildFrontendOnlySystemDesign(session.requirements);
+          session.brainState.systemDesign = session.systemDesign;
+          sendBrainState(ws, session);
           await persistStageSnapshot('systemDesign', 'Frontend-only system design generated', session.systemDesign);
         }
         const specAfterSystemDesign = buildProjectSpec({ systemDesign: session.systemDesign }, { partial: true });
@@ -754,6 +799,8 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.uiSpec = uiSpecResult.data;
+          session.brainState.uiSpec = uiSpecResult.fallback || uiSpecResult.data;
+          sendBrainState(ws, session);
           await persistStageSnapshot('uiSpec', 'UI spec generated', uiSpecResult.data);
           const specAfterUiSpec = buildProjectSpec({ systemDesign: session.systemDesign, uiSpec: session.uiSpec }, { partial: true });
           if (specAfterUiSpec) {
@@ -782,6 +829,8 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.blueprint = bpResult.data;
+          session.brainState.blueprint = bpResult.fallback || bpResult.data;
+          sendBrainState(ws, session);
           await persistStageSnapshot('blueprint', 'Blueprint generated', bpResult.data);
           const specAfterBlueprint = buildProjectSpec({ systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint });
           if (specAfterBlueprint) {
@@ -822,6 +871,8 @@ export function createSocketServer(server: http.Server) {
             return;
           }
           session.codeGen = cgResult.data;
+          session.brainState.codeGeneration = cgResult.fallback || cgResult.data;
+          sendBrainState(ws, session);
           await persistStageSnapshot('codeGen', 'Code generated', cgResult.data);
           const specAfterCodeGen = buildProjectSpec({ systemDesign: session.systemDesign, uiSpec: session.uiSpec, blueprint: session.blueprint });
           if (specAfterCodeGen) {
@@ -952,6 +1003,8 @@ export function createSocketServer(server: http.Server) {
         const sdResult = await handleSystemDesign({ requirements: session.requirements, projectSpec, modification, projectId });
         if (sdResult.success) {
           session.systemDesign = sdResult.data;
+          session.brainState.systemDesign = sdResult.fallback || sdResult.data;
+          sendBrainState(ws, session);
         }
 
         session.step = 'uiSpec_modification';
@@ -968,6 +1021,8 @@ export function createSocketServer(server: http.Server) {
         });
         if (uiSpecResult.success) {
           session.uiSpec = uiSpecResult.data;
+          session.brainState.uiSpec = uiSpecResult.fallback || uiSpecResult.data;
+          sendBrainState(ws, session);
         }
 
         // Step 2.75: Re-generate blueprint for modifications
@@ -982,6 +1037,8 @@ export function createSocketServer(server: http.Server) {
         });
         if (bpModResult.success) {
           session.blueprint = bpModResult.data;
+          session.brainState.blueprint = bpModResult.fallback || bpModResult.data;
+          sendBrainState(ws, session);
         }
 
         session.step = 'codeGen_modification';
@@ -1013,6 +1070,8 @@ export function createSocketServer(server: http.Server) {
         }
 
         session.codeGen = cgResult.data;
+        session.brainState.codeGeneration = cgResult.fallback || cgResult.data;
+        sendBrainState(ws, session);
         await rematerializeAndStore(cgResult.data);
         sendProgress(ws, session, 'codeGen_modification', 'Updated code generated!', 1);
         const modFiles = Array.isArray(session.codeGen?.files) ? session.codeGen.files : [];
