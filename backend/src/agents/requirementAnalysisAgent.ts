@@ -29,9 +29,22 @@ export type RequirementAnalysisOutput = {
   notes?: string;
 };
 
+function coercePageName(page: unknown): string {
+  if (page == null) return '';
+  if (typeof page === 'string') return page.trim();
+  if (typeof page === 'number' || typeof page === 'boolean') return String(page).trim();
+  if (typeof page === 'object') {
+    const obj = page as Record<string, unknown>;
+    const candidate = obj.name ?? obj.title ?? obj.label ?? obj.route ?? obj.path ?? obj.slug ?? obj.id;
+    if (typeof candidate === 'string') return candidate.trim();
+    if (typeof candidate === 'number') return String(candidate).trim();
+  }
+  return '';
+}
+
 function normalizePages(pages: unknown): string[] {
   if (!Array.isArray(pages)) return [];
-  return Array.from(new Set(pages.map((page) => String(page || '').trim()).filter(Boolean).map((page) => page.replace(/\bpage\b/gi, '').replace(/\s+/g, ' ').trim()).filter(Boolean)));
+  return Array.from(new Set(pages.map(coercePageName).filter(Boolean).map((page) => page.replace(/\bpage\b/gi, '').replace(/\s+/g, ' ').trim()).filter(Boolean)));
 }
 
 async function assessSemanticGap(llmProxy: LLMProxyClient, model: string, input: { userMessage: string; result: RequirementAnalysisOutput }): Promise<{ score: number; reason: string; forceFrontendOnly: boolean }> {
