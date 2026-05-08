@@ -169,21 +169,31 @@ export function createSocketServer(server: http.Server) {
       try {
         parsed = JSON.parse(rawText);
 
+        // If client sent a JSON string (e.g. "\"hello\""), treat it as user_message
+        if (typeof parsed === 'string') {
+          parsed = { type: 'user_message', user_message: parsed };
+        }
+
         // Validate structure
         if (typeof parsed !== 'object' || parsed === null) {
           throw new Error('Invalid message structure');
         }
 
-        // Check for required fields or valid types
+        // Check for valid types (type is optional, but if present must be known)
         const validTypes = ['user_message', 'answer', 'modification', 'confirmation'];
         if (parsed.type && !validTypes.includes(parsed.type)) {
           throw new Error('Invalid message type');
         }
       } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        logError('socket:message_parse_failed', { error: message, rawPreview: rawText.slice(0, 100) });
-        ws.send(JSON.stringify({ type: 'error', message: 'Invalid message format. Please send valid JSON.' }));
-        return;
+        // If it's not JSON at all, accept it as plain user_message text
+        if (e instanceof SyntaxError) {
+          parsed = { type: 'user_message', user_message: rawText };
+        } else {
+          const message = e instanceof Error ? e.message : String(e);
+          logError('socket:message_parse_failed', { error: message, rawPreview: rawText.slice(0, 100) });
+          ws.send(JSON.stringify({ type: 'error', message: 'Invalid message format. Please send valid JSON.' }));
+          return;
+        }
       }
 
       const userText = (typeof parsed === 'object' && parsed !== null
