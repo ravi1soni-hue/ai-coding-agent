@@ -26,8 +26,6 @@ type MaterializeInput = {
 
 const PROJECTS_ROOT = path.resolve('/tmp');
 const TEMPLATE_ROOT = path.resolve(__dirname, '../../../templates/fullstack-starter');
-const FALLBACK_FRONTEND_TEMPLATE_DIR = path.resolve(__dirname, '../templates/frontend');
-const FALLBACK_BACKEND_TEMPLATE_DIR = path.resolve(__dirname, '../templates/backend');
 
 function sanitizeSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48) || 'project';
@@ -111,29 +109,60 @@ async function validateTemplateIntegrity(templatePath: string): Promise<boolean>
   }
 }
 
+type TemplateAttempt = { path: string; existed: boolean; valid?: boolean; reason?: string };
+
 async function materializeTemplate(workspaceRoot: string): Promise<void> {
-  // Try built templates first (production)
-  if (await exists(TEMPLATE_ROOT)) {
-    if (await validateTemplateIntegrity(TEMPLATE_ROOT)) {
-      await copyDir(TEMPLATE_ROOT, workspaceRoot);
+  const attempts: TemplateAttempt[] = [];
+
+  // Strategy 1: monolithic fullstack-starter at any of these locations
+  const fullstackCandidates = [
+    TEMPLATE_ROOT,
+    path.resolve(__dirname, '../../../src/templates/fullstack-starter'),
+    path.resolve(__dirname, '../templates/fullstack-starter'),
+    path.resolve(process.cwd(), 'templates/fullstack-starter'),
+    path.resolve(process.cwd(), 'src/templates/fullstack-starter'),
+    path.resolve(process.cwd(), 'dist/templates/fullstack-starter'),
+  ];
+  for (const candidate of fullstackCandidates) {
+    const existed = await exists(candidate);
+    if (!existed) { attempts.push({ path: candidate, existed: false }); continue; }
+    const valid = await validateTemplateIntegrity(candidate);
+    attempts.push({ path: candidate, existed: true, valid, reason: valid ? 'used' : 'failed integrity check' });
+    if (valid) {
+      debug('materializeTemplate:using-fullstack', { path: candidate });
+      await copyDir(candidate, workspaceRoot);
       return;
     }
   }
-  // Fallback to source templates (development)
-  const sourceTemplateRoot = path.resolve(__dirname, '../../../src/templates/fullstack-starter');
-  if (await exists(sourceTemplateRoot)) {
-    if (await validateTemplateIntegrity(sourceTemplateRoot)) {
-      await copyDir(sourceTemplateRoot, workspaceRoot);
-      return;
+
+  // Strategy 2: split frontend + backend fallbacks (search multiple roots)
+  const splitRoots = [
+    path.resolve(__dirname, '../templates'),                // dist/templates (compiled)
+    path.resolve(__dirname, '../../src/templates'),         // src/templates from dist
+    path.resolve(process.cwd(), 'src/templates'),
+    path.resolve(process.cwd(), 'dist/templates'),
+    path.resolve(process.cwd(), 'backend/src/templates'),
+    path.resolve(process.cwd(), 'backend/dist/templates'),
+  ];
+  for (const root of splitRoots) {
+    const fe = path.join(root, 'frontend');
+    const be = path.join(root, 'backend');
+    const feExists = await exists(fe);
+    const beExists = await exists(be);
+    if (!feExists || !beExists) {
+      attempts.push({ path: root, existed: feExists && beExists, reason: `frontend=${feExists} backend=${beExists}` });
+      continue;
     }
+    debug('materializeTemplate:using-split', { root });
+    await copyDir(fe, path.join(workspaceRoot, 'frontend'));
+    await copyDir(be, path.join(workspaceRoot, 'backend'));
+    attempts.push({ path: root, existed: true, valid: true, reason: 'used (split)' });
+    return;
   }
-  // Last resort: individual fallbacks
-  if (await exists(FALLBACK_FRONTEND_TEMPLATE_DIR) && await exists(FALLBACK_BACKEND_TEMPLATE_DIR)) {
-    await copyDir(FALLBACK_FRONTEND_TEMPLATE_DIR, path.join(workspaceRoot, 'frontend'));
-    await copyDir(FALLBACK_BACKEND_TEMPLATE_DIR, path.join(workspaceRoot, 'backend'));
-  } else {
-    throw new Error('No valid templates found for materialization');
-  }
+
+  const summary = attempts.map(a => `  - ${a.path} [exists=${a.existed}${a.valid !== undefined ? `, valid=${a.valid}` : ''}${a.reason ? `, ${a.reason}` : ''}]`).join('\n');
+  logError('materializeTemplate:no-templates', `__dirname=${__dirname}\ncwd=${process.cwd()}\nAttempts:\n${summary}`);
+  throw new Error(`No valid templates found for materialization. __dirname=${__dirname}, cwd=${process.cwd()}.\nAttempted:\n${summary}`);
 }
 
 function runCommand(cmd: string, args: string[], cwd: string, timeoutMs: number): Promise<{ stdout: string; stderr: string; exitCode: number }> {
