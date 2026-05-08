@@ -10,6 +10,8 @@ import {
   createProjectCodeRevision,
   getProjectSnapshot,
   saveProjectDeployment,
+  saveProjectCheckpoint,
+  loadProjectCheckpoints,
   updateProjectSnapshot,
   upsertProjectBlackboard,
 } from '../db/projectStore';
@@ -22,10 +24,16 @@ type AdapterScope = {
 };
 
 function memoryStatusToDbStatus(memory: ProjectMemory): string {
+  // Persist interactive/non-terminal states so resume can be accurate.
   if (memory.status === 'completed') return 'completed';
   if (memory.status === 'failed') return 'failed';
+  if (memory.status === 'paused') return 'paused';
+  if (memory.status === 'recovering') return 'recovering';
+
+  // Fallbacks derived from stage for backward compatibility.
   if (memory.currentState === 'failed') return 'failed';
   if (memory.currentState === 'done') return 'completed';
+
   return 'active';
 }
 
@@ -161,7 +169,16 @@ async function loadSnapshotInto(scope: AdapterScope): Promise<ProjectMemory | nu
       errors: [],
       fixes: [],
       checkpoints: [],
-      status: row.status === 'completed' ? 'completed' : row.status === 'failed' ? 'failed' : 'active',
+      status:
+        row.status === 'completed'
+          ? 'completed'
+          : row.status === 'failed'
+            ? 'failed'
+            : row.status === 'paused'
+              ? 'paused'
+              : row.status === 'recovering'
+                ? 'recovering'
+                : 'active',
     };
 
     // Basic corruption check
@@ -231,8 +248,22 @@ export function createPersistenceAdapter(scope: AdapterScope): PersistenceAdapte
     appendEvent: (event) => writeEvent(scope, event),
     saveCodeRevision: (rec) => writeCodeRevision(scope, rec),
     saveDeployment: (rec) => writeDeployment(scope, rec),
-    // saveCheckpoint / loadCheckpoints intentionally omitted: stage skip is
-    // driven by the rehydrated memory fields (requirements, clarifications,
-    // systemDesign, etc.), so per-stage checkpoint persistence is not needed.
+
+    // Enable real resume-by-checkpoint across WS disconnects / process restarts.
+    saveCheckpoint: (checkpoint) =>
+      saveProjectCheckpoint({
+        projectId: checkpoint.projectId,
+        userId: scope.userId,
+        stage: checkpoint.stage,
+        inputHash: checkpoint.inputHash,
+        output: checkpoint.output ?? null,
+        issues: checkpoint.issues,
+        retryCount: checkpoint.retryCount,
+      }),
+    loadCheckpoints: (projectId) =>
+      loadProjectCheckpoints({
+        projectId: projectId,
+        userId: scope.userId,
+      }),
   };
 }

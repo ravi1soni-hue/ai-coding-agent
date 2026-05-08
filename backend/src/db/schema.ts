@@ -158,6 +158,22 @@ export async function ensureCoreTables() {
     )
   `);
 
+  await pgQuery(`
+    CREATE TABLE IF NOT EXISTS project_checkpoints (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES project_sessions(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      stage TEXT NOT NULL,
+      input_hash TEXT NOT NULL,
+      output JSONB,
+      issues JSONB NOT NULL DEFAULT '[]'::jsonb,
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (project_id, stage, input_hash)
+    )
+  `);
+
   await pgQuery(`CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id)`);
   await pgQuery(`CREATE INDEX IF NOT EXISTS idx_project_sessions_user_id ON project_sessions(user_id)`);
   await pgQuery(`CREATE INDEX IF NOT EXISTS idx_project_sessions_active_revision ON project_sessions(active_revision_id)`);

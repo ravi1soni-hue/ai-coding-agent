@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { pgQuery } from './postgres';
+import type { OrchestrationCheckpoint, OrchestrationIssue } from '../ai/contracts/orchestration';
 
 export type ProjectHistoryRow = {
   id: string;
@@ -408,4 +409,76 @@ export async function getProjectSnapshot(input: { userId: string; projectId: str
   );
 
   return rows[0] ?? null;
+}
+
+export async function saveProjectCheckpoint(input: {
+  projectId: string;
+  userId: string;
+  stage: string;
+  inputHash: string;
+  output: unknown;
+  issues: OrchestrationIssue[];
+  retryCount: number;
+}): Promise<void> {
+  await pgQuery(
+    `INSERT INTO project_checkpoints (
+      id, project_id, user_id, stage, input_hash, output, issues, retry_count
+    ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)
+    ON CONFLICT (project_id, stage, input_hash) DO UPDATE SET
+      output = EXCLUDED.output,
+      issues = EXCLUDED.issues,
+      retry_count = EXCLUDED.retry_count,
+      updated_at = NOW()`,
+    [
+      crypto.randomUUID(),
+      input.projectId,
+      input.userId,
+      input.stage,
+      input.inputHash,
+      JSON.stringify(input.output ?? null),
+      JSON.stringify(input.issues ?? []),
+      input.retryCount,
+    ],
+  );
+}
+
+export async function loadProjectCheckpoints(input: { projectId: string; userId: string }): Promise<OrchestrationCheckpoint[]> {
+  const rows = await pgQuery<{
+    project_id: string;
+    stage: string;
+    input_hash: string;
+    output: unknown;
+    issues: OrchestrationIssue[];
+    retry_count: number;
+    created_at: string;
+    updated_at: string;
+  }>(
+    `SELECT
+      project_id,
+      stage,
+      input_hash,
+      output,
+      issues,
+      retry_count,
+      created_at,
+      updated_at
+     FROM project_checkpoints
+     WHERE project_id = $1 AND user_id = $2
+     ORDER BY created_at ASC`,
+    [input.projectId, input.userId],
+  );
+
+  return rows.map((r) => ({
+    projectId: r.project_id,
+    // In this app, sessionId is effectively projectId (socket uses sessionId=projectId).
+    // Keep it consistent for consumers even though it isn't stored in the table.
+    sessionId: r.project_id,
+    stage: r.stage as OrchestrationCheckpoint['stage'],
+    inputHash: r.input_hash,
+    output: r.output ?? undefined,
+    issues: Array.isArray(r.issues) ? r.issues : [],
+    retryCount: r.retry_count,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  }));
 }

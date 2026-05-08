@@ -168,6 +168,8 @@ function routeRecoveryTarget(stage: OrchestrationState, issueType: string): Orch
       return 'system_design';
     case 'codeGen':
       return 'code_generation';
+    case 'clarification':
+      return 'clarification';
     default:
       return 'code_generation';
   }
@@ -358,21 +360,37 @@ async function loadOrCreateMemory(
   sessionId: string,
   persistence: PersistenceAdapter
 ): Promise<ProjectMemory> {
+  let memory: ProjectMemory | null = null;
+
   if (persistence.loadSnapshot) {
     try {
-      const snapshot = await persistence.loadSnapshot(command.projectId);
-      if (snapshot) return snapshot;
+      memory = await persistence.loadSnapshot(command.projectId);
     } catch {
       // fall through to fresh memory
     }
   }
-  const deploymentMode = command.step === 'deployment' ? 'full-stack' : 'frontend-only';
-  return createInitialMemory({
-    projectId: command.projectId,
-    sessionId,
-    userMessage: command.userMessage,
-    deploymentMode,
-  });
+
+  if (!memory) {
+    const deploymentMode = command.step === 'deployment' ? 'full-stack' : 'frontend-only';
+    memory = createInitialMemory({
+      projectId: command.projectId,
+      sessionId,
+      userMessage: command.userMessage,
+      deploymentMode,
+    });
+  }
+
+  // Rehydrate stage checkpoints so stageWrap() can actually resume.
+  if (persistence.loadCheckpoints) {
+    try {
+      memory.checkpoints = await persistence.loadCheckpoints(command.projectId);
+    } catch {
+      // best-effort
+      memory.checkpoints = memory.checkpoints ?? [];
+    }
+  }
+
+  return memory;
 }
 
 function buildProjectSpec(memory: ProjectMemory, command: OrchestrationCommand) {
@@ -826,15 +844,29 @@ export async function runAIOrchestration(
       backendService: `backend-${command.projectId.slice(0, 10)}`,
       hasBackend: Boolean(memory.requirements?.backend_required),
     });
+
     setDeployment(memory, {
       frontendUrl: result.frontend_url || null,
       backendUrl: result.backend_url || null,
       raw: result,
     });
+
+    // Tighten semantics:
+    // If backend was requested and Railway indicates backend deployment failed,
+    // treat deployment stage as failed so the client receives a 'failed' event.
+    const wantsBackend = Boolean(memory.requirements?.backend_required);
+    const railwayStatus = (result as any).railway_status as string | undefined;
+    if (wantsBackend && (railwayStatus === 'deploy_error' || railwayStatus === 'failed')) {
+      throw new Error(`Backend deployment failed (railway_status=${railwayStatus})`);
+    }
+
     return result;
   }, { ...opts, percent: 95 });
 
-  if (deploymentResult.status !== 'success') return finalizeResult(memory, deploymentResult, null, null);
+  if (deploymentResult.status !== 'success') {
+    adapter.emit?.({ type: 'failed', projectId: command.projectId, issues: deploymentResult.issues });
+    return finalizeResult(memory, deploymentResult, memory.deployment?.frontendUrl || null, memory.deployment?.backendUrl || null);
+  }
 
   if (persistence.saveDeployment && memory.deployment) {
     const raw = (memory.deployment.raw || {}) as Record<string, unknown>;
@@ -884,13 +916,30 @@ function finalizeResult(
   frontendUrl: string | null,
   backendUrl: string | null
 ): OrchestrationResult {
+  // stageWrap already persisted memory on all non-success paths.
+  // For interactive states we MUST NOT force the pipeline into "failed".
+  if (stageResult.status === 'needs_input' || stageResult.status === 'needs_fix') {
+    memory.status = 'paused';
+    // markStage() already moved currentState to stageResult.state for these paths,
+    // but keep it explicit for safety.
+    memory.currentState = stageResult.state;
+    return {
+      projectId: memory.projectId,
+      sessionId: memory.sessionId,
+      frontendUrl,
+      backendUrl,
+      status: 'partial',
+      memory,
+    };
+  }
+
   finalizeMemory(memory, false);
   return {
     projectId: memory.projectId,
     sessionId: memory.sessionId,
     frontendUrl,
     backendUrl,
-    status: stageResult.status === 'needs_input' ? 'partial' : 'failed',
+    status: 'failed',
     memory,
   };
 }
