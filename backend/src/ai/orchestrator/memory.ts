@@ -163,9 +163,12 @@ export function hashInput(value: unknown): string {
 export function markStage(memory: ProjectMemory, stage: OrchestrationState): void {
   const fromStage = normalizePipelineStage(memory.currentState);
   const toStage = normalizePipelineStage(stage);
-  if (!isValidTransition(fromStage, toStage)) {
+
+  // Allow idempotent/no-op stage marking (prevents init→init / stage→same-stage crashes)
+  if (fromStage !== toStage && !isValidTransition(fromStage, toStage)) {
     throw new Error(`Invalid state transition from ${fromStage} to ${toStage}`);
   }
+
   memory.currentState = stage;
 }
 

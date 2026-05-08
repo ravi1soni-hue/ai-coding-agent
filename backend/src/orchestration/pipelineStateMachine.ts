@@ -32,14 +32,20 @@ export type RecoveryRoute = {
 };
 
 export const STAGE_ALIASES: Record<string, PipelineStage> = {
+  // Orchestrator (OrchestrationState) aliases
+  requirements: 'requirementAnalysis',
+  system_design: 'systemDesign',
+  ui_spec: 'uiSpec',
+  code_generation: 'codeGen',
+  testing: 'testFix',
+  deployment: 'deploy',
+
+  // Legacy/general aliases
   codeGeneration: 'codeGen',
   code_gen: 'codeGen',
   codegen: 'codeGen',
-  deployment: 'deploy',
   systemDesign: 'systemDesign',
-  system_design: 'systemDesign',
   uiSpec: 'uiSpec',
-  ui_spec: 'uiSpec',
   testFix: 'testFix',
   test_fix: 'testFix',
   start: 'init',
