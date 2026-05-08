@@ -988,12 +988,23 @@ CRITICAL RULES:
 
   const appFile = validateGeneratedFile(parsed, 'src/App.jsx', 'frontend', 'frontendApp');
   const hasImports = imports.length > 0 && imports.some((i) => appFile.content.includes(i.name));
-  const hasExport = appFile.content.includes('export default function App');
-  const hasRender = appFile.content.includes('return (') || appFile.content.includes('return <');
+  const hasExport = appFile.content.includes('export default') && (appFile.content.includes('function App') || appFile.content.includes('const App') || appFile.content.includes('App ='));
+  const hasRender = appFile.content.includes('return') && (appFile.content.includes('(') || appFile.content.includes('<') || appFile.content.includes('>'));
   const hasApiBase = backendRequired ? appFile.content.includes('API_BASE') || appFile.content.includes('fetch') || appFile.content.includes('http') : true;
 
-  if (!hasExport || !hasRender || !hasImports || !hasApiBase) {
-    logWarn('frontendApp:semantic-check-failed', { hasExport, hasRender, hasImports, hasApiBase, backendRequired });
+  // Enhanced semantic checks for logical correctness and API consistency
+  const hasReactImport = appFile.content.includes("import React") || appFile.content.includes("from 'react'");
+  const hasProperJsx = /<[^>]*>/.test(appFile.content) && appFile.content.includes('</'); // Basic JSX check
+  const hasStateManagement = appFile.content.includes('useState') || appFile.content.includes('useEffect') || !backendRequired; // State if needed
+  const hasErrorHandling = backendRequired ? appFile.content.includes('try') || appFile.content.includes('catch') || appFile.content.includes('Error') : true;
+  const hasApiConsistency = backendRequired ? (appFile.content.includes('fetch') && (appFile.content.includes('await') || appFile.content.includes('.then'))) : true;
+  const noSyntaxErrors = !/\bundefined\b.*\./.test(appFile.content) && !/\bnull\b.*\./.test(appFile.content); // Basic check for common errors
+
+  const logicalCorrect = hasReactImport && hasProperJsx && hasStateManagement && hasErrorHandling && hasApiConsistency && noSyntaxErrors;
+
+  if (!hasExport || !hasRender || !hasImports || !hasApiBase || !logicalCorrect) {
+    logWarn('frontendApp:semantic-check-failed', { hasExport, hasRender, hasImports, hasApiBase, backendRequired, logicalCorrect, hasReactImport, hasProperJsx, hasStateManagement, hasErrorHandling, hasApiConsistency, noSyntaxErrors });
+    throw new Error('Semantic checks failed: Code does not meet logical correctness and API consistency requirements');
   }
 
   return appFile;

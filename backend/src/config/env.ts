@@ -44,3 +44,56 @@ export const config = {
     maxBuildAttempts: parseInt(process.env.MAX_BUILD_ATTEMPTS || '2', 10),
   },
 };
+
+// Configuration validation
+function validateConfig() {
+  const errors: string[] = [];
+
+  // Validate PORT
+  if (isNaN(config.PORT) || config.PORT <= 0 || config.PORT > 65535) {
+    errors.push('PORT must be a valid number between 1 and 65535');
+  }
+
+  // Validate required URLs
+  if (config.NODE_ENV === 'production' && !config.DATABASE_URL) {
+    errors.push('DATABASE_URL is required in production');
+  }
+
+  // Validate API keys for production
+  if (config.NODE_ENV === 'production') {
+    if (!config.OPENAI_API_KEY) {
+      errors.push('OPENAI_API_KEY is required in production');
+    }
+    if (!config.RAILWAY_TOKEN) {
+      errors.push('RAILWAY_TOKEN is required in production');
+    }
+    if (!config.VERCEL_ACCESS_TOKEN) {
+      errors.push('VERCEL_ACCESS_TOKEN is required in production');
+    }
+  }
+
+  // Validate LLM proxy URLs
+  try {
+    new URL(config.LLM_PROXY_CHAT_URL);
+    new URL(config.LLM_PROXY_EMBEDDING_URL);
+  } catch {
+    errors.push('LLM_PROXY_CHAT_URL and LLM_PROXY_EMBEDDING_URL must be valid URLs');
+  }
+
+  // Validate limits
+  if (config.LIMITS.maxRetriesPerStage < 0) {
+    errors.push('MAX_RETRIES_PER_STAGE must be non-negative');
+  }
+  if (config.LIMITS.maxLlmCallsPerProject < 1) {
+    errors.push('MAX_LLM_CALLS_PER_PROJECT must be at least 1');
+  }
+  if (config.LIMITS.maxBuildAttempts < 1) {
+    errors.push('MAX_BUILD_ATTEMPTS must be at least 1');
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`Configuration validation failed:\n${errors.join('\n')}`);
+  }
+}
+
+validateConfig();

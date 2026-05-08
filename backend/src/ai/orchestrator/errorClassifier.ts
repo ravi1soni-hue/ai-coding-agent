@@ -26,32 +26,37 @@ export function classifyError(input: {
   let recoverable = true;
   let fixStrategy: OrchestrationIssue['fixStrategy'] = 'retry';
 
-  if (/json|parse|unexpected token|malformed/i.test(lowered)) {
-    type = 'parsing_error';
-    fixStrategy = 'retry';
-  } else if (/schema|shape|contract|missing .*field|invalid .*output/i.test(lowered)) {
-    type = 'schema_mismatch';
-    fixStrategy = 'repair';
-  } else if (/missing|required|not provided|undefined|null/i.test(lowered)) {
-    type = 'missing_data';
-    fixStrategy = 'ask_user';
-  } else if (/inconsistent|conflict|mismatch|contradict/i.test(lowered)) {
-    type = 'semantic_inconsistency';
-    fixStrategy = 'repair';
-  } else if (/build|compile|tsc|vite|npm run build|runtime/i.test(lowered)) {
-    type = 'build_error';
-    fixStrategy = 'repair';
-  } else if (/deploy|vercel|railway|upload|publish/i.test(lowered)) {
-    type = 'deployment_error';
-    fixStrategy = 'retry';
-  } else if (/sql|query|project_id|api.*project/i.test(lowered)) {
-    type = 'api_contract_error';
-    fixStrategy = 'repair';
-  } else if (/state transition|illegal stage|cannot transition/i.test(lowered)) {
+  if (/state transition|illegal stage|cannot transition/i.test(lowered)) {
     type = 'state_transition_error';
     severity = 'high';
     recoverable = false;
     fixStrategy = 'fallback';
+  } else if (/unauthorized|forbidden|access denied/i.test(lowered)) {
+    type = 'authorization_error';
+    severity = 'high';
+    recoverable = false;
+    fixStrategy = 'ask_user';
+  } else if (/deploy|vercel|railway|upload|publish/i.test(lowered)) {
+    type = 'deployment_error';
+    fixStrategy = 'retry';
+  } else if (/build|compile|tsc|vite|npm run build|runtime/i.test(lowered)) {
+    type = 'build_error';
+    fixStrategy = 'repair';
+  } else if (/sql|query|project_id|api.*project/i.test(lowered)) {
+    type = 'api_contract_error';
+    fixStrategy = 'repair';
+  } else if (/inconsistent|conflict|mismatch|contradict/i.test(lowered)) {
+    type = 'semantic_inconsistency';
+    fixStrategy = 'repair';
+  } else if (/schema|shape|contract|missing .*field|invalid .*output/i.test(lowered)) {
+    type = 'schema_mismatch';
+    fixStrategy = 'repair';
+  } else if (/json|parse|unexpected token|malformed/i.test(lowered)) {
+    type = 'parsing_error';
+    fixStrategy = 'retry';
+  } else if (/missing|required|not provided|undefined|null/i.test(lowered)) {
+    type = 'missing_data';
+    fixStrategy = 'ask_user';
   }
 
   if (/crash|fatal|panic|exception/i.test(lowered)) {

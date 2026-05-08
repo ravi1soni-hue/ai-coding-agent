@@ -89,13 +89,51 @@ async function copyDir(source: string, destination: string): Promise<void> {
   }
 }
 
-async function materializeTemplate(workspaceRoot: string): Promise<void> {
-  if (await exists(TEMPLATE_ROOT)) {
-    await copyDir(TEMPLATE_ROOT, workspaceRoot);
-    return;
+async function validateTemplateIntegrity(templatePath: string): Promise<boolean> {
+  try {
+    // Check for essential files
+    const requiredFiles = ['package.json', 'src/main.jsx', 'src/App.jsx', 'index.html'];
+    for (const file of requiredFiles) {
+      if (!(await exists(path.join(templatePath, file)))) {
+        return false;
+      }
+    }
+    // Check package.json has basic structure
+    const packageJsonPath = path.join(templatePath, 'package.json');
+    const packageContent = await fs.readFile(packageJsonPath, 'utf-8');
+    const packageJson = JSON.parse(packageContent);
+    if (!packageJson.name || !packageJson.dependencies || !packageJson.dependencies.react) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
   }
-  await copyDir(FALLBACK_FRONTEND_TEMPLATE_DIR, path.join(workspaceRoot, 'frontend'));
-  await copyDir(FALLBACK_BACKEND_TEMPLATE_DIR, path.join(workspaceRoot, 'backend'));
+}
+
+async function materializeTemplate(workspaceRoot: string): Promise<void> {
+  // Try built templates first (production)
+  if (await exists(TEMPLATE_ROOT)) {
+    if (await validateTemplateIntegrity(TEMPLATE_ROOT)) {
+      await copyDir(TEMPLATE_ROOT, workspaceRoot);
+      return;
+    }
+  }
+  // Fallback to source templates (development)
+  const sourceTemplateRoot = path.resolve(__dirname, '../../../src/templates/fullstack-starter');
+  if (await exists(sourceTemplateRoot)) {
+    if (await validateTemplateIntegrity(sourceTemplateRoot)) {
+      await copyDir(sourceTemplateRoot, workspaceRoot);
+      return;
+    }
+  }
+  // Last resort: individual fallbacks
+  if (await exists(FALLBACK_FRONTEND_TEMPLATE_DIR) && await exists(FALLBACK_BACKEND_TEMPLATE_DIR)) {
+    await copyDir(FALLBACK_FRONTEND_TEMPLATE_DIR, path.join(workspaceRoot, 'frontend'));
+    await copyDir(FALLBACK_BACKEND_TEMPLATE_DIR, path.join(workspaceRoot, 'backend'));
+  } else {
+    throw new Error('No valid templates found for materialization');
+  }
 }
 
 function runCommand(cmd: string, args: string[], cwd: string, timeoutMs: number): Promise<{ stdout: string; stderr: string; exitCode: number }> {

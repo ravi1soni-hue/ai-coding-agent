@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import path from 'path';
+import { performHealthChecks } from '../utils/health';
 import { config } from '../config/env';
 import { connectRedis } from '../cache/redis';
 import { connectPostgres } from '../db/postgres';
@@ -15,7 +16,8 @@ fastify.register(fastifyStatic, {
 });
 
 fastify.get('/health', async () => {
-  return { status: 'ok', env: config.NODE_ENV };
+  const health = await performHealthChecks();
+  return health;
 });
 
 export async function startServer() {

@@ -46,6 +46,7 @@ import {
   shouldRetryStage,
 } from './recovery';
 import { resolveRecoveryRoute, type PipelineStage } from '../../orchestration/pipelineStateMachine';
+import { error as logError } from '../../utils/logger';
 import type {
   OrchestrationAdapter,
   OrchestrationCommand,
@@ -232,7 +233,21 @@ async function stageWrap<T>(
       await persistMemory(memory, persistence);
       await persistLastEvent(memory, persistence);
       if (persistence?.saveCheckpoint) {
-        try { await persistence.saveCheckpoint(checkpoint); } catch { /* best-effort */ }
+        let retries = 3;
+        while (retries > 0) {
+          try {
+            await persistence.saveCheckpoint(checkpoint);
+            break;
+          } catch (err) {
+            retries--;
+            if (retries === 0) {
+              logError('orchestrator:persistence_failed', { stage, attempt, error: err });
+              // Continue without failing the pipeline
+            } else {
+              await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1s before retry
+            }
+          }
+        }
       }
       adapter?.emit?.({ type: 'stage_complete', stage, output });
       return createSuccessResult(stage, output, undefined, []);
@@ -608,7 +623,7 @@ export async function runAIOrchestration(
   const opts: StageOptions = { adapter, persistence };
 
   // Modification fast-path: previously-completed project receiving a change request
-  if (command.modification && (memory.status === 'completed' || memory.currentState === 'done')) {
+  if (command.modification && (memory.status === 'completed' || memory.currentState === 'done') && (memory.deployment?.frontendUrl || memory.deployment?.backendUrl)) {
     setModification(memory, {
       modification: command.modification,
       appliedAt: new Date().toISOString(),

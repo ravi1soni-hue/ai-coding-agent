@@ -68,12 +68,37 @@ export async function deploymentAgent(input: {
     const defaultProjectName = `proj-${input.projectId.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 18) || 'site'}`;
     debug('deploymentAgent:workspaceRoot', { projectId: input.projectId, workspaceRoot: input.workspaceRoot });
 
-    // ── Frontend: deploy to Vercel ──────────────────────────────────────────
-    const vercelResult = await deployToVercel({
-      buildDir: input.buildDir,
-      projectName: input.frontendProjectName || defaultProjectName,
-      meta: { projectId: input.projectId, revisionId: input.revisionId },
-    });
+    // ── Frontend: deploy to Vercel, failover to Railway ──────────────────────────────────────────
+    let frontendResult: { url: string; deploymentId: string; inspectUrl: string | null; status: string; logUrl: string | null } | null = null;
+    try {
+      frontendResult = await deployToVercel({
+        buildDir: input.buildDir,
+        projectName: input.frontendProjectName || defaultProjectName,
+        meta: { projectId: input.projectId, revisionId: input.revisionId },
+      });
+    } catch (vercelErr) {
+      logWarn('deploymentAgent:vercel-failed', { message: (vercelErr as Error).message });
+      // Failover to Railway for frontend
+      try {
+        const railwayFrontend = await deployToRailway(`frontend-${input.projectId.slice(0, 10)}`, {
+          source: 'deploymentAgent-failover',
+          projectId: input.projectId,
+          revisionId: input.revisionId,
+          sourceDir: input.buildDir,
+        });
+        frontendResult = {
+          url: railwayFrontend.serviceUrl.replace(/^https?:\/\//, ''),
+          deploymentId: railwayFrontend.deploymentId,
+          inspectUrl: railwayFrontend.logUrl,
+          status: railwayFrontend.status,
+          logUrl: railwayFrontend.logUrl,
+        };
+        debug('deploymentAgent:railway-failover-success', { url: frontendResult.url });
+      } catch (railwayErr) {
+        logError('deploymentAgent:failover-failed', { vercel: (vercelErr as Error).message, railway: (railwayErr as Error).message });
+        throw new Error('Both Vercel and Railway deployments failed for frontend');
+      }
+    }
 
     // ── Backend: deploy to Railway (conditional) ────────────────────────────
     const backendService = input.backendService || `backend-${input.projectId.slice(0, 10)}`;
@@ -110,20 +135,23 @@ export async function deploymentAgent(input: {
       }
     }
 
-    if (!vercelResult.url) {
-      throw new Error('Vercel deployment succeeded but did not return a frontend URL.');
+    if (!frontendResult) {
+      throw new Error('Frontend deployment failed to produce a result.');
+    }
+    if (!frontendResult.url) {
+      throw new Error('Frontend deployment succeeded but did not return a URL.');
     }
 
     const result = {
-      frontend_url: `https://${vercelResult.url}`,
+      frontend_url: `https://${frontendResult.url}`,
       backend_url: railwayResult?.serviceUrl || null,
-      vercel_deployment_id: vercelResult.deploymentId,
-      vercel_inspect_url: vercelResult.inspectUrl,
-      vercel_status: vercelResult.status,
-      vercel_log_url: vercelResult.logUrl,
-      railway_deployment_id: railwayResult?.deploymentId || null,
-      railway_status: railwayResult?.status || (shouldDeployBackend ? 'deploy_error' : 'skipped'),
-      railway_log_url: railwayResult?.logUrl || null,
+      vercel_deployment_id: frontendResult.deploymentId.startsWith('rail_') ? null : frontendResult.deploymentId,
+      vercel_inspect_url: frontendResult.inspectUrl,
+      vercel_status: frontendResult.status,
+      vercel_log_url: frontendResult.logUrl,
+      railway_deployment_id: railwayResult?.deploymentId || (frontendResult.deploymentId.startsWith('rail_') ? frontendResult.deploymentId : null),
+      railway_status: railwayResult?.status || (frontendResult.deploymentId.startsWith('rail_') ? frontendResult.status : (shouldDeployBackend ? 'deploy_error' : 'skipped')),
+      railway_log_url: railwayResult?.logUrl || (frontendResult.deploymentId.startsWith('rail_') ? frontendResult.logUrl : null),
       railway_dashboard_url: railwayResult?.dashboardUrl || null,
       frontend_accessible: true,
       frontend_access_warning: null as string | null,

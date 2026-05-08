@@ -101,6 +101,32 @@ export function resolveRecoveryTarget(level: ErrorRepairLevel): PipelineStage {
   return 'systemDesign';
 }
 
+export function isValidTransition(from: PipelineStage, to: PipelineStage): boolean {
+  const transitions: Record<PipelineStage, PipelineStage[]> = {
+    init: ['requirementAnalysis'],
+    requirementAnalysis: ['clarification', 'confirmation', 'systemDesign', 'failed'],
+    clarification: ['clarification_wait'],
+    clarification_wait: ['requirementAnalysis', 'confirmation', 'systemDesign', 'failed'],
+    clarification_wait_modification: ['requirementAnalysis', 'confirmation', 'systemDesign', 'failed'],
+    confirmation: ['confirmation_wait'],
+    confirmation_wait: ['systemDesign', 'failed'],
+    systemDesign: ['uiSpec', 'failed'],
+    uiSpec: ['blueprint', 'failed'],
+    uiSpec_modification: ['blueprint', 'failed'],
+    blueprint: ['codeGen', 'failed'],
+    codeGen: ['testFix', 'deploy', 'failed'],
+    codeGen_modification: ['testFix', 'deploy', 'failed'],
+    testFix: ['deploy', 'failed'],
+    testFix_modification: ['deploy', 'failed'],
+    deploy: ['done', 'failed'],
+    deploy_modification: ['done', 'failed'],
+    done: [],
+    done_modification: [],
+    failed: [],
+  };
+  return transitions[from]?.includes(to) ?? false;
+}
+
 export function resolveRecoveryRoute(stage: string | undefined | null, level: ErrorRepairLevel): RecoveryRoute {
   const normalized = normalizePipelineStage(stage);
 

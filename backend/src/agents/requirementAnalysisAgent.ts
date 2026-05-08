@@ -108,7 +108,16 @@ function normalizePages(pages: unknown): string[] {
 }
 
 async function assessSemanticGap(llmProxy: LLMProxyClient, model: string, input: { userMessage: string; result: RequirementAnalysisOutput }): Promise<{ score: number; reason: string; forceFrontendOnly: boolean }> {
-  const prompt = `You are assessing whether a website request and extracted requirements are semantically aligned with a frontend-only, backend-required, or mixed implementation.
+  // Quick keyword check for obvious frontend-only requests
+  const frontendOnlyKeywords = ['pricing page', 'static site', 'landing page', 'portfolio', 'brochure', 'informational', 'simple website', 'no backend'];
+  const userMsgLower = input.userMessage.toLowerCase();
+  const hasFrontendOnlyKeyword = frontendOnlyKeywords.some(keyword => userMsgLower.includes(keyword));
+
+  if (hasFrontendOnlyKeyword) {
+    return { score: 1.0, reason: 'Request contains frontend-only keywords', forceFrontendOnly: true };
+  }
+
+  const prompt = `You are assessing whether a website request and extracted requirements are semantically aligned with a frontend-only or backend-required implementation.
 
 Return ONLY JSON with shape:
 {"score":0.0,"reason":"short reason","forceFrontendOnly":true|false}
@@ -116,7 +125,10 @@ Return ONLY JSON with shape:
 Heuristics:
 - score closer to 1.0 means strong alignment and low ambiguity.
 - score closer to 0.0 means weak/contradictory requirements.
-- forceFrontendOnly should be true only when the user request clearly implies a static or brochure-style frontend and does not require backend, auth, database, or server state.
+- forceFrontendOnly should be true if the user request describes a static website, landing page, portfolio, pricing page, brochure, or informational site without any backend features.
+- Set forceFrontendOnly to true for requests that mention "frontend only", "static site", "no backend", "simple website", or similar.
+- Only keep backend_required as true if the request clearly needs server-side functionality, data persistence, user accounts, or API interactions.
+- For ambiguous requests, err on the side of frontend-only (forceFrontendOnly: true) to maintain flexibility.
 
 User message:
 ${input.userMessage}
@@ -182,7 +194,11 @@ export async function requirementAnalysisAgent(input: { user_message: string; gl
     const systemPrompt = `You are an expert requirements analyst. Convert the request into a robust website requirements object.
 - Infer a safe, complete website_type and pages set.
 - If the request is ambiguous, choose a safe default and add a short note.
-- For clearly frontend-only requests, set backend_required to false unless backend is explicitly requested.
+- Set backend_required to true ONLY if the request explicitly mentions backend features like database, API, authentication, server-side logic, data storage, user accounts, dynamic content from server, or real-time updates.
+- For static sites, landing pages, portfolios, pricing pages, brochure sites, informational websites, or any request that doesn't mention server-side features, set backend_required to false.
+- Examples of frontend-only: "pricing page", "portfolio website", "landing page", "static site", "simple website".
+- Examples requiring backend: "user login", "database", "API integration", "dynamic content", "real-time chat".
+- Only set auth_required to true if login/authentication/user accounts are explicitly requested.
 Respond ONLY with valid JSON with keys: website_type, pages, backend_required, auth_required, deployment_pref, notes.
 Do NOT include Markdown fences.`;
     async function runRequirementAnalysisOnce(system: string, temperature: number): Promise<RequirementAnalysisOutput> {
@@ -232,7 +248,7 @@ Return ONLY JSON. No trailing commas. No extra keys. Do not include any text bef
     };
 
     const semantic = await assessSemanticGap(llmProxy, model, { userMessage: input.user_message, result });
-    const forceFrontendOnly = semantic.forceFrontendOnly && !result.backend_required && !result.auth_required;
+    const forceFrontendOnly = semantic.forceFrontendOnly;
     const alignedResult: RequirementAnalysisOutput = {
       ...result,
       backend_required: forceFrontendOnly ? false : result.backend_required,

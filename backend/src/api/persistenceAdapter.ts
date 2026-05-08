@@ -13,6 +13,8 @@ import {
   updateProjectSnapshot,
   upsertProjectBlackboard,
 } from '../db/projectStore';
+import { getPgPool } from '../db/postgres';
+import { error as logError } from '../utils/logger';
 
 type AdapterScope = {
   projectId: string;
@@ -49,83 +51,130 @@ function progressFromMemory(memory: ProjectMemory): number {
 }
 
 async function writeSnapshot(scope: AdapterScope, memory: ProjectMemory): Promise<void> {
-  await Promise.allSettled([
-    updateProjectSnapshot({
-      projectId: scope.projectId,
-      userId: scope.userId,
-      status: memoryStatusToDbStatus(memory),
-      currentStep: memory.currentState,
-      progress: progressFromMemory(memory),
-      requirements: memory.requirements,
-      clarifications: memory.clarifications,
-      confirmation: memory.confirmation,
-      systemDesign: memory.systemDesign,
-      uiSpec: memory.uiSpec?.uiSpec,
-      structuredSpec: memory.uiSpec?.structuredSpec,
-      blueprint: memory.blueprint?.blueprint,
-      codeGen: memory.code,
-      testResult: memory.tests,
-      deployment: memory.deployment,
-    }),
-    upsertProjectBlackboard({
-      projectId: scope.projectId,
-      userId: scope.userId,
-      state: {
-        sessionId: scope.projectId,
-        deployment: {
-          frontendUrl: memory.deployment?.frontendUrl || null,
-          backendUrl: memory.deployment?.backendUrl || null,
-          dbStatus: 'ready',
-        },
-        blueprint: memory.blueprint?.blueprint || null,
-        taskQueue: [],
-        terminalLogs: [],
-        currentStage: memory.currentState,
-        status: memoryStatusToDbStatus(memory) as 'active' | 'completed' | 'failed',
-        progress: progressFromMemory(memory),
-        updatedAt: new Date().toISOString(),
-      },
-    }),
-  ]);
+  const client = await getPgPool().connect();
+  try {
+    await client.query('BEGIN');
+    // Update project snapshot
+    await client.query(
+      `UPDATE project_sessions
+       SET
+        status = COALESCE($3, status),
+        current_step = COALESCE($4, current_step),
+        progress = COALESCE($5, progress),
+        requirements = COALESCE($6::jsonb, requirements),
+        clarifications = COALESCE($7::jsonb, clarifications),
+        confirmation = COALESCE($8::jsonb, confirmation),
+        system_design = COALESCE($9::jsonb, system_design),
+        ui_spec = COALESCE($10::jsonb, ui_spec),
+        structured_spec = COALESCE($11::jsonb, structured_spec),
+        blueprint = COALESCE($12::jsonb, blueprint),
+        code_gen = COALESCE($13::jsonb, code_gen),
+        test_result = COALESCE($14::jsonb, test_result),
+        deployment = COALESCE($15::jsonb, deployment),
+        last_active_at = NOW()
+       WHERE id = $1 AND user_id = $2`,
+      [
+        scope.projectId,
+        scope.userId,
+        memoryStatusToDbStatus(memory),
+        memory.currentState,
+        progressFromMemory(memory),
+        JSON.stringify(memory.requirements),
+        JSON.stringify(memory.clarifications),
+        JSON.stringify(memory.confirmation),
+        JSON.stringify(memory.systemDesign),
+        JSON.stringify(memory.uiSpec?.uiSpec),
+        JSON.stringify(memory.uiSpec?.structuredSpec),
+        JSON.stringify(memory.blueprint?.blueprint),
+        JSON.stringify(memory.code),
+        JSON.stringify(memory.tests),
+        JSON.stringify(memory.deployment),
+      ],
+    );
+    // Upsert blackboard
+    await client.query(
+      `INSERT INTO project_blackboard (project_id, user_id, state, updated_at)
+       VALUES ($1, $2, $3::jsonb, NOW())
+       ON CONFLICT (project_id) DO UPDATE SET
+         state = EXCLUDED.state,
+         updated_at = NOW()`,
+      [
+        scope.projectId,
+        scope.userId,
+        JSON.stringify({
+          sessionId: scope.projectId,
+          deployment: {
+            frontendUrl: memory.deployment?.frontendUrl || null,
+            backendUrl: memory.deployment?.backendUrl || null,
+            dbStatus: 'ready',
+          },
+          blueprint: memory.blueprint?.blueprint || null,
+          taskQueue: [],
+          terminalLogs: [],
+          currentStage: memory.currentState,
+          status: memoryStatusToDbStatus(memory) as 'active' | 'completed' | 'failed',
+          progress: progressFromMemory(memory),
+          updatedAt: new Date().toISOString(),
+        }),
+      ],
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function loadSnapshotInto(scope: AdapterScope): Promise<ProjectMemory | null> {
   const row = await getProjectSnapshot({ userId: scope.userId, projectId: scope.projectId });
   if (!row) return null;
 
-  const memory: ProjectMemory = {
-    projectId: scope.projectId,
-    sessionId: scope.projectId,
-    currentState: (row.current_step as ProjectMemory['currentState']) || 'requirements',
-    deploymentMode: row.requirements?.backend_required ? 'full-stack' : 'frontend-only',
-    requirements: row.requirements
-      ? {
-          userMessage: row.requirements.userMessage || '',
-          website_type: row.requirements.website_type,
-          pages: Array.isArray(row.requirements.pages) ? row.requirements.pages : [],
-          backend_required: Boolean(row.requirements.backend_required),
-          auth_required: Boolean(row.requirements.auth_required),
-          deployment_pref: row.requirements.deployment_pref,
-          notes: row.requirements.notes,
-        }
-      : undefined,
-    clarifications: row.clarifications || undefined,
-    confirmation: row.confirmation || undefined,
-    systemDesign: row.system_design || undefined,
-    uiSpec: row.structured_spec || row.ui_spec
-      ? { uiSpec: row.ui_spec, structuredSpec: row.structured_spec || row.ui_spec }
-      : undefined,
-    code: row.code_gen || undefined,
-    tests: row.test_result || undefined,
-    deployment: row.deployment || undefined,
-    history: [],
-    errors: [],
-    fixes: [],
-    checkpoints: [],
-    status: row.status === 'completed' ? 'completed' : row.status === 'failed' ? 'failed' : 'active',
-  };
+  try {
+    const memory: ProjectMemory = {
+      projectId: scope.projectId,
+      sessionId: scope.projectId,
+      currentState: (row.current_step as ProjectMemory['currentState']) || 'requirements',
+      deploymentMode: row.requirements?.backend_required ? 'full-stack' : 'frontend-only',
+      requirements: row.requirements
+        ? {
+            userMessage: row.requirements.userMessage || '',
+            website_type: row.requirements.website_type,
+            pages: Array.isArray(row.requirements.pages) ? row.requirements.pages : [],
+            backend_required: Boolean(row.requirements.backend_required),
+            auth_required: Boolean(row.requirements.auth_required),
+            deployment_pref: row.requirements.deployment_pref,
+            notes: row.requirements.notes,
+          }
+        : undefined,
+      clarifications: row.clarifications || undefined,
+      confirmation: row.confirmation || undefined,
+      systemDesign: row.system_design || undefined,
+      uiSpec: row.structured_spec || row.ui_spec
+        ? { uiSpec: row.ui_spec, structuredSpec: row.structured_spec || row.ui_spec }
+        : undefined,
+      code: row.code_gen || undefined,
+      tests: row.test_result || undefined,
+      deployment: row.deployment || undefined,
+      history: [],
+      errors: [],
+      fixes: [],
+      checkpoints: [],
+      status: row.status === 'completed' ? 'completed' : row.status === 'failed' ? 'failed' : 'active',
+    };
 
-  return memory;
+    // Basic corruption check
+    if (!memory.projectId || typeof memory.currentState !== 'string') {
+      throw new Error('Corrupted memory: missing projectId or invalid currentState');
+    }
+
+    return memory;
+  } catch (err) {
+    logError('persistenceAdapter:loadSnapshot_corrupted', { projectId: scope.projectId, error: err });
+    // Return null to start fresh
+    return null;
+  }
 }
 
 async function writeEvent(scope: AdapterScope, event: OrchestrationEvent): Promise<void> {

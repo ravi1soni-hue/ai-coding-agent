@@ -175,6 +175,16 @@ export function validateProjectConsistency(input: {
 
   // blueprint checks: only after blueprint stage has run
   if (atOrAfterStage(activeStage, 'codeGen')) {
+    if (blueprint && systemDesign) {
+      const systemPages = asArray<unknown>(asRecord(systemDesign.frontend)?.pages).map(normalizePageName).filter(Boolean);
+      const blueprintRoutes = getBlueprintComponentNames(blueprint);
+      for (const page of systemPages) {
+        if (!blueprintRoutes.some(route => route.toLowerCase().includes(page))) {
+          addIssue(issues, 'blueprint', `blueprint missing route for system design page: ${page}`);
+        }
+      }
+    }
+
     if (uiSpec) {
       const componentNames = getComponentNamesFromUiSpec(uiSpec);
       const blueprintNames = blueprint ? getBlueprintComponentNames(blueprint) : [];

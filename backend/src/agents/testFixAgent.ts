@@ -93,10 +93,22 @@ function validateAndFixPackageJson(files: GeneratedFile[], pkgPath: 'package.jso
   }
 
   const missing: Record<string, string> = {};
+  const conflicts: string[] = [];
   for (const mod of importedModules) {
     if (!allDeclared.has(mod)) {
       missing[mod] = KNOWN_LIBRARY_VERSIONS[mod] ?? 'latest';
+    } else {
+      // Check for version conflicts
+      const existingVersion = deps[mod] || devDeps[mod];
+      const expectedVersion = KNOWN_LIBRARY_VERSIONS[mod];
+      if (expectedVersion && existingVersion !== expectedVersion && !existingVersion.includes('^') && !existingVersion.includes('~')) {
+        conflicts.push(`${mod}: existing ${existingVersion}, expected ${expectedVersion}`);
+      }
     }
+  }
+
+  if (conflicts.length > 0) {
+    logWarn('testFixAgent:dependencyConflicts', { pkgPath, conflicts });
   }
 
   if (Object.keys(missing).length === 0) return null;

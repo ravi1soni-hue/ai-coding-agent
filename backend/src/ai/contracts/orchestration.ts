@@ -25,6 +25,7 @@ export type OrchestrationErrorType =
   | 'deployment_error'
   | 'api_contract_error'
   | 'state_transition_error'
+  | 'authorization_error'
   | 'unknown_error';
 
 export type OrchestrationIssue = {

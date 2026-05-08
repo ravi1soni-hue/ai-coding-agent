@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { pgQuery } from '../db/postgres';
+import { pgQuery, getPgPool } from '../db/postgres';
 
 export type AuthUser = {
   id: string;
@@ -149,20 +149,40 @@ export async function revokeSession(token: string): Promise<void> {
 }
 
 export async function getOrCreateActiveProjectSession(userId: string): Promise<string> {
-  const existing = await pgQuery<{ id: string }>(
-    `SELECT id FROM project_sessions
-     WHERE user_id = $1 AND status = 'active'
-     ORDER BY last_active_at DESC
-     LIMIT 1`,
-    [userId],
-  );
+  const client = await getPgPool().connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query(
+      `SELECT id FROM project_sessions
+       WHERE user_id = $1 AND status = 'active'
+       ORDER BY last_active_at DESC
+       LIMIT 1
+       FOR UPDATE`,
+      [userId],
+    );
 
-  if (existing[0]?.id) {
-    await touchProjectSession(userId, existing[0].id);
-    return existing[0].id;
+    if (existing.rows[0]?.id) {
+      await client.query(
+        `UPDATE project_sessions SET last_active_at = NOW() WHERE id = $1`,
+        [existing.rows[0].id],
+      );
+      await client.query('COMMIT');
+      return existing.rows[0].id;
+    }
+
+    const id = crypto.randomUUID();
+    await client.query(
+      `INSERT INTO project_sessions (id, user_id, status) VALUES ($1, $2, 'active')`,
+      [id, userId],
+    );
+    await client.query('COMMIT');
+    return id;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
-
-  return createProjectSession(userId);
 }
 
 export async function createProjectSession(userId: string): Promise<string> {

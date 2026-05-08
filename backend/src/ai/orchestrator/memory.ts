@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { isValidTransition, normalizePipelineStage } from '../../orchestration/pipelineStateMachine';
 import type {
   BlueprintMemory,
   ClarificationMemory,
@@ -63,6 +64,10 @@ export function appendHistory(
     payload,
     createdAt: new Date().toISOString(),
   });
+  // Prune old history to prevent bloat, keep last 100
+  if (memory.history.length > 100) {
+    memory.history = memory.history.slice(-100);
+  }
 }
 
 export function appendIssue(memory: ProjectMemory, issue: OrchestrationIssue): void {
@@ -156,6 +161,11 @@ export function hashInput(value: unknown): string {
 }
 
 export function markStage(memory: ProjectMemory, stage: OrchestrationState): void {
+  const fromStage = normalizePipelineStage(memory.currentState);
+  const toStage = normalizePipelineStage(stage);
+  if (!isValidTransition(fromStage, toStage)) {
+    throw new Error(`Invalid state transition from ${fromStage} to ${toStage}`);
+  }
   memory.currentState = stage;
 }
 
