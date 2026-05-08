@@ -200,6 +200,17 @@ export type ProjectMemory = {
   fixes: Array<{ id: string; stage: OrchestrationState; message: string; createdAt: string }>;
   checkpoints: OrchestrationCheckpoint[];
   status: 'active' | 'paused' | 'recovering' | 'completed' | 'failed';
+  // Feedback channel for cross-stage self-healing. When a downstream stage
+  // (typically blueprint) detects a defect that originated upstream (e.g. a
+  // ui_spec component is missing for a requested page), the orchestrator
+  // captures actionable hints here and re-enters the upstream stage with the
+  // hints injected into the agent input. Cleared once consumed.
+  pendingFeedback?: {
+    targetStage: OrchestrationState;
+    issues: string[];
+    sourceStage: OrchestrationState;
+    createdAt: string;
+  };
 };
 
 export type OrchestrationCommand = {

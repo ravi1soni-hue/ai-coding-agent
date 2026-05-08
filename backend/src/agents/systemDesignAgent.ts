@@ -49,6 +49,13 @@ export async function systemDesignAgent(input: any): Promise<StateAwareAgentResu
     const projectSpec = input.projectSpec || null;
     const backendRequired = Boolean(input?.requirements?.backend_required ?? input?.backend_required ?? projectSpec?.requirements?.backend_required);
     const authRequired = Boolean(input?.requirements?.auth_required ?? input?.auth_required ?? projectSpec?.requirements?.auth_required);
+    // Self-heal feedback from a downstream stage that detected divergence.
+    const previousIssues: string[] = Array.isArray(input.previousIssues)
+      ? input.previousIssues.filter((s: unknown) => typeof s === 'string' && s.trim()).map((s: string) => s.trim())
+      : [];
+    const feedbackBlock = previousIssues.length > 0
+      ? `\n\nFEEDBACK FROM A PREVIOUS ATTEMPT — your earlier output failed downstream consistency checks. Address each item; do not repeat the same mistakes:\n${previousIssues.map((m) => `- ${m}`).join('\n')}\n`
+      : '';
 
     const systemPrompt = `You are a software architect. Design a complete technical architecture for the given requirements.
 
@@ -101,7 +108,7 @@ RULES:
 - If auth_required is false: set auth to null
 - database.tables must list tables needed for the request with the columns that are actually used
 - Include created_at/updated_at timestamps on tables that need them
-- For auth: include the minimum users table needed for the request`;
+- For auth: include the minimum users table needed for the request${feedbackBlock}`;
 
     const userInput = JSON.stringify({
       requirements: input.requirements || input,

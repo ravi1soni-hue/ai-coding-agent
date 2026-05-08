@@ -222,6 +222,16 @@ export async function uiSpecAgent(input: any): Promise<StateAwareAgentResult<Str
     const requirements = input.requirements || {};
     const canonicalRequirements = projectSpec.requirements || {};
     const modification = input.modification || null;
+    // Self-heal feedback: hints from a previous downstream failure (e.g. blueprint
+    // detected a missing component for a requested page). Surface verbatim in the
+    // prompt so the LLM corrects the divergence rather than re-emitting the same
+    // shape on retry.
+    const previousIssues: string[] = Array.isArray(input.previousIssues)
+      ? input.previousIssues.filter((s: unknown) => typeof s === 'string' && s.trim()).map((s: string) => s.trim())
+      : [];
+    const feedbackBlock = previousIssues.length > 0
+      ? `\n\nFEEDBACK FROM A PREVIOUS ATTEMPT — your earlier output failed downstream consistency checks. Address each item; do not repeat the same mistakes:\n${previousIssues.map((m) => `- ${m}`).join('\n')}\n`
+      : '';
 
     // Step 1: Generate component interfaces
     const componentInterfacePrompt = `You are a React component architect. Based on the system design, canonical project spec, and requirements, define detailed component interfaces.
@@ -263,7 +273,7 @@ RULES:
 - Each component must have clear, specific props
 - Dependencies should be other component names (for leaf-first generation)
 - renderLogic should describe actual UI output, not generic placeholders
-- Components should be specific to the user's request, not generic examples`;
+- Components should be specific to the user's request, not generic examples${feedbackBlock}`;
 
     const componentInterfaceRaw = await callLLMWithRetry(
       llmProxy,
@@ -289,6 +299,48 @@ RULES:
       dependencies: Array.isArray(c.dependencies) ? c.dependencies : [],
       renderLogic: c.renderLogic || 'Renders UI based on props and state',
     }));
+
+    // Universal stability: ensure every requested requirements.pages entry
+    // becomes an actual page component, even if the LLM omitted it.
+    // This prevents later stages from “dropping” pages like pricing due to
+    // missing components in the layout tree.
+    const toPascalCase = (value: string): string =>
+      String(value || '')
+        .replace(/[^a-zA-Z0-9]+/g, ' ')
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join('');
+
+    const requestedPages = Array.isArray(requirements?.pages) ? requirements.pages : [];
+    const existingNames = new Set(components.map((c) => String(c.name)));
+    const seededComponents: ComponentInterface[] = [];
+
+    for (const page of requestedPages) {
+      const pageStr = typeof page === 'string' ? page : String(page || '').trim();
+      if (!pageStr) continue;
+      const seededName = toPascalCase(pageStr);
+      if (!seededName) continue;
+      if (existingNames.has(seededName)) continue;
+
+      seededComponents.push({
+        name: seededName,
+        path: `src/components/${seededName}.jsx`,
+        purpose: `${pageStr} page`,
+        props: {},
+        state: [],
+        effects: [],
+        dependencies: [],
+        renderLogic: `Render the ${pageStr} page according to the provided requirements.`,
+      });
+
+      existingNames.add(seededName);
+    }
+
+    if (seededComponents.length > 0) {
+      components.push(...seededComponents);
+    }
 
     debug('uiSpecAgent:componentInterfaces', { components });
 

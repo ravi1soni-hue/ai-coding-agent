@@ -151,8 +151,9 @@ export function validateProjectConsistency(input: {
     addIssue(issues, 'clarification', 'clarification answers are missing for unresolved questions');
   }
 
-  // systemDesign checks: only after systemDesign stage has run
-  if (atOrAfterStage(activeStage, 'uiSpec')) {
+  // systemDesign checks: fire AT (and after) the systemDesign stage so the
+  // producer stage itself is gated on its own invariants.
+  if (atOrAfterStage(activeStage, 'systemDesign')) {
     if (requirements?.backend_required && !systemDesign) {
       addIssue(issues, 'systemDesign', 'required backend architecture is missing');
     }
@@ -167,20 +168,58 @@ export function validateProjectConsistency(input: {
         }
       }
     }
+  }
 
+  // uiSpec presence is only required once the uiSpec stage is in scope.
+  if (atOrAfterStage(activeStage, 'uiSpec')) {
     if (systemDesign && !uiSpec) {
       addIssue(issues, 'uiSpec', 'UI spec is missing after system design');
     }
   }
 
-  // blueprint checks: only after blueprint stage has run
-  if (atOrAfterStage(activeStage, 'codeGen')) {
+  // blueprint checks: fire AT the blueprint stage (not after codeGen begins).
+  if (atOrAfterStage(activeStage, 'blueprint')) {
     if (blueprint && systemDesign) {
+      // A page is "covered" only when there is real implementation evidence in the
+      // blueprint — a navigation route, a component, or a file. Merely echoing the
+      // page name in `blueprint.strict.frontend.pages` is tautological (the agent
+      // copies it there from requirements) so it does NOT count as coverage.
+      //
+      // For single-page projects (projectType=landing_page with one or zero
+      // declared pages) the entire app composes the page; per-page route checking
+      // is not meaningful and we skip it.
       const systemPages = asArray<unknown>(asRecord(systemDesign.frontend)?.pages).map(normalizePageName).filter(Boolean);
-      const blueprintRoutes = getBlueprintComponentNames(blueprint);
-      for (const page of systemPages) {
-        if (!blueprintRoutes.some(route => route.toLowerCase().includes(page))) {
-          addIssue(issues, 'blueprint', `blueprint missing route for system design page: ${page}`);
+      const blueprintRecord = asRecord(blueprint);
+      const strict = asRecord(blueprintRecord?.strict);
+      const blueprintFrontend = asRecord(strict?.frontend);
+      const projectType = String(strict?.projectType || '');
+      const metadataNavRoutes = asArray<{ path?: string; component?: string }>(
+        asRecord(asRecord(blueprintRecord?.metadata)?.navigation)?.routes ?? asRecord(blueprintRecord?.navigation)?.routes
+      );
+      const routeComponents = metadataNavRoutes.map((r) => String(r?.component || '').toLowerCase());
+      const routePaths = metadataNavRoutes.map((r) => String(r?.path || '').toLowerCase());
+      const blueprintComponents = asArray<unknown>(blueprintFrontend?.components).map((value) => String(value || '').toLowerCase());
+      const blueprintFilePaths = getBlueprintPaths(blueprint).map((p) => p.toLowerCase());
+
+      const isSinglePageApp =
+        projectType === 'landing_page' &&
+        systemPages.length <= 1;
+
+      if (!isSinglePageApp) {
+        for (const page of systemPages) {
+          const slug = page.replace(/[^a-z0-9]/g, '');
+          const covered =
+            // Route path slug matches the page (e.g. /pricing for "pricing")
+            routePaths.some((rp) => rp.replace(/[^a-z0-9]/g, '').includes(slug) && slug.length > 0) ||
+            // A navigation route's component name carries the page identity
+            routeComponents.some((c) => c.includes(page)) ||
+            // A declared component carries the page identity
+            blueprintComponents.some((component) => component.includes(page)) ||
+            // A file path carries the page identity
+            blueprintFilePaths.some((filePath) => filePath.includes(page));
+          if (!covered) {
+            addIssue(issues, 'blueprint', `blueprint missing route for system design page: ${page}`);
+          }
         }
       }
     }
@@ -189,24 +228,52 @@ export function validateProjectConsistency(input: {
       const componentNames = getComponentNamesFromUiSpec(uiSpec);
       const blueprintNames = blueprint ? getBlueprintComponentNames(blueprint) : [];
       const blueprintPaths = blueprint ? getBlueprintPaths(blueprint) : [];
+      const blueprintRecord = asRecord(blueprint);
+      const blueprintComponentList = asArray<unknown>(asRecord(asRecord(blueprintRecord?.strict)?.frontend)?.components)
+        .map((value) => String(value || ''));
 
       for (const componentName of componentNames) {
-        if (!blueprintNames.includes(componentName) && !blueprintPaths.some((filePath) => filePath.includes(componentName))) {
+        const found =
+          blueprintNames.includes(componentName) ||
+          blueprintComponentList.includes(componentName) ||
+          blueprintPaths.some((filePath) => filePath.toLowerCase().includes(componentName.toLowerCase()));
+        if (!found) {
           addIssue(issues, 'blueprint', `missing wiring for UI component: ${componentName}`);
         }
       }
     }
 
     if (blueprint) {
-      const blueprintAppIncludes = getAppMustInclude(blueprint);
-      if (!blueprintAppIncludes.some((token) => /router|API_BASE|fetch/i.test(token))) {
-        addIssue(issues, 'blueprint', 'src/App.jsx blueprint is missing API_BASE/router/fetch wiring');
+      // App.jsx wiring requirements are conditional, not universal:
+      //   - 'App' is always required (composition root).
+      //   - 'router' is required only when there is more than one navigation route.
+      //   - 'fetch'/'API_BASE' is required only when a backend was requested.
+      // Demanding all three on every project (the previous behaviour) made every
+      // frontend-only run fail this check by design.
+      const blueprintAppIncludes = getAppMustInclude(blueprint).map((token) => String(token));
+      const blueprintRecord = asRecord(blueprint);
+      const metadataNav = asRecord(blueprintRecord?.metadata)?.navigation;
+      const topLevelNav = blueprintRecord?.navigation;
+      const navigationRoutes = asArray<unknown>(asRecord(metadataNav)?.routes ?? asRecord(topLevelNav)?.routes);
+      const routeCount = navigationRoutes.length;
+      const backendRequired = Boolean(requirements?.backend_required || requirements?.auth_required);
+
+      const includes = (pattern: RegExp) => blueprintAppIncludes.some((token) => pattern.test(token));
+
+      if (!includes(/^App$|app/i)) {
+        addIssue(issues, 'blueprint', 'src/App.jsx mustInclude must declare the App component');
+      }
+      if (routeCount > 1 && !includes(/router/i)) {
+        addIssue(issues, 'blueprint', 'src/App.jsx mustInclude must declare router wiring (multiple routes present)');
+      }
+      if (backendRequired && !includes(/API_BASE|fetch/i)) {
+        addIssue(issues, 'blueprint', 'src/App.jsx mustInclude must declare API_BASE/fetch wiring (backend required)');
       }
     }
   }
 
-  // codeGen checks: only after codeGeneration stage has run
-  if (atOrAfterStage(activeStage, 'testFix')) {
+  // codeGen checks: fire AT the code_generation stage.
+  if (atOrAfterStage(activeStage, 'codeGen')) {
     if (codeGen) {
       const files = asArray<{ path?: string; content?: string }>(codeGen.files);
       const expectedPaths = new Set<string>([

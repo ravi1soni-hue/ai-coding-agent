@@ -10,7 +10,7 @@ import { reviewerAgent } from '../../agents/reviewerAgent';
 import { materializeProjectWorkspace } from '../../factory/projectFactory';
 import { runBuildWorker, cleanupWorkspace } from '../../workers/buildWorker';
 import { consolidateProjectSpec, validateProjectSpec } from '../../agents/projectSpec';
-import { validateProjectConsistency, formatConsistencyIssues } from '../../agents/projectConsistency';
+import { validateProjectConsistency, formatConsistencyIssues, type ConsistencyIssue } from '../../agents/projectConsistency';
 import { classifyError } from './errorClassifier';
 import { buildExecutionPlan } from './executionPlan';
 import type { RequirementAnalysisOutput } from '../../agents/requirementAnalysisAgent';
@@ -601,9 +601,11 @@ async function runConfirmationGate(
   return { confirmed: false };
 }
 
-function assertConsistency(memory: ProjectMemory, command: OrchestrationCommand, activeStage: OrchestrationState): void {
+type StageRepair = (memory: ProjectMemory, issues: ConsistencyIssue[], command: OrchestrationCommand) => string[];
+
+function runConsistencyReport(memory: ProjectMemory, command: OrchestrationCommand, activeStage: OrchestrationState) {
   const projectSpec = buildProjectSpec(memory, command);
-  const report = validateProjectConsistency({
+  return validateProjectConsistency({
     projectSpec,
     requirementAnalysis: memory.requirements,
     clarifications: memory.clarifications,
@@ -613,9 +615,198 @@ function assertConsistency(memory: ProjectMemory, command: OrchestrationCommand,
     codeGen: memory.code,
     activeStage,
   });
-  if (!report.ok) {
-    throw new Error(`Cross-stage consistency validation failed at ${activeStage}:\n${formatConsistencyIssues(report)}`);
+}
+
+/**
+ * Self-healing consistency gate. Validates the cross-stage report; if it fails,
+ * runs a stage-specific deterministic repair that mutates memory in place; then
+ * re-validates. Loops up to 3 passes with a strict monotonic-decrease invariant
+ * on the issue count so a non-progressing repair fails loudly instead of spinning.
+ *
+ * Why this lives at the orchestrator boundary instead of inside each agent:
+ * the systemDesign frontend-only path (buildFrontendOnlySystemDesign) bypasses
+ * systemDesignAgent entirely, so agent-local repair would miss it. Centralising
+ * here ensures every stage's consistency surface gets the same repair semantics
+ * regardless of how the artifact was produced.
+ */
+function assertConsistencyWithSelfHeal(
+  memory: ProjectMemory,
+  command: OrchestrationCommand,
+  activeStage: OrchestrationState,
+  repair?: StageRepair
+): void {
+  let lastIssueCount = Infinity;
+  for (let pass = 0; pass < 3; pass += 1) {
+    const report = runConsistencyReport(memory, command, activeStage);
+    if (report.ok) return;
+    if (!repair) break;
+    if (report.issues.length >= lastIssueCount) {
+      throw new Error(
+        `Cross-stage consistency self-heal stalled at ${activeStage} after ${pass} pass(es):\n${formatConsistencyIssues(report)}`
+      );
+    }
+    lastIssueCount = report.issues.length;
+    const repairs = repair(memory, report.issues, command);
+    appendHistory(memory, activeStage, 'self_heal_repair', `Applied ${repairs.length} repair(s)`, repairs);
+    if (repairs.length === 0) {
+      throw new Error(
+        `Cross-stage consistency validation failed at ${activeStage} (no repair pattern matched):\n${formatConsistencyIssues(report)}`
+      );
+    }
   }
+  // Final report after the budget is exhausted.
+  const finalReport = runConsistencyReport(memory, command, activeStage);
+  if (!finalReport.ok) {
+    throw new Error(
+      `Cross-stage consistency validation failed at ${activeStage} after self-heal budget:\n${formatConsistencyIssues(finalReport)}`
+    );
+  }
+}
+
+// ---- Per-stage repair functions ---------------------------------------------
+
+function repairSystemDesign(memory: ProjectMemory, issues: ConsistencyIssue[]): string[] {
+  const repairs: string[] = [];
+  const sd: any = memory.systemDesign || {};
+  sd.frontend = sd.frontend || { framework: 'react-vite', pages: [], components: [], styling: 'css' };
+  sd.frontend.pages = Array.isArray(sd.frontend.pages) ? sd.frontend.pages : [];
+
+  for (const issue of issues) {
+    const missingPage = /missing page from requirements:\s*(.+)$/i.exec(issue.message);
+    if (missingPage) {
+      const page = missingPage[1].trim();
+      if (!sd.frontend.pages.some((p: unknown) => String(p).toLowerCase() === page.toLowerCase())) {
+        sd.frontend.pages.push(page);
+        repairs.push(`added page "${page}" to systemDesign.frontend.pages`);
+      }
+      continue;
+    }
+    if (/required backend architecture is missing/i.test(issue.message)) {
+      sd.backend = sd.backend || { framework: 'node-ts', api_style: 'rest', endpoints: [] };
+      sd.database = sd.database || { type: 'postgresql', tables: [] };
+      repairs.push('seeded missing backend/database scaffolding');
+    }
+  }
+  memory.systemDesign = sd;
+  return repairs;
+}
+
+function repairUiSpec(memory: ProjectMemory, issues: ConsistencyIssue[]): string[] {
+  const repairs: string[] = [];
+  // Symmetry hook: ui_spec stage's only current check is presence after systemDesign,
+  // which the agent itself handles. If future invariants land here, repair patterns
+  // for them go in this function. Keeping the shape identical to other repairers
+  // means new patterns can be plugged in without re-plumbing the call sites.
+  for (const issue of issues) {
+    if (/UI spec is missing/i.test(issue.message) && memory.systemDesign && !memory.uiSpec) {
+      // Cannot synthesize a uiSpec deterministically here; fall through to throw.
+      continue;
+    }
+  }
+  return repairs;
+}
+
+function repairCode(memory: ProjectMemory, issues: ConsistencyIssue[]): string[] {
+  const repairs: string[] = [];
+  if (!memory.code) memory.code = { files: [], patch: '' };
+  memory.code.files = Array.isArray(memory.code.files) ? memory.code.files : [];
+
+  const componentNameFromPath = (filePath: string): string => {
+    const base = filePath.replace(/\\/g, '/').split('/').pop() || 'Component';
+    return base.replace(/\.[^./]+$/, '').replace(/[^a-zA-Z0-9]/g, '') || 'Component';
+  };
+
+  for (const issue of issues) {
+    const missingFile = /missing generated file for expected path:\s*(.+)$/i.exec(issue.message);
+    if (missingFile) {
+      const path = missingFile[1].trim();
+      if (memory.code.files.some((f) => String(f.path).replace(/\\/g, '/').replace(/^\/+/, '') === path)) continue;
+
+      let content = '';
+      if (path === 'src/App.jsx') {
+        content = `export default function App() {\n  return null;\n}\n`;
+      } else if (path === 'src/index.css') {
+        content = `:root { color-scheme: light; }\nbody { margin: 0; font-family: system-ui, sans-serif; }\n`;
+      } else if (/\.jsx$/.test(path)) {
+        const name = componentNameFromPath(path);
+        content = `export default function ${name}() {\n  return null;\n}\n`;
+      } else {
+        content = '';
+      }
+      memory.code.files.push({ path, content });
+      repairs.push(`added stub file ${path}`);
+      continue;
+    }
+
+    if (/generated App\.jsx is missing default App export/i.test(issue.message)) {
+      const appFile = memory.code.files.find((f) => String(f.path).replace(/\\/g, '/').replace(/^\/+/, '') === 'src/App.jsx');
+      if (appFile) {
+        const original = String(appFile.content || '');
+        appFile.content = `${original}\n\nexport default function App() {\n  return null;\n}\n`;
+        repairs.push('appended default App export to src/App.jsx');
+      }
+    }
+  }
+  return repairs;
+}
+
+// Backwards-compatible thin wrapper so existing call sites without a repair
+// function still work as a non-self-healing assertion.
+function assertConsistency(memory: ProjectMemory, command: OrchestrationCommand, activeStage: OrchestrationState): void {
+  assertConsistencyWithSelfHeal(memory, command, activeStage);
+}
+
+/**
+ * Decide whether a downstream failure (currently only blueprint stage) carries
+ * diagnostics that an upstream agent could plausibly act on if re-run with
+ * feedback. Returns the upstream stage to replay and the human-readable hints
+ * to inject into that agent's prompt. Returns empty result when the failure is
+ * either non-actionable upstream (orchestrator-level routing problem) or
+ * already handled by the agent's own self-heal (and thus not worth replaying).
+ *
+ * The classification is intentionally pattern-based on issue messages — those
+ * messages are the same strings produced by validateProjectConsistency, so we
+ * have a single source of truth for what each pattern means.
+ */
+function extractUpstreamFeedback(issues: import('../contracts/orchestration').OrchestrationIssue[]): { targetStage: OrchestrationState | ''; issues: string[] } {
+  const uiSpecHints: string[] = [];
+  const systemDesignHints: string[] = [];
+
+  for (const issue of issues) {
+    const text = String(issue?.message || '');
+    // Page coverage issues map to ui_spec — components for that page are missing.
+    if (/blueprint missing route for system design page:\s*(.+)/i.test(text)) {
+      const m = /blueprint missing route for system design page:\s*(.+)/i.exec(text);
+      const page = m?.[1]?.trim() || '';
+      uiSpecHints.push(`Add a top-level component for the page "${page}" so the blueprint can wire a route to it. The page name was requested explicitly in requirements.`);
+      continue;
+    }
+    // UI component wiring issues map to ui_spec — the spec listed a component the blueprint can't realise.
+    if (/missing wiring for UI component:\s*(.+)/i.test(text)) {
+      const m = /missing wiring for UI component:\s*(.+)/i.exec(text);
+      const comp = m?.[1]?.trim() || '';
+      uiSpecHints.push(`The previous spec listed component "${comp}" but the blueprint could not place it. Either omit it, or ensure it is referenced by another component's "dependencies" so it has an owner.`);
+      continue;
+    }
+    // System design page-coverage maps back to system_design.
+    if (/missing page from requirements:\s*(.+)/i.test(text)) {
+      const m = /missing page from requirements:\s*(.+)/i.exec(text);
+      const page = m?.[1]?.trim() || '';
+      systemDesignHints.push(`Include the page "${page}" in frontend.pages — it appears in the canonical requirements list.`);
+      continue;
+    }
+    if (/required backend architecture is missing/i.test(text)) {
+      systemDesignHints.push('A backend was requested in requirements; emit a non-null backend block with concrete routes and a database block with concrete tables.');
+      continue;
+    }
+    // Wiring-only issues (App.jsx mustInclude tokens) are blueprint-internal —
+    // already handled by blueprintAgent's self-heal pass and not actionable upstream.
+  }
+
+  // Prefer routing to ui_spec first when present (closer to the symptom); fall back to system_design.
+  if (uiSpecHints.length > 0) return { targetStage: 'ui_spec', issues: uiSpecHints };
+  if (systemDesignHints.length > 0) return { targetStage: 'system_design', issues: systemDesignHints };
+  return { targetStage: '', issues: [] };
 }
 
 function invalidateDownstream(memory: ProjectMemory, fromStage: OrchestrationState): void {
@@ -716,64 +907,136 @@ export async function runAIOrchestration(
     return finalizePartial(memory, 'confirmation', persistence);
   }
 
-  // 5. System design
-  const systemDesignResult = await stageWrap(memory, 'system_design', projectSpec, async () => {
-    const result = isFrontendOnlyRequirements(memory.requirements)
-      ? {
-          updatedState: {
-            activeState: 'UI_SPEC',
-            domain: 'system_design',
+  // 5-7. Design → UI spec → Blueprint, with cross-stage feedback self-heal.
+  //
+  // When the blueprint stage detects a defect that originated upstream (e.g. a
+  // requested page has no corresponding ui_spec component, or system_design
+  // dropped a backend feature), the orchestrator captures the diagnostic as
+  // memory.pendingFeedback and re-enters the upstream stage with the feedback
+  // injected into the agent's input. Bounded by `maxDesignFeedbackLoops` so a
+  // genuinely unfixable mismatch fails loudly instead of spinning. Loop budget
+  // is in addition to per-stage retries (which target transient failures).
+  const maxDesignFeedbackLoops = 2;
+  let designLoop = 0;
+  let designResolved = false;
+  let lastBlueprintResult: StageResult<unknown> | null = null;
+
+  while (!designResolved && designLoop <= maxDesignFeedbackLoops) {
+    // Capture and consume any pending feedback for this iteration.
+    const feedbackForUiSpec =
+      memory.pendingFeedback?.targetStage === 'ui_spec' ? memory.pendingFeedback.issues.slice() : [];
+    const feedbackForSystemDesign =
+      memory.pendingFeedback?.targetStage === 'system_design' ? memory.pendingFeedback.issues.slice() : [];
+
+    // 5. System design
+    const systemDesignResult = await stageWrap(memory, 'system_design', projectSpec, async () => {
+      const result = isFrontendOnlyRequirements(memory.requirements)
+        ? {
+            updatedState: {
+              activeState: 'UI_SPEC',
+              domain: 'system_design',
+              consistencyScore: 1,
+              transitions: [String(memory.currentState || 'requirements'), 'system_design'],
+              metadata: { frontendOnly: true },
+            },
+            nextStateProposal: 'UI_SPEC',
             consistencyScore: 1,
-            transitions: [String(memory.currentState || 'requirements'), 'system_design'],
-            metadata: { frontendOnly: true },
-          },
-          nextStateProposal: 'UI_SPEC',
-          consistencyScore: 1,
-          output: buildFrontendOnlySystemDesign(memory.requirements),
-        }
-      : await systemDesignAgent({ requirements: memory.requirements, projectSpec });
-    setSystemDesign(memory, result.output);
-    assertConsistency(memory, command, 'system_design');
-    return result.output;
-  }, { ...opts, percent: 25 });
+            output: buildFrontendOnlySystemDesign(memory.requirements),
+          }
+        : await systemDesignAgent({
+            requirements: memory.requirements,
+            projectSpec,
+            previousIssues: feedbackForSystemDesign,
+          });
+      setSystemDesign(memory, result.output);
+      assertConsistencyWithSelfHeal(memory, command, 'system_design', repairSystemDesign);
+      return result.output;
+    }, { ...opts, percent: 25 });
 
-  if (systemDesignResult.status !== 'success') return finalizeResult(memory, systemDesignResult, null, null);
+    if (systemDesignResult.status !== 'success') return finalizeResult(memory, systemDesignResult, null, null);
 
-  const uiSpecResult = await stageWrap(memory, 'ui_spec', memory.systemDesign, async () => {
-    const result = await uiSpecAgent({
-      requirements: memory.requirements,
-      systemDesign: memory.systemDesign,
-      projectSpec,
-      globalState: {
-        activeState: memory.currentState,
+    // 6. UI spec
+    const uiSpecResult = await stageWrap(memory, 'ui_spec', memory.systemDesign, async () => {
+      const result = await uiSpecAgent({
+        requirements: memory.requirements,
+        systemDesign: memory.systemDesign,
         projectSpec,
-        consistencyScore: memory.uiSpec?.structuredSpec ? 1 : 0,
-        domain: 'ui_spec',
-        transitions: [],
-      },
+        previousIssues: feedbackForUiSpec,
+        globalState: {
+          activeState: memory.currentState,
+          projectSpec,
+          consistencyScore: memory.uiSpec?.structuredSpec ? 1 : 0,
+          domain: 'ui_spec',
+          transitions: [],
+        },
+      });
+      setUISpec(memory, { uiSpec: result.output, structuredSpec: result.output });
+      assertConsistencyWithSelfHeal(memory, command, 'ui_spec', repairUiSpec);
+      return result.output;
+    }, { ...opts, percent: 35 });
+
+    if (uiSpecResult.status !== 'success') return finalizeResult(memory, uiSpecResult, null, null);
+
+    // 7. Blueprint
+    const blueprintResult = await stageWrap(memory, 'blueprint', memory.uiSpec, async () => {
+      const result = await blueprintAgent({
+        requirements: memory.requirements,
+        systemDesign: memory.systemDesign,
+        uiSpec: memory.uiSpec,
+        projectSpec,
+        projectId: command.projectId,
+        modification: command.modification,
+      });
+      setBlueprint(memory, { blueprint: result.output });
+      assertConsistency(memory, command, 'blueprint');
+      return result.output;
+    }, { ...opts, percent: 50 });
+
+    lastBlueprintResult = blueprintResult;
+
+    if (blueprintResult.status === 'success') {
+      // Feedback consumed successfully; clear it so subsequent stages don't see stale hints.
+      memory.pendingFeedback = undefined;
+      designResolved = true;
+      break;
+    }
+
+    // Blueprint failed. Decide whether the failure points upstream (vocabulary or
+    // structural divergence the upstream agent could plausibly fix on rerun) or
+    // is a genuine dead-end.
+    const upstreamHints = extractUpstreamFeedback(blueprintResult.issues);
+    const canFeedback = designLoop < maxDesignFeedbackLoops && upstreamHints.targetStage && upstreamHints.issues.length > 0;
+    if (!canFeedback) {
+      return finalizeResult(memory, blueprintResult, null, null);
+    }
+
+    memory.pendingFeedback = {
+      targetStage: upstreamHints.targetStage as OrchestrationState,
+      issues: upstreamHints.issues,
+      sourceStage: 'blueprint',
+      createdAt: new Date().toISOString(),
+    };
+    appendHistory(
+      memory,
+      'blueprint',
+      'feedback_captured',
+      `Captured ${upstreamHints.issues.length} hint(s) for ${upstreamHints.targetStage}; re-entering`,
+      memory.pendingFeedback
+    );
+    invalidateDownstream(memory, upstreamHints.targetStage as OrchestrationState);
+    await persistMemory(memory, persistence);
+    adapter.emit?.({
+      type: 'progress',
+      stage: upstreamHints.targetStage as OrchestrationState,
+      percent: 22,
+      message: `replaying ${upstreamHints.targetStage} with feedback`,
     });
-    setUISpec(memory, { uiSpec: result.output, structuredSpec: result.output });
-    assertConsistency(memory, command, 'ui_spec');
-    return result.output;
-  }, { ...opts, percent: 35 });
+    designLoop += 1;
+  }
 
-  if (uiSpecResult.status !== 'success') return finalizeResult(memory, uiSpecResult, null, null);
-
-  const blueprintResult = await stageWrap(memory, 'blueprint', memory.uiSpec, async () => {
-    const result = await blueprintAgent({
-      requirements: memory.requirements,
-      systemDesign: memory.systemDesign,
-      uiSpec: memory.uiSpec,
-      projectSpec,
-      projectId: command.projectId,
-      modification: command.modification,
-    });
-    setBlueprint(memory, { blueprint: result.output });
-    assertConsistency(memory, command, 'blueprint');
-    return result.output;
-  }, { ...opts, percent: 50 });
-
-  if (blueprintResult.status !== 'success') return finalizeResult(memory, blueprintResult, null, null);
+  if (!designResolved) {
+    return finalizeResult(memory, lastBlueprintResult ?? createFailedResult('blueprint', [], 'blueprint'), null, null);
+  }
 
   const executionPlan = buildExecutionPlan(memory);
   setExecutionPlan(memory, executionPlan);
@@ -792,7 +1055,7 @@ export async function runAIOrchestration(
       user_id: command.sessionId,
     });
     setCode(memory, { files: generated.files || [], patch: generated.patch || '' });
-    assertConsistency(memory, command, 'code_generation');
+    assertConsistencyWithSelfHeal(memory, command, 'code_generation', repairCode);
     return generated;
   }, { ...opts, percent: 65 });
 

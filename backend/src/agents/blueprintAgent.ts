@@ -13,6 +13,7 @@ import {
   type ProjectBlueprintStrict,
 } from './blueprintContract';
 import { compileStructuredSpec, validateStructuredSpec, type StructuredSpec } from './structuredSpec';
+import { validateProjectConsistency, formatConsistencyIssues, type ConsistencyIssue } from './projectConsistency';
 
 export type BrainState = {
   activeState: string;
@@ -89,6 +90,124 @@ function transitionTo(currentState: string, nextState: string): string {
   return normalizedNext;
 }
 
+function toPascalCase(value: string): string {
+  return value
+    .replace(/[^a-zA-Z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join('') || 'Page';
+}
+
+/**
+ * Deterministic self-heal pass for blueprint consistency failures.
+ *
+ * The orchestrator's "retry" runs the same deterministic generator and produces
+ * identical output, so retry alone cannot heal anything. Real self-healing has
+ * to mutate the artifact. This pass reads the consistency report and fixes the
+ * specific defect patterns it can fix without escalating to the user.
+ *
+ * Returns a new blueprint (validated through the contract again so we never
+ * emit a malformed shape from a repair).
+ */
+function attemptBlueprintSelfHeal(
+  blueprint: ProjectBlueprint,
+  issues: ConsistencyIssue[],
+  context: { requirements: any; systemDesign?: any; uiSpec?: any }
+): { blueprint: ProjectBlueprint; repairs: string[] } {
+  const repairs: string[] = [];
+  const next: ProjectBlueprint = JSON.parse(JSON.stringify(blueprint));
+
+  // Helper: ensure metadata.navigation.routes exists
+  next.metadata = next.metadata || {};
+  next.metadata.navigation = next.metadata.navigation || { type: 'react-router', routes: [] };
+  next.metadata.navigation.routes = Array.isArray(next.metadata.navigation.routes) ? next.metadata.navigation.routes : [];
+
+  for (const issue of issues) {
+    // Pattern 1: missing route for system design page
+    const missingRouteMatch = /blueprint missing route for system design page:\s*(.+)$/i.exec(issue.message);
+    if (missingRouteMatch) {
+      const pageName = missingRouteMatch[1].trim();
+      const componentName = toPascalCase(pageName) + 'Page';
+      const slug = pageName.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+      const filePath = `src/components/${componentName}.jsx`;
+
+      // Add navigation route if absent
+      const hasRoute = next.metadata.navigation.routes.some((r) => r.component === componentName || r.path === `/${slug}`);
+      if (!hasRoute) {
+        next.metadata.navigation.routes.push({ path: `/${slug}`, component: componentName, purpose: `${pageName} page` });
+      }
+
+      // Add component file if absent
+      if (!next.files.some((f) => f.path === filePath)) {
+        next.files.push({
+          path: filePath,
+          kind: 'component',
+          purpose: `Auto-generated stub for ${pageName} page (self-heal repair)`,
+          dependsOn: [],
+        });
+      }
+
+      // Mirror in strict.frontend.components
+      if (!next.strict.frontend.components.includes(componentName)) {
+        next.strict.frontend.components = [...next.strict.frontend.components, componentName].sort();
+      }
+
+      // Wire App.jsx dependency
+      const appFile = next.files.find((f) => f.path === 'src/App.jsx');
+      if (appFile && !appFile.dependsOn?.includes(filePath)) {
+        appFile.dependsOn = [...(appFile.dependsOn || []), filePath].sort();
+      }
+
+      repairs.push(`added route+component for missing page "${pageName}" → ${filePath}`);
+      continue;
+    }
+
+    // Pattern 2: App.jsx mustInclude missing required tokens
+    const mustIncludeMatch = /src\/App\.jsx mustInclude must declare (.+)$/i.exec(issue.message);
+    if (mustIncludeMatch) {
+      const detail = mustIncludeMatch[1].toLowerCase();
+      const appFile = next.files.find((f) => f.path === 'src/App.jsx');
+      if (appFile) {
+        appFile.mustInclude = appFile.mustInclude || [];
+        const tokensToAdd: string[] = [];
+        if (/app component/.test(detail) && !appFile.mustInclude.some((t) => /^app$/i.test(t))) tokensToAdd.push('App');
+        if (/router/.test(detail) && !appFile.mustInclude.some((t) => /router/i.test(t))) tokensToAdd.push('router');
+        if (/(api_base|fetch)/.test(detail) && !appFile.mustInclude.some((t) => /API_BASE|fetch/i.test(t))) tokensToAdd.push('API_BASE', 'fetch');
+        if (tokensToAdd.length > 0) {
+          appFile.mustInclude = [...appFile.mustInclude, ...tokensToAdd];
+          repairs.push(`appended App.jsx mustInclude tokens: ${tokensToAdd.join(', ')}`);
+        }
+      }
+      continue;
+    }
+
+    // Pattern 3: missing wiring for UI component
+    const componentMatch = /missing wiring for UI component:\s*(.+)$/i.exec(issue.message);
+    if (componentMatch) {
+      const componentName = componentMatch[1].trim();
+      const filePath = `src/components/${componentName}.jsx`;
+      if (!next.files.some((f) => f.path === filePath)) {
+        next.files.push({
+          path: filePath,
+          kind: 'component',
+          purpose: `Auto-wired stub for ${componentName} (self-heal repair)`,
+          dependsOn: [],
+        });
+        if (!next.strict.frontend.components.includes(componentName)) {
+          next.strict.frontend.components = [...next.strict.frontend.components, componentName].sort();
+        }
+        repairs.push(`added missing component file ${filePath}`);
+      }
+      continue;
+    }
+  }
+
+  // Re-validate through the contract so a repair can never produce malformed output.
+  const repaired = validateProjectBlueprint(next, { requirements: context.requirements });
+  return { blueprint: assertBlueprintIntegrationSafety(repaired), repairs };
+}
+
 function semanticBlueprintScore(input: { structuredSpec: StructuredSpec; requirements: any; systemDesign?: any; uiSpec?: any }): number {
   const text = JSON.stringify(input).toLowerCase();
   const score =
@@ -118,12 +237,23 @@ export function generateBlueprint(structuredSpec: StructuredSpec, systemDesign: 
     ...structuredSpec.filePlan.filter((file) => file.path !== 'src/App.jsx').map((file) => file.path),
   ]);
 
+  // App.jsx mustInclude must reflect what App.jsx actually wires. The downstream
+  // consistency validator and code generator both read this list as a contract.
+  const appMustInclude: string[] = ['App'];
+  // Multi-page composition implies a router. Single-page (single root '/' route)
+  // landing pages do not, so we don't lie about it.
+  const layoutChildCount = structuredSpec.layoutTree.children.length;
+  if (layoutChildCount > 0) appMustInclude.push('router');
+  if (structuredSpec.backend_required) {
+    appMustInclude.push('API_BASE', 'fetch');
+  }
+
   const files: BlueprintFile[] = [
     toBlueprintFile('package.json', 'config', 'Frontend package manifest'),
     toBlueprintFile('index.html', 'entry', 'Frontend HTML entry', ['package.json']),
     toBlueprintFile('vite.config.js', 'config', 'Vite configuration', ['package.json']),
     toBlueprintFile('src/main.jsx', 'entry', 'React bootstrap', ['src/App.jsx', 'src/index.css']),
-    toBlueprintFile('src/App.jsx', 'entry', 'Application composition root', appDependencies, ['App']),
+    toBlueprintFile('src/App.jsx', 'entry', 'Application composition root', appDependencies, appMustInclude),
     toBlueprintFile('src/index.css', 'style', 'Global stylesheet', ['src/App.jsx']),
     ...componentFiles,
   ];
@@ -274,7 +404,42 @@ export async function blueprintAgent(input: BlueprintInput): Promise<StateAwareA
         requirements: input.requirements,
       });
 
-  const blueprint = generateBlueprint(structuredSpec, input.systemDesign, input.requirements);
+  let blueprint = generateBlueprint(structuredSpec, input.systemDesign, input.requirements);
+
+  // Self-heal loop: validate the blueprint against the same cross-stage rules the
+  // orchestrator will run, and apply deterministic repairs for fixable defects.
+  // We bound the loop because a repair pass that doesn't reduce the issue count
+  // is hopeless and we'd rather fail loudly than spin.
+  const projectSpecForCheck = (input.projectSpec || { projectId: input.projectId, userMessage: '', requirements: input.requirements }) as any;
+  let lastIssueCount = Infinity;
+  for (let pass = 0; pass < 3; pass += 1) {
+    const report = validateProjectConsistency({
+      projectSpec: projectSpecForCheck,
+      requirementAnalysis: input.requirements,
+      systemDesign: input.systemDesign,
+      uiSpec: input.uiSpec,
+      blueprint,
+      activeStage: 'blueprint',
+    });
+    if (report.ok) break;
+    if (report.issues.length >= lastIssueCount) {
+      // Repairs aren't making progress — let the orchestrator see the failure.
+      throw new Error(`Blueprint self-heal stalled after ${pass} pass(es):\n${formatConsistencyIssues(report)}`);
+    }
+    lastIssueCount = report.issues.length;
+    const { blueprint: repaired, repairs } = attemptBlueprintSelfHeal(blueprint, report.issues, {
+      requirements: input.requirements,
+      systemDesign: input.systemDesign,
+      uiSpec: input.uiSpec,
+    });
+    blueprint = repaired;
+    debug('blueprintAgent:self_heal', { projectId: input.projectId, pass, repairs, remainingIssues: report.issues.length });
+    if (repairs.length === 0) {
+      // No repair pattern matched the remaining issues — escalate.
+      throw new Error(`Blueprint validation failed with no applicable self-heal:\n${formatConsistencyIssues(report)}`);
+    }
+  }
+
   const semanticScore = semanticBlueprintScore({ structuredSpec, requirements: input.requirements, systemDesign: input.systemDesign, uiSpec: input.uiSpec });
 
   debug('blueprintAgent:done', { projectId: input.projectId, fileCount: blueprint.files.length, routeCount: blueprint.backendRoutes.length, semanticScore });
