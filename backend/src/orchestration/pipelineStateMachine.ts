@@ -111,10 +111,13 @@ export function isValidTransition(from: PipelineStage, to: PipelineStage): boole
   const transitions: Record<PipelineStage, PipelineStage[]> = {
     init: ['requirementAnalysis'],
     requirementAnalysis: ['clarification', 'confirmation', 'systemDesign', 'failed'],
-    clarification: ['clarification_wait'],
+    // The orchestrator goes directly clarification -> confirmation (no explicit clarification_wait state)
+    clarification: ['clarification_wait', 'confirmation'],
     clarification_wait: ['requirementAnalysis', 'confirmation', 'systemDesign', 'failed'],
     clarification_wait_modification: ['requirementAnalysis', 'confirmation', 'systemDesign', 'failed'],
-    confirmation: ['confirmation_wait'],
+
+    // The orchestrator goes directly confirmation -> system_design (no explicit confirmation_wait state)
+    confirmation: ['confirmation_wait', 'systemDesign'],
     confirmation_wait: ['systemDesign', 'failed'],
     systemDesign: ['uiSpec', 'failed'],
     uiSpec: ['blueprint', 'failed'],
