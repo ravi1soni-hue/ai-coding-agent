@@ -99,11 +99,10 @@ async function writeSnapshot(scope: AdapterScope, memory: ProjectMemory): Promis
         JSON.stringify(memory.deployment),
       ],
     );
-    // Upsert blackboard
     await client.query(
-      `INSERT INTO project_blackboard (project_id, user_id, state, updated_at)
-       VALUES ($1, $2, $3::jsonb, NOW())
-       ON CONFLICT (project_id) DO UPDATE SET
+      `INSERT INTO project_blackboards (id, project_id, user_id, state)
+       VALUES ($1, $1, $2, $3::jsonb)
+       ON CONFLICT (id) DO UPDATE SET
          state = EXCLUDED.state,
          updated_at = NOW()`,
       [

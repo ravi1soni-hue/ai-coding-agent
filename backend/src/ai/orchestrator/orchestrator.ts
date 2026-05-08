@@ -185,8 +185,14 @@ async function persistMemory(memory: ProjectMemory, persistence?: PersistenceAda
   if (!persistence?.saveSnapshot) return;
   try {
     await persistence.saveSnapshot(memory);
-  } catch {
-    // best-effort persistence; never fail the pipeline on snapshot errors
+  } catch (err) {
+    // best-effort persistence; never fail the pipeline on snapshot errors,
+    // but log so silent persistence regressions don't go unnoticed.
+    logError('orchestrator:persist_snapshot_failed', {
+      projectId: memory.projectId,
+      stage: memory.currentState,
+      error: err,
+    });
   }
 }
 
