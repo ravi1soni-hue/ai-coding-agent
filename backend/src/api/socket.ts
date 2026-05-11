@@ -107,27 +107,31 @@ function removeConnection(userId: string, ws: WsWebSocket) {
 
 export function createSocketServer(server: http.Server) {
   const wss = new Server({ server });
-  const HEARTBEAT_INTERVAL_MS = 25_000;
+  const PING_INTERVAL_MS = 25_000;
+  // Allow ~3 missed pongs before reaping. During code generation we ship full
+  // file contents through the socket, which can queue ahead of pings and delay
+  // the pong well beyond a single 25s window. Using a separate reap threshold
+  // (rather than killing on the next tick) prevents spurious disconnects.
+  const REAP_AFTER_MS = 75_000;
 
-  // Proxies (Railway/Cloudflare/etc.) close idle WS connections after ~60s.
-  // Long LLM stages can sit silent for longer, so ping every 25s and reap dead peers.
   const heartbeat = setInterval(() => {
+    const now = Date.now();
     for (const client of wss.clients) {
-      const c = client as WsWebSocket & { isAlive?: boolean };
+      const c = client as WsWebSocket & { lastSeenAt?: number };
       if (c.readyState !== c.OPEN) continue;
-      if (c.isAlive === false) {
+      if (typeof c.lastSeenAt === 'number' && now - c.lastSeenAt > REAP_AFTER_MS) {
         try { c.terminate(); } catch { /* ignore */ }
         continue;
       }
-      c.isAlive = false;
       try { c.ping(); } catch { /* ignore */ }
     }
-  }, HEARTBEAT_INTERVAL_MS);
+  }, PING_INTERVAL_MS);
   wss.on('close', () => clearInterval(heartbeat));
 
   wss.on('connection', async (ws, request) => {
-    (ws as WsWebSocket & { isAlive?: boolean }).isAlive = true;
-    ws.on('pong', () => { (ws as WsWebSocket & { isAlive?: boolean }).isAlive = true; });
+    (ws as WsWebSocket & { lastSeenAt?: number }).lastSeenAt = Date.now();
+    ws.on('pong', () => { (ws as WsWebSocket & { lastSeenAt?: number }).lastSeenAt = Date.now(); });
+    ws.on('message', () => { (ws as WsWebSocket & { lastSeenAt?: number }).lastSeenAt = Date.now(); });
     // Origin check
     const allowedOrigins = config.WS_ALLOWED_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean);
     const origin = request.headers.origin || '';
@@ -215,7 +219,7 @@ export function createSocketServer(server: http.Server) {
         // Application-level heartbeat: browsers cannot send native WS pings,
         // so the client emits {type:'ping'} every ~25s. Respond and bail.
         if (parsed.type === 'ping') {
-          (ws as WsWebSocket & { isAlive?: boolean }).isAlive = true;
+          (ws as WsWebSocket & { lastSeenAt?: number }).lastSeenAt = Date.now();
           try { ws.send(JSON.stringify({ type: 'pong', t: Date.now() })); } catch { /* ignore */ }
           return;
         }

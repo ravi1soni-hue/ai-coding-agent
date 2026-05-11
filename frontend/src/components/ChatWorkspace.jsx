@@ -18,8 +18,39 @@ function countLines(text) {
   return String(text).replace(/\n$/, '').split('\n').length;
 }
 
-function FileCodeDialog({ file, onClose }) {
+function FileCodeDialog({ file, projectId, onClose }) {
+  const [content, setContent] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!file) return undefined;
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    setContent('');
+    fetch(`/api/projects/${encodeURIComponent(projectId)}/files?path=${encodeURIComponent(file.path)}`)
+      .then(async (res) => {
+        if (cancelled) return;
+        if (!res.ok) {
+          setError('Could not load file content.');
+          return;
+        }
+        const json = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        setContent(typeof json.content === 'string' ? json.content : '');
+      })
+      .catch(() => {
+        if (!cancelled) setError('Could not load file content.');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [file, projectId]);
+
   if (!file) return null;
+  const lineCount = file.lines ?? countLines(content);
   return (
     <div className="historyOverlay fileDialogOverlay" role="dialog" aria-modal="true">
       <div className="historyPanel fileDialogPanel">
@@ -27,7 +58,7 @@ function FileCodeDialog({ file, onClose }) {
           <div>
             <h3>Generated file</h3>
             <div className="historyMeta fileDialogMeta">
-              {file.path} · {countLines(file.content)} lines
+              {file.path} · {lineCount} lines
             </div>
           </div>
           <button className="topActionBtn ghost" type="button" onClick={onClose}>
@@ -35,7 +66,9 @@ function FileCodeDialog({ file, onClose }) {
           </button>
         </div>
         <div className="fileDialogBody">
-          <pre className="fileDialogCode">{file.content || '(empty file)'}</pre>
+          <pre className="fileDialogCode">
+            {loading ? 'Loading…' : error || content || '(empty file)'}
+          </pre>
         </div>
       </div>
     </div>
@@ -64,6 +97,7 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
   const pingTimerRef = useRef(null);
   const shouldReconnectRef = useRef(true);
   const connectRef = useRef(() => {});
+  const lastReplayedAtRef = useRef('');
   const [reconnectInSec, setReconnectInSec] = useState(0);
   const displayName = (user.name || 'there').trim();
 
@@ -77,9 +111,41 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
     setInput('');
     setCurrentActivity('');
     setElapsedSeconds(0);
+    lastReplayedAtRef.current = '';
 
     replayProjectEvents().catch(() => undefined);
   }, [projectId]);
+
+  function mapEventToMessage(e) {
+    if (e.role === 'user') return { role: 'user', text: e.message || '' };
+    switch (e.event_type) {
+      case 'clarification_request': {
+        const qs = e.payload?.questions;
+        if (Array.isArray(qs) && qs.length > 0) return { role: 'assistant', text: qs.join('\n') };
+        return { role: 'assistant', text: e.message || 'Clarification requested.' };
+      }
+      case 'confirmation_request':
+        return { role: 'assistant', text: 'Confirmation requested.' };
+      case 'stage_start':
+        return { role: 'system', text: e.message || `Starting ${e.payload?.stage || ''}...` };
+      case 'stage_complete':
+        return { role: 'system', text: `✓ ${e.payload?.stage || 'stage'} complete` };
+      case 'file_generated': {
+        const p = e.payload?.path || e.payload?.filePath;
+        return p ? { role: 'system', text: `Wrote ${p}` } : null;
+      }
+      case 'info':
+        return { role: 'system', text: e.message || 'Info received.' };
+      case 'stage_error':
+        return { role: 'error', text: e.message || 'Stage error' };
+      case 'failed':
+        return { role: 'error', text: e.message || 'Pipeline failed.' };
+      case 'done':
+        return { role: 'system', text: 'Project complete.' };
+      default:
+        return null;
+    }
+  }
 
   async function replayProjectEvents() {
     if (!projectId) return;
@@ -87,23 +153,29 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
     const json = await readJson(res);
     if (!res.ok || !Array.isArray(json.events)) return;
 
-    const restored = json.events
-      .map((e) => {
-        if (e.role === 'user') return { role: 'user', text: e.message || '' };
-        if (e.event_type === 'clarification_request') {
-          const qs = e.payload?.questions;
-          if (Array.isArray(qs) && qs.length > 0) return { role: 'assistant', text: qs.join('\n') };
-          return { role: 'assistant', text: e.message || 'Clarification requested.' };
-        }
-        if (e.event_type === 'confirmation_request') return { role: 'assistant', text: 'Confirmation requested.' };
-        if (e.event_type === 'stage_error') return { role: 'error', text: e.message || 'Stage error' };
-        if (e.event_type === 'failed') return { role: 'error', text: e.message || 'Pipeline failed.' };
-        if (e.event_type === 'done') return { role: 'system', text: 'Project complete.' };
-        return null;
-      })
-      .filter((m) => m && m.text);
+    const since = lastReplayedAtRef.current;
+    const fresh = since
+      ? json.events.filter((e) => (e.created_at || '') > since)
+      : json.events;
 
-    setMessages(restored);
+    const restored = fresh.map(mapEventToMessage).filter((m) => m && m.text);
+    if (fresh.length > 0) {
+      lastReplayedAtRef.current = fresh[fresh.length - 1].created_at || lastReplayedAtRef.current;
+    }
+
+    for (const e of fresh) {
+      if (e.event_type !== 'file_generated') continue;
+      const path = e.payload?.path || e.payload?.filePath;
+      if (!path) continue;
+      upsertGeneratedFile({
+        path,
+        lines: typeof e.payload?.lines === 'number' ? e.payload.lines : undefined,
+        bytes: typeof e.payload?.bytes === 'number' ? e.payload.bytes : undefined,
+      });
+    }
+
+    if (restored.length === 0) return;
+    setMessages((prev) => (prev.length === 0 ? restored : [...prev, ...restored]));
   }
 
   useEffect(() => {
@@ -261,7 +333,8 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
             setCurrentActivity(`Writing ${payload.filePath}...`);
             upsertGeneratedFile({
               path: payload.filePath,
-              content: typeof payload.content === 'string' ? payload.content : '',
+              lines: typeof payload.lines === 'number' ? payload.lines : undefined,
+              bytes: typeof payload.bytes === 'number' ? payload.bytes : undefined,
             });
             pushMessage('system', `Wrote ${payload.filePath}`);
           }
@@ -458,7 +531,7 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
                 <div className="generatedFileRow" key={file.path}>
                   <div className="generatedFileMeta">
                     <div className="generatedFilePath">{file.path}</div>
-                    <div className="generatedFileLines">{countLines(file.content)} lines</div>
+                    <div className="generatedFileLines">{typeof file.lines === 'number' ? file.lines : 0} lines</div>
                   </div>
                   <button className="eyeBtn" type="button" onClick={() => setViewerFile(file)} aria-label={`View ${file.path}`}>
                     <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
@@ -509,7 +582,7 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
         </section>
       </div>
 
-      <FileCodeDialog file={viewerFile} onClose={() => setViewerFile(null)} />
+      <FileCodeDialog file={viewerFile} projectId={projectId} onClose={() => setViewerFile(null)} />
     </div>
   );
 }

@@ -1055,11 +1055,29 @@ export async function runAIOrchestration(
       user_id: command.sessionId,
       emitEvent: (e: { type: string; filePath?: string; message?: string; payload?: { path?: string; content?: string } }) => {
         if (e.type === 'FILE_WRITTEN' && e.filePath) {
+          const content = typeof e.payload?.content === 'string' ? e.payload.content : '';
+          const lines = content ? content.replace(/\n$/, '').split('\n').length : 0;
+          const bytes = content ? Buffer.byteLength(content) : 0;
+          // Persist full content out-of-band so it can be fetched on demand by
+          // the file viewer. Keep the WS payload tiny — shipping every file body
+          // through the socket saturated the outbound buffer and was killing
+          // heartbeats mid-codegen.
+          void persistence.appendEvent?.({
+            id: '',
+            projectId: command.projectId,
+            sessionId: command.sessionId,
+            stage: 'code_generation',
+            type: 'file_generated',
+            message: `Wrote ${e.filePath}`,
+            payload: { path: e.filePath, content, lines, bytes },
+            createdAt: new Date().toISOString(),
+          });
           adapter.emit?.({
             type: 'file_generated',
             stage: 'code_generation',
             filePath: e.filePath,
-            content: typeof e.payload?.content === 'string' ? e.payload.content : undefined,
+            lines,
+            bytes,
           });
         } else if (e.type === 'AGENT_THINKING' && e.message) {
           adapter.emit?.({ type: 'info', stage: 'code_generation', message: e.message });

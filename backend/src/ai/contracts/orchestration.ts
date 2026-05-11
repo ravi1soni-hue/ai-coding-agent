@@ -241,7 +241,7 @@ export type OrchestrationEmitEvent =
   | { type: 'info'; stage: OrchestrationState; message: string }
   | { type: 'clarification_request'; stage: OrchestrationState; questions: string[] }
   | { type: 'confirmation_request'; stage: OrchestrationState; summary: unknown }
-  | { type: 'file_generated'; stage: OrchestrationState; filePath: string; content?: string }
+  | { type: 'file_generated'; stage: OrchestrationState; filePath: string; lines?: number; bytes?: number }
   | { type: 'done'; projectId: string; frontendUrl: string | null; backendUrl: string | null }
   | { type: 'failed'; projectId: string; issues: OrchestrationIssue[] };
 

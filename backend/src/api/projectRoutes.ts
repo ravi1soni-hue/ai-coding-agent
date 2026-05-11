@@ -5,7 +5,7 @@ import {
   getOrCreateActiveProjectSession,
   touchProjectSession,
 } from '../auth/authService';
-import { getProjectEvents, getLatestProjectCodeRevision, listUserProjects, saveProjectDeployment } from '../db/projectStore';
+import { getProjectEvents, getProjectSnapshot, getLatestProjectCodeRevision, listUserProjects, saveProjectDeployment } from '../db/projectStore';
 import { runBuildWorker, cleanupWorkspace } from '../workers/buildWorker';
 import { deploymentAgent } from '../agents/deploymentAgent';
 import { getCacheJson, setCacheJson } from '../cache/redis';
@@ -64,6 +64,35 @@ export async function registerProjectRoutes(fastify: FastifyInstance) {
     if (!projects.some((p) => p.id === projectId)) return reply.status(404).send({ error: 'Project not found.' });
     const events = await getProjectEvents({ userId: user.id, projectId, limit: 1000 });
     return { events };
+  });
+
+  fastify.get('/api/projects/:projectId/files', async (req, reply) => {
+    const user = await requireUser(req, reply);
+    if (!user) return;
+    const params = req.params as { projectId: string };
+    const query = req.query as { path?: string };
+    const projectId = params.projectId;
+    const filePath = (query.path || '').trim();
+    if (!filePath) return reply.status(400).send({ error: 'path query param is required.' });
+    const projects = await listUserProjects(user.id);
+    if (!projects.some((p) => p.id === projectId)) return reply.status(404).send({ error: 'Project not found.' });
+
+    // Prefer the latest streamed file_generated event payload (covers in-progress builds).
+    const events = await getProjectEvents({ userId: user.id, projectId, limit: 1000 });
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const ev = events[i] as { event_type?: string; payload?: { path?: string; content?: string; lines?: number; bytes?: number } };
+      if (ev.event_type !== 'file_generated') continue;
+      if (ev.payload?.path !== filePath) continue;
+      const content = typeof ev.payload.content === 'string' ? ev.payload.content : '';
+      return { path: filePath, content, lines: ev.payload.lines, bytes: ev.payload.bytes };
+    }
+
+    // Fallback: finalized snapshot after code generation completes.
+    const snapshot = await getProjectSnapshot({ userId: user.id, projectId });
+    const files = (snapshot?.code_gen as { files?: Array<{ path: string; content: string }> } | undefined)?.files || [];
+    const match = files.find((f) => f.path === filePath);
+    if (!match) return reply.status(404).send({ error: 'File not found.' });
+    return { path: filePath, content: match.content || '' };
   });
 
   fastify.post('/api/projects/:projectId/redeploy', async (req, reply) => {
