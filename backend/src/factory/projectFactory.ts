@@ -40,12 +40,23 @@ function assertInsideWorkspace(workspaceRoot: string, targetPath: string): void 
   }
 }
 
+// The code-generation agent emits frontend files with bare paths
+// (src/App.jsx, package.json, index.html, vite.config.js) and backend
+// files prefixed with backend/. The build worker, however, expects both
+// scopes under workspaceRoot/{frontend,backend}/. Route bare paths into
+// frontend/ so the generated files actually overwrite the template.
+function scopeGeneratedPath(rawPath: string): string {
+  const normalized = rawPath.replace(/\\/g, '/').replace(/^\/+/, '');
+  if (normalized.startsWith('frontend/') || normalized.startsWith('backend/')) return normalized;
+  return `frontend/${normalized}`;
+}
+
 function resolveWorkspacePath(workspaceRoot: string, relativePath: string): string {
-  const normalized = relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
+  const normalized = scopeGeneratedPath(relativePath);
   if (
     normalized.includes('..') ||
-    normalized.startsWith('backend') && normalized === 'backend' ||
-    normalized.startsWith('frontend') && normalized === 'frontend' ||
+    normalized === 'backend' ||
+    normalized === 'frontend' ||
     normalized.startsWith('templates')
   ) {
     throw new Error(`Blocked generated path: ${relativePath}`);
