@@ -786,7 +786,7 @@ function estimateComponentBudget(
   );
 
   return normalizeBudget({
-    initial: Math.max(3000, Math.min(9000, initial)),
+    initial: Math.max(5000, Math.min(9000, initial)),
     ceiling: 16000,
   });
 }
@@ -820,13 +820,20 @@ async function generateJson(
     if (jsonAttempt > 1 && lastBadJson) {
       const trimmed = lastBadJson.trimEnd();
       const wasTruncated = !trimmed.endsWith('}') && !trimmed.endsWith('"}');
-      messages.push({ role: 'assistant', content: lastBadJson.slice(0, 1200) });
-      messages.push({
-        role: 'user',
-        content: wasTruncated
-          ? 'Your response was truncated before the JSON was closed. Return ONLY a complete, valid JSON object — shorten string values if necessary but ensure the JSON is fully closed with no markdown fences.'
-          : 'Your previous response was not valid JSON. Return ONLY a valid JSON object with no markdown fences, no prose, and all string values properly escaped.',
-      });
+      if (wasTruncated) {
+        // Replaying the truncated assistant turn primes the model to repeat the
+        // same oversize structure. Skip it — just ask for a shorter, complete result.
+        messages.push({
+          role: 'user',
+          content: 'Your previous response was truncated before the JSON was closed. Return ONLY a complete, valid JSON object — shorten string values and prose if necessary but ensure the JSON is fully closed with no markdown fences.',
+        });
+      } else {
+        messages.push({ role: 'assistant', content: lastBadJson.slice(0, 1200) });
+        messages.push({
+          role: 'user',
+          content: 'Your previous response was not valid JSON. Return ONLY a valid JSON object with no markdown fences, no prose, and all string values properly escaped.',
+        });
+      }
     }
     let rawContent = '';
     try {
@@ -844,7 +851,7 @@ async function generateJson(
       // attempt needs more room or it will fail the same way.
       const wasTruncated = /Truncated LLM JSON response/.test(message);
       const nextBudget = wasTruncated && currentBudget < ceiling
-        ? Math.min(ceiling, Math.max(currentBudget + 1500, Math.ceil(currentBudget * 1.6)))
+        ? Math.min(ceiling, Math.max(currentBudget + 4000, Math.ceil(currentBudget * 2.2)))
         : currentBudget;
       logWarn(`${label}:json-attempt-failed:${jsonAttempt}`, {
         error: message,
