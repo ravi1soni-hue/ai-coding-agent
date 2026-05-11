@@ -126,6 +126,21 @@ function parseJsonSafe(content: string): any {
             .replace(/\\r/g, '\r')
             .replace(/\\"/g, '"')
             .replace(/\\\\/g, '\\');
+
+          // Reject obviously-truncated payloads. When the LLM hits its
+          // output-token cap mid-string, the fallback extracts a slice
+          // ending in a bare `\` or with grossly unbalanced braces;
+          // returning that produces a file Vite can't parse. Force the
+          // caller into its stub/fallback path instead of poisoning the
+          // build with half a component.
+          const looksTruncated =
+            closingSeq === -1 /* never saw '"}' */ ||
+            /\\\s*$/.test(unescaped) /* trailing escape */ ||
+            (unescaped.match(/\{/g)?.length || 0) - (unescaped.match(/\}/g)?.length || 0) !== 0 ||
+            (unescaped.match(/\(/g)?.length || 0) - (unescaped.match(/\)/g)?.length || 0) !== 0;
+          if (looksTruncated) {
+            throw new Error(`Truncated LLM JSON response (content tail: ${unescaped.slice(-80).replace(/\s+/g, ' ')})`);
+          }
           return { path: pathMatch[1], content: unescaped };
         }
       }
@@ -916,7 +931,7 @@ CRITICAL RULES:
       componentSpec,
       dependencyCode: dependencyCode.length > 0 ? dependencyCode : undefined,
     },
-    2400
+    6000
   );
 
   return validateGeneratedFile(parsed, expectedPath, 'frontend', `frontendComponent:${expectedPath}`);
@@ -983,7 +998,7 @@ CRITICAL RULES:
       backendRequired,
       uiSpec: uiSpec ? { generationOrder: uiSpec.generationOrder, navigationStrategy: uiSpec.navigationStrategy, stateManagementStrategy: uiSpec.stateManagementStrategy } : undefined,
     },
-    3500
+    6000
   );
 
   const appFile = validateGeneratedFile(parsed, 'src/App.jsx', 'frontend', 'frontendApp');
