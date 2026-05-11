@@ -164,12 +164,13 @@ async function ensureViteIndexHtml(files: GeneratedFile[], workspaceDir: string)
   </body>
 </html>
 `;
-    await fs.writeFile(path.join(workspaceDir, 'index.html'), html, 'utf8');
+    await fs.mkdir(path.join(workspaceDir, 'frontend'), { recursive: true });
+    await fs.writeFile(path.join(workspaceDir, 'frontend', 'index.html'), html, 'utf8');
   }
 
   // Remove public/index.html if it exists (Vite doesn't need it and it can cause confusion)
   try {
-    await fs.rm(path.join(workspaceDir, 'public', 'index.html'), { force: true });
+    await fs.rm(path.join(workspaceDir, 'frontend', 'public', 'index.html'), { force: true });
   } catch {}
 }
 
@@ -183,8 +184,10 @@ async function writeViteEnvFile(workspaceDir: string): Promise<void> {
   const backendUrl = rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`;
   const envContent = `VITE_API_BASE_URL=${backendUrl}\n`;
   try {
-    await fs.writeFile(path.join(workspaceDir, '.env'), envContent, 'utf8');
-    await fs.writeFile(path.join(workspaceDir, '.env.production'), envContent, 'utf8');
+    const frontendDir = path.join(workspaceDir, 'frontend');
+    await fs.mkdir(frontendDir, { recursive: true });
+    await fs.writeFile(path.join(frontendDir, '.env'), envContent, 'utf8');
+    await fs.writeFile(path.join(frontendDir, '.env.production'), envContent, 'utf8');
     debug('testFixAgent:writeViteEnvFile', { backendUrl });
   } catch (err) {
     logWarn('testFixAgent:writeViteEnvFile', err);
@@ -252,7 +255,8 @@ export async function testFixAgent(input: {
     try {
       const updatedPkg = validateAndFixPackageJson(input.files, 'package.json');
       if (updatedPkg) {
-        await fs.writeFile(path.join(input.workspaceDir, 'package.json'), updatedPkg, 'utf8');
+        await fs.mkdir(path.join(input.workspaceDir, 'frontend'), { recursive: true });
+        await fs.writeFile(path.join(input.workspaceDir, 'frontend', 'package.json'), updatedPkg, 'utf8');
         const inMem = input.files.find(f => f.path === 'package.json');
         if (inMem) inMem.content = updatedPkg;
       }

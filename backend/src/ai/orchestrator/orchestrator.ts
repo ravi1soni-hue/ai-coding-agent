@@ -1053,6 +1053,13 @@ export async function runAIOrchestration(
       modification: command.modification,
       projectId: command.projectId,
       user_id: command.sessionId,
+      emitEvent: (e: { type: string; filePath?: string; message?: string }) => {
+        if (e.type === 'FILE_WRITTEN' && e.filePath) {
+          adapter.emit?.({ type: 'file_generated', stage: 'code_generation', filePath: e.filePath });
+        } else if (e.type === 'AGENT_THINKING' && e.message) {
+          adapter.emit?.({ type: 'info', stage: 'code_generation', message: e.message });
+        }
+      },
     });
     setCode(memory, { files: generated.files || [], patch: generated.patch || '' });
     assertConsistencyWithSelfHeal(memory, command, 'code_generation', repairCode);
