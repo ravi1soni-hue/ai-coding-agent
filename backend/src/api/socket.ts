@@ -3,7 +3,6 @@ import http from 'http';
 
 import { runAIOrchestration } from '../ai/orchestrator/orchestrator';
 import { createPersistenceAdapter } from './persistenceAdapter';
-import { createOrchestrationAdapter } from './orchestrationAdapter';
 import {
   createProjectSession,
   getOrCreateActiveProjectSession,
@@ -16,7 +15,7 @@ import { appendProjectEvent } from '../db/projectStore';
 import { config } from '../config/env';
 import { debug, error as logError } from '../utils/logger';
 import { toClientErrorMessage } from '../utils/errors';
-import { TTLSet } from '../utils/ttlSet';
+import { pipelineHub, createHubAdapter } from '../orchestration/pipelineHub';
 import type { OrchestrationCommand } from '../ai/contracts/orchestration';
 
 const AFFIRMATIVE = /^(yes|y|yeah|yep|confirm|confirmed|proceed|ok|okay|sure|go|continue)\b/i;
@@ -108,9 +107,27 @@ function removeConnection(userId: string, ws: WsWebSocket) {
 
 export function createSocketServer(server: http.Server) {
   const wss = new Server({ server });
-  const activePipelines = new TTLSet();
+  const HEARTBEAT_INTERVAL_MS = 25_000;
+
+  // Proxies (Railway/Cloudflare/etc.) close idle WS connections after ~60s.
+  // Long LLM stages can sit silent for longer, so ping every 25s and reap dead peers.
+  const heartbeat = setInterval(() => {
+    for (const client of wss.clients) {
+      const c = client as WsWebSocket & { isAlive?: boolean };
+      if (c.readyState !== c.OPEN) continue;
+      if (c.isAlive === false) {
+        try { c.terminate(); } catch { /* ignore */ }
+        continue;
+      }
+      c.isAlive = false;
+      try { c.ping(); } catch { /* ignore */ }
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+  wss.on('close', () => clearInterval(heartbeat));
 
   wss.on('connection', async (ws, request) => {
+    (ws as WsWebSocket & { isAlive?: boolean }).isAlive = true;
+    ws.on('pong', () => { (ws as WsWebSocket & { isAlive?: boolean }).isAlive = true; });
     // Origin check
     const allowedOrigins = config.WS_ALLOWED_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean);
     const origin = request.headers.origin || '';
@@ -152,9 +169,25 @@ export function createSocketServer(server: http.Server) {
     await touchProjectSession(authedUser.id, projectId);
 
     const persistence = createPersistenceAdapter({ projectId, userId: authedUser.id });
-    const adapter = createOrchestrationAdapter(ws);
+    // Orchestration publishes to the per-project hub channel; this socket
+    // subscribes so it receives live events even if it's a reconnecting client
+    // attaching to a pipeline that was started by an earlier (now-dead) socket.
+    const adapter = createHubAdapter(projectId);
+    const unsubscribe = pipelineHub.subscribe(projectId, (event) => {
+      try { ws.send(JSON.stringify(event)); } catch { /* socket may be closing */ }
+    });
 
     ws.send(JSON.stringify({ type: 'info', stage: 'requirements', message: 'Connected!' }));
+
+    // If a pipeline is already running for this project, let the client know
+    // they're attached to the live stream rather than starting fresh.
+    if (await pipelineHub.isActive(projectId)) {
+      ws.send(JSON.stringify({
+        type: 'info',
+        stage: 'resume',
+        message: 'Resuming live updates for your in-progress build…',
+      }));
+    }
 
     ws.on('message', async (raw: RawData) => {
       const { text: rawText, byteLength } = rawDataToTextAndSize(raw);
@@ -177,6 +210,14 @@ export function createSocketServer(server: http.Server) {
         // Validate structure
         if (typeof parsed !== 'object' || parsed === null) {
           throw new Error('Invalid message structure');
+        }
+
+        // Application-level heartbeat: browsers cannot send native WS pings,
+        // so the client emits {type:'ping'} every ~25s. Respond and bail.
+        if (parsed.type === 'ping') {
+          (ws as WsWebSocket & { isAlive?: boolean }).isAlive = true;
+          try { ws.send(JSON.stringify({ type: 'pong', t: Date.now() })); } catch { /* ignore */ }
+          return;
         }
 
         // Check for valid types (type is optional, but if present must be known)
@@ -220,8 +261,15 @@ export function createSocketServer(server: http.Server) {
       userRate.count++;
       userMessageCounts.set(authedUser.id, userRate);
 
-      if (activePipelines.has(projectId)) {
-        ws.send(JSON.stringify({ type: 'error', message: 'Pipeline already running. Please wait.' }));
+      // Don't start a duplicate pipeline if one is already running for this
+      // project — but unlike before, don't error out either: this WS is already
+      // subscribed to the hub, so it will see the live events.
+      if (await pipelineHub.isActive(projectId)) {
+        ws.send(JSON.stringify({
+          type: 'info',
+          stage: 'resume',
+          message: 'A build is already running for this project — streaming live updates here.',
+        }));
         return;
       }
 
@@ -275,7 +323,15 @@ export function createSocketServer(server: http.Server) {
         };
       }
 
-      activePipelines.add(projectId);
+      // Race-safe acquire: in-process + Redis (when enabled).
+      if (!(await pipelineHub.tryAcquire(projectId))) {
+        ws.send(JSON.stringify({
+          type: 'info',
+          stage: 'resume',
+          message: 'A build is already running for this project — streaming live updates here.',
+        }));
+        return;
+      }
       try {
         const result = await runAIOrchestration(command, adapter, persistence);
         debug('socket:orchestration_result', { projectId, status: result.status, currentState: result.memory.currentState });
@@ -284,21 +340,25 @@ export function createSocketServer(server: http.Server) {
         }
       } catch (err) {
         logError('socket:orchestration_failed', err);
-        ws.send(JSON.stringify({
+        // Publish through the hub so every attached client (not just this one)
+        // sees the failure.
+        pipelineHub.publish(projectId, {
           type: 'failed',
           projectId,
           issues: [{ message: toClientErrorMessage(err, 'Orchestration failed unexpectedly.') }],
-        }));
+        } as any);
       } finally {
-        activePipelines.delete(projectId);
+        await pipelineHub.release(projectId);
       }
     });
 
     ws.on('close', () => {
+      unsubscribe();
       removeConnection(authedUser.id, ws);
     });
 
     ws.on('error', () => {
+      unsubscribe();
       removeConnection(authedUser.id, ws);
     });
   });

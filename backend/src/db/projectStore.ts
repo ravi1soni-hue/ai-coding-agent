@@ -411,6 +411,38 @@ export async function getProjectSnapshot(input: { userId: string; projectId: str
   return rows[0] ?? null;
 }
 
+/**
+ * Find sessions that were mid-flight when the process last died — i.e. status
+ * is 'active' or 'recovering' AND the current_step is a non-interactive,
+ * non-terminal automated stage. Used by the startup resume scanner.
+ *
+ * Interactive states ('clarification', 'confirmation') are intentionally
+ * excluded: they're waiting on user input, not on the orchestrator.
+ */
+export async function findInFlightProjects(): Promise<Array<{
+  id: string;
+  user_id: string;
+  current_step: string | null;
+  requirements: any;
+}>> {
+  const rows = await pgQuery<{
+    id: string;
+    user_id: string;
+    current_step: string | null;
+    requirements: any;
+  }>(
+    `SELECT id, user_id, current_step, requirements
+     FROM project_sessions
+     WHERE status IN ('active', 'recovering')
+       AND current_step IS NOT NULL
+       AND current_step NOT IN ('clarification', 'confirmation', 'done', 'failed')
+       AND requirements IS NOT NULL
+     ORDER BY last_active_at DESC
+     LIMIT 100`,
+  );
+  return rows;
+}
+
 export async function saveProjectCheckpoint(input: {
   projectId: string;
   userId: string;

@@ -59,10 +59,15 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
 
   const wsRef = useRef(null);
   const msgEndRef = useRef(null);
+  const reconnectAttemptsRef = useRef(0);
+  const reconnectTimerRef = useRef(null);
+  const pingTimerRef = useRef(null);
+  const shouldReconnectRef = useRef(true);
+  const connectRef = useRef(() => {});
+  const [reconnectInSec, setReconnectInSec] = useState(0);
   const displayName = (user.name || 'there').trim();
 
   useEffect(() => {
-    let active = true;
     setMessages([]);
     setGeneratedFiles([]);
     setViewerFile(null);
@@ -73,34 +78,33 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
     setCurrentActivity('');
     setElapsedSeconds(0);
 
-    async function loadProjectEvents() {
-      if (!projectId) return;
-      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/events`);
-      const json = await readJson(res);
-      if (!active || !res.ok || !Array.isArray(json.events)) return;
-
-      const restored = json.events
-        .map((e) => {
-          if (e.role === 'user') return { role: 'user', text: e.message || '' };
-          if (e.event_type === 'clarification_request') {
-            const qs = e.payload?.questions;
-            if (Array.isArray(qs) && qs.length > 0) return { role: 'assistant', text: qs.join('\n') };
-            return { role: 'assistant', text: e.message || 'Clarification requested.' };
-          }
-          if (e.event_type === 'confirmation_request') return { role: 'assistant', text: 'Confirmation requested.' };
-          if (e.event_type === 'stage_error') return { role: 'error', text: e.message || 'Stage error' };
-          if (e.event_type === 'failed') return { role: 'error', text: e.message || 'Pipeline failed.' };
-          if (e.event_type === 'done') return { role: 'system', text: 'Project complete.' };
-          return null;
-        })
-        .filter((m) => m && m.text);
-
-      if (restored.length > 0) setMessages(restored);
-    }
-
-    loadProjectEvents().catch(() => undefined);
-    return () => { active = false; };
+    replayProjectEvents().catch(() => undefined);
   }, [projectId]);
+
+  async function replayProjectEvents() {
+    if (!projectId) return;
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/events`);
+    const json = await readJson(res);
+    if (!res.ok || !Array.isArray(json.events)) return;
+
+    const restored = json.events
+      .map((e) => {
+        if (e.role === 'user') return { role: 'user', text: e.message || '' };
+        if (e.event_type === 'clarification_request') {
+          const qs = e.payload?.questions;
+          if (Array.isArray(qs) && qs.length > 0) return { role: 'assistant', text: qs.join('\n') };
+          return { role: 'assistant', text: e.message || 'Clarification requested.' };
+        }
+        if (e.event_type === 'confirmation_request') return { role: 'assistant', text: 'Confirmation requested.' };
+        if (e.event_type === 'stage_error') return { role: 'error', text: e.message || 'Stage error' };
+        if (e.event_type === 'failed') return { role: 'error', text: e.message || 'Pipeline failed.' };
+        if (e.event_type === 'done') return { role: 'system', text: 'Project complete.' };
+        return null;
+      })
+      .filter((m) => m && m.text);
+
+    setMessages(restored);
+  }
 
   useEffect(() => {
     const options = { weekday: 'long', month: 'long', day: 'numeric' };
@@ -133,25 +137,85 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
   useEffect(() => {
     if (!projectId) return undefined;
 
-    const ws = new WebSocket(makeSocketUrl(projectId));
-    wsRef.current = ws;
+    const MAX_BACKOFF_MS = 15_000;
+    const PING_INTERVAL_MS = 25_000;
 
-    ws.onopen = () => {
-      setConnection('connected');
-      pushMessage('system', `Connected to live build assistant for project ${projectId}.`);
-    };
+    function clearTimers() {
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      if (pingTimerRef.current) {
+        clearInterval(pingTimerRef.current);
+        pingTimerRef.current = null;
+      }
+    }
 
-    ws.onclose = () => {
-      setConnection('disconnected');
-      pushMessage('error', 'Socket disconnected. Refresh to reconnect.');
-    };
+    function scheduleReconnect() {
+      if (!shouldReconnectRef.current) return;
+      const attempt = reconnectAttemptsRef.current + 1;
+      reconnectAttemptsRef.current = attempt;
+      const delay = Math.min(MAX_BACKOFF_MS, 1000 * 2 ** (attempt - 1));
+      setReconnectInSec(Math.ceil(delay / 1000));
+      setConnection('reconnecting');
+      pushMessage('system', `Reconnecting in ${Math.ceil(delay / 1000)}s (attempt ${attempt})…`);
 
-    ws.onerror = () => {
-      setConnection('disconnected');
-      pushMessage('error', 'WebSocket error occurred.');
-    };
+      const startedAt = Date.now();
+      const tick = setInterval(() => {
+        const remaining = Math.max(0, Math.ceil((delay - (Date.now() - startedAt)) / 1000));
+        setReconnectInSec(remaining);
+        if (remaining <= 0) clearInterval(tick);
+      }, 500);
+      reconnectTimerRef.current = setTimeout(() => {
+        clearInterval(tick);
+        connect();
+      }, delay);
+    }
 
-    ws.onmessage = (event) => {
+    function connect() {
+      clearTimers();
+      setConnection('connecting');
+      setReconnectInSec(0);
+
+      const ws = new WebSocket(makeSocketUrl(projectId));
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        const wasReconnect = reconnectAttemptsRef.current > 0;
+        reconnectAttemptsRef.current = 0;
+        setConnection('connected');
+        if (wasReconnect) {
+          pushMessage('system', 'Reconnected. Restoring session…');
+          // Replay any events the server persisted while we were disconnected.
+          replayProjectEvents().catch(() => undefined);
+        } else {
+          pushMessage('system', `Connected to live build assistant for project ${projectId}.`);
+        }
+        // Application-level heartbeat so proxies don't kill idle connections
+        // during long LLM stages.
+        pingTimerRef.current = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            try { ws.send(JSON.stringify({ type: 'ping' })); } catch { /* ignore */ }
+          }
+        }, PING_INTERVAL_MS);
+      };
+
+      ws.onclose = () => {
+        clearTimers();
+        if (shouldReconnectRef.current) {
+          pushMessage('error', 'Socket disconnected. Attempting to reconnect…');
+          scheduleReconnect();
+        } else {
+          setConnection('disconnected');
+        }
+      };
+
+      ws.onerror = () => {
+        // onclose will fire right after and handle reconnection
+        setConnection('disconnected');
+      };
+
+      ws.onmessage = (event) => {
       let payload = event.data;
       try {
         payload = JSON.parse(event.data);
@@ -162,6 +226,10 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
 
       switch (payload.type) {
         case 'info':
+          if (payload.stage === 'resume') {
+            setPipelineActive(true);
+            setCurrentActivity(payload.message || 'Resuming…');
+          }
           pushMessage('system', payload.message || 'Info received.');
           break;
         case 'progress': {
@@ -236,13 +304,33 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
         case 'error':
           pushMessage('details', payload.message || 'Unknown error.');
           break;
+        case 'pong':
+          // heartbeat ack; nothing to do
+          break;
         default:
           pushMessage('system', 'Received an unrecognized event from the server.');
           pushMessage('details', JSON.stringify(payload, null, 2));
       }
-    };
+      };
+    }
 
-    return () => { ws.close(); };
+    connectRef.current = connect;
+    shouldReconnectRef.current = true;
+    reconnectAttemptsRef.current = 0;
+    connect();
+
+    return () => {
+      shouldReconnectRef.current = false;
+      clearTimers();
+      const ws = wsRef.current;
+      if (ws) {
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.onmessage = null;
+        try { ws.close(); } catch { /* ignore */ }
+      }
+    };
   }, [projectId]);
 
   useEffect(() => {
@@ -330,6 +418,21 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
             <span className={`socketChip socket-${connection}`}>{connection}</span>
             <span className="socketText" title={statusText}>{statusText}</span>
             <span className="socketPct">{Math.round(progress * 100)}%{pipelineActive && elapsedSeconds > 0 ? ` • ${elapsedSeconds}s` : ''}</span>
+            {(connection === 'disconnected' || connection === 'reconnecting') ? (
+              <button
+                className="topActionBtn ghost"
+                type="button"
+                onClick={() => {
+                  reconnectAttemptsRef.current = 0;
+                  connectRef.current?.();
+                }}
+                title="Reconnect now"
+              >
+                {connection === 'reconnecting' && reconnectInSec > 0
+                  ? `Reconnect now (${reconnectInSec}s)`
+                  : 'Reconnect now'}
+              </button>
+            ) : null}
           </div>
           {stageStatus ? <div className="socketSubStatus" title={stageStatus}>{stageStatus}</div> : null}
           {currentActivity ? <div className="currentActivityRow">Currently: {currentActivity}</div> : null}

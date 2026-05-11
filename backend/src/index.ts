@@ -5,6 +5,7 @@ import path from 'path';
 import { config } from './config/env';
 import { registerRoutes } from './api/routes';
 import { createSocketServer } from './api/socket';
+import { resumeInFlightPipelines } from './orchestration/pipelineResume';
 import { connectRedis } from './cache/redis';
 import { connectPostgres } from './db/postgres';
 import { ensureCoreTables } from './db/schema';
@@ -47,6 +48,15 @@ async function start() {
   fastify.log.info(`Server (HTTP+WebSocket+Static) running on port ${port}`);
 
   createSocketServer(fastify.server);
+
+  // Adopt any pipelines that were mid-flight when the previous process died.
+  // Fire-and-forget — startup must not block on this, and individual resume
+  // failures are logged but do not affect server health.
+  if (config.POSTGRES_URL) {
+    void resumeInFlightPipelines().catch((err) => {
+      console.error('pipelineResume: top-level failure', err);
+    });
+  }
 }
 
 start().catch((err) => {
