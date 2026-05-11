@@ -153,6 +153,24 @@ function attemptBlueprintSelfHeal(
         next.strict.frontend.components = [...next.strict.frontend.components, componentName].sort();
       }
 
+      // Mirror in structuredSpec (inside strict.structure) so code generation sees it.
+      const structureComponents: any[] = (next.strict as any).structure?.frontend?.components || [];
+      if (!structureComponents.some((c: any) => c.name === componentName)) {
+        structureComponents.push({
+          name: componentName,
+          filePath,
+          purpose: `Auto-generated stub for ${pageName} page (self-heal repair)`,
+          props: [],
+          stateKeys: [],
+          children: [],
+          imports: [],
+          exportsDefault: true,
+        });
+        if ((next.strict as any).structure?.frontend) {
+          (next.strict as any).structure.frontend.components = structureComponents;
+        }
+      }
+
       // Wire App.jsx dependency
       const appFile = next.files.find((f) => f.path === 'src/App.jsx');
       if (appFile && !appFile.dependsOn?.includes(filePath)) {
@@ -197,6 +215,23 @@ function attemptBlueprintSelfHeal(
         if (!next.strict.frontend.components.includes(componentName)) {
           next.strict.frontend.components = [...next.strict.frontend.components, componentName].sort();
         }
+        // Mirror in structuredSpec so code generation sees it.
+        const structureComponents: any[] = (next.strict as any).structure?.frontend?.components || [];
+        if (!structureComponents.some((c: any) => c.name === componentName)) {
+          structureComponents.push({
+            name: componentName,
+            filePath,
+            purpose: `Auto-wired stub for ${componentName} (self-heal repair)`,
+            props: [],
+            stateKeys: [],
+            children: [],
+            imports: [],
+            exportsDefault: true,
+          });
+          if ((next.strict as any).structure?.frontend) {
+            (next.strict as any).structure.frontend.components = structureComponents;
+          }
+        }
         repairs.push(`added missing component file ${filePath}`);
       }
       continue;
@@ -220,7 +255,7 @@ function semanticBlueprintScore(input: { structuredSpec: StructuredSpec; require
   return Math.max(0, Math.min(1, score));
 }
 
-export function generateBlueprint(structuredSpec: StructuredSpec, systemDesign: any, requirements: any): ProjectBlueprint {
+export function generateBlueprint(structuredSpec: StructuredSpec, systemDesign: any, requirements: any, uiSpec?: any): ProjectBlueprint {
   const rootComponent = structuredSpec.componentSchema.find((component) => component.name === 'App');
   const generatedComponents = structuredSpec.componentSchema.filter((component) => component.name !== 'App');
   const componentFiles = generatedComponents.map((component) =>
@@ -287,14 +322,19 @@ export function generateBlueprint(structuredSpec: StructuredSpec, systemDesign: 
   const frontendComponents = uniqueSorted([rootComponent?.name || 'App', ...generatedComponents.map((component) => component.name)]);
   const backendModules = structuredSpec.backend_required ? structuredSpec.apiContracts.map((route) => path.basename(route.routeFile, '.ts')) : [];
 
+  const uiNavStrategy = String(uiSpec?.navigationStrategy || uiSpec?.layoutStructure?.navigationStrategy || '').toLowerCase();
+  const derivedRouting = uiNavStrategy.includes('router') || uiNavStrategy.includes('route') || frontendPages.length > 1;
+  const uiStateStrategy = String(uiSpec?.stateManagementStrategy || uiSpec?.layoutStructure?.stateManagement || '').toLowerCase();
+  const derivedStateManagement: 'local' | 'context' = uiStateStrategy.includes('context') ? 'context' : 'local';
+
   const strict: ProjectBlueprintStrict = {
     projectType: deriveProjectType(requirements, structuredSpec.backend_required),
     modules: uniqueSorted([...(frontendPages.length > 0 ? frontendPages : ['App']), ...backendModules]),
     frontend: {
       pages: frontendPages.length > 0 ? frontendPages : ['App'],
       components: frontendComponents,
-      routing: true,
-      stateManagement: 'context',
+      routing: derivedRouting,
+      stateManagement: derivedStateManagement,
     },
     backend: {
       required: structuredSpec.backend_required,
@@ -336,11 +376,13 @@ export function generateBlueprint(structuredSpec: StructuredSpec, systemDesign: 
       type: 'react-router',
       routes: [
         { path: '/', component: 'App', purpose: 'Application root' },
-        ...structuredSpec.layoutTree.children.map((child) => ({
-          path: `/${child.component.toLowerCase()}`,
-          component: child.component,
-          purpose: child.name,
-        })),
+        ...structuredSpec.layoutTree.children
+          .filter((child) => child.type === 'page' || child.type === 'route')
+          .map((child) => ({
+            path: `/${child.component.toLowerCase().replace(/page$/, '')}`,
+            component: child.component,
+            purpose: child.name,
+          })),
       ],
     },
     invariants: [
@@ -381,7 +423,8 @@ export async function blueprintAgent(input: BlueprintInput): Promise<StateAwareA
         ? validateStructuredSpec(input.structuredSpec)
         : compileStructuredSpec({ uiSpec: input.uiSpec, systemDesign: input.systemDesign, requirements: input.requirements }),
       input.systemDesign,
-      input.requirements
+      input.requirements,
+      input.uiSpec
     );
     return {
       updatedState: {
@@ -404,7 +447,7 @@ export async function blueprintAgent(input: BlueprintInput): Promise<StateAwareA
         requirements: input.requirements,
       });
 
-  let blueprint = generateBlueprint(structuredSpec, input.systemDesign, input.requirements);
+  let blueprint = generateBlueprint(structuredSpec, input.systemDesign, input.requirements, input.uiSpec);
 
   // Self-heal loop: validate the blueprint against the same cross-stage rules the
   // orchestrator will run, and apply deterministic repairs for fixable defects.

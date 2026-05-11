@@ -419,7 +419,7 @@ export function compileStructuredSpec(input: {
 
     return {
       name,
-      filePath: pathValue === 'src/App.jsx' ? 'src/App.jsx' : pathValue,
+      filePath: pathValue === 'src/App.jsx' ? 'src/App.jsx' : (COMPONENT_PATH_RE.test(pathValue) ? pathValue : `src/components/${name}.jsx`),
       purpose,
       props: props.length > 0 ? props : inferPropsForComponent(name, systemDesign, requirements),
       stateKeys,

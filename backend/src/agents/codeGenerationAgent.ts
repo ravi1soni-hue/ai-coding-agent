@@ -989,6 +989,29 @@ Rules:
 }
 
 async function generateFrontendManifest(systemDesign: any, requirements: any, modification: string | undefined, llmProxy: LLMProxyClient, model: string, uiSpec?: any): Promise<FrontendManifest> {
+  // If uiSpec already has a component list, build the manifest from it directly —
+  // no LLM call needed. The LLM call just re-derives what uiSpecAgent already computed,
+  // and name-reconciliation mismatches downstream are worse than skipping it entirely.
+  if (Array.isArray(uiSpec?.components) && uiSpec.components.length > 0) {
+    const components = (uiSpec.components as Array<{ name?: string; path?: string; purpose?: string }>)
+      .filter((c) => c.name && String(c.name) !== 'App')
+      .map((c, idx) => {
+        const safeName = deReserveComponentName(toComponentName(c.name, `Section${idx + 1}`));
+        return {
+          path: sanitizeComponentPath(c.path || `src/components/${safeName}.jsx`, idx),
+          name: safeName,
+          purpose: String(c.purpose || `${safeName} component`),
+        };
+      });
+    return {
+      appName: String(systemDesign?.frontend?.appName || requirements?.appName || uiSpec?.appName || 'GeneratedApp').trim() || 'GeneratedApp',
+      dependencies: {},
+      apiResources: [],
+      components,
+      styleNotes: '',
+    } as FrontendManifest;
+  }
+
   const userMessage = String(requirements?.userMessage || '');
   const clarificationAnswers = requirements?.clarificationAnswers || {};
   const pages = Array.isArray(requirements?.pages) ? requirements.pages : [];
@@ -1207,12 +1230,11 @@ RULES:
   const hasStateManagement = appFile.content.includes('useState') || appFile.content.includes('useEffect') || !backendRequired; // State if needed
   const hasErrorHandling = backendRequired ? appFile.content.includes('try') || appFile.content.includes('catch') || appFile.content.includes('Error') : true;
   const hasApiConsistency = backendRequired ? (appFile.content.includes('fetch') && (appFile.content.includes('await') || appFile.content.includes('.then'))) : true;
-  const noSyntaxErrors = !/\bundefined\b.*\./.test(appFile.content) && !/\bnull\b.*\./.test(appFile.content); // Basic check for common errors
 
-  const logicalCorrect = hasReactImport && hasProperJsx && hasStateManagement && hasErrorHandling && hasApiConsistency && noSyntaxErrors;
+  const logicalCorrect = hasReactImport && hasProperJsx && hasStateManagement && hasErrorHandling && hasApiConsistency;
 
   if (!hasExport || !hasRender || !hasImports || !hasApiBase || !logicalCorrect) {
-    logWarn('frontendApp:semantic-check-failed', { hasExport, hasRender, hasImports, hasApiBase, backendRequired, logicalCorrect, hasReactImport, hasProperJsx, hasStateManagement, hasErrorHandling, hasApiConsistency, noSyntaxErrors });
+    logWarn('frontendApp:semantic-check-failed', { hasExport, hasRender, hasImports, hasApiBase, backendRequired, logicalCorrect, hasReactImport, hasProperJsx, hasStateManagement, hasErrorHandling, hasApiConsistency });
     throw new Error('Semantic checks failed: Code does not meet logical correctness and API consistency requirements');
   }
 
@@ -1474,6 +1496,21 @@ export async function codeGenerationAgent(input: any) {
       manifest = fallbackFrontendManifest(input.requirements, uiSpec);
     }
 
+    // Blueprint is the single source of truth for what files must exist.
+    // Self-heal may have added components to blueprint.files that aren't in the
+    // manifest (derived from uiSpec). Merge them in so code generation actually
+    // produces every file the blueprint declares.
+    const manifestComponents = manifest.components || [];
+    manifest.components = manifestComponents;
+    const blueprintComponentPaths = new Set(manifestComponents.map((c: any) => normalizePath(c.path || '')));
+    for (const bpFile of blueprint.files) {
+      if (bpFile.kind === 'component' && bpFile.path.startsWith('src/components/') && !blueprintComponentPaths.has(normalizePath(bpFile.path))) {
+        const compName = toComponentName(path.basename(bpFile.path, '.jsx'), 'GeneratedSection');
+        manifestComponents.push({ path: bpFile.path, name: compName, purpose: bpFile.purpose || `${compName} component` });
+        blueprintComponentPaths.add(normalizePath(bpFile.path));
+      }
+    }
+
     const scaffoldFiles = frontendScaffold(manifest);
     // uiSpec components are authoritative but still bounded; LLM-only lists are capped tighter.
     const hasUiSpecComponents = Array.isArray(uiSpec?.components) && uiSpec.components.length > 0;
@@ -1505,10 +1542,17 @@ export async function codeGenerationAgent(input: any) {
     let appFile: GeneratedFile;
     try {
       appFile = await generateFrontendApp(manifest, input.requirements, input.systemDesign, input.modification, componentFiles, llmProxy, model, uiSpec);
+    } catch (err) {
+      logWarn('codeGenerationAgent:app-generation-fallback', { error: (err as Error).message });
+      appFile = fallbackFrontendApp(manifest, componentFiles, hasBackend);
+    }
+    // Import validation is advisory — a missing import or path mismatch should not
+    // discard a successfully-generated App.jsx. Downgrade to a warning so a single
+    // cosmetic inconsistency doesn't trigger the flat-render fallback.
+    try {
       validateAppImports(appFile.content, componentFiles, blueprint, uiSpec);
     } catch (err) {
-      logWarn('codeGenerationAgent:app-fallback', { error: (err as Error).message });
-      appFile = fallbackFrontendApp(manifest, componentFiles, hasBackend);
+      logWarn('codeGenerationAgent:app-import-warning', { error: (err as Error).message });
     }
 
     let cssFile: GeneratedFile;

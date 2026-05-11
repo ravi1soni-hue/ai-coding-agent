@@ -491,7 +491,7 @@ RULES:
 - App.jsx owns ALL routing (BrowserRouter, Routes, Route) and top-level state — components just receive props
 - stateManagement: use "props drilling" for simple apps; "useState in App" for page switching; "React Context" only if genuinely needed
 - navigationStrategy: describe concretely how App.jsx renders the right page/section (conditional render, react-router Routes, etc)
-- appRoot: describe the actual JSX structure of App (e.g. "<NavBar/> + conditional page render based on activePage state")`;
+- appRoot: describe the actual JSX structure of App (e.g. "<NavBar/> + conditional page render based on activePage state")${feedbackBlock}`;
 
     const layoutRaw = await callLLMWithRetry(
       llmProxy,
