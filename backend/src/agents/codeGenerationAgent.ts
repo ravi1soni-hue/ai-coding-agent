@@ -747,14 +747,68 @@ function fallbackBackendManifest(): BackendManifest {
   };
 }
 
+type TokenBudget = { initial: number; ceiling: number };
+
+// Hard cap so a runaway estimator can never blow past provider limits.
+const ABSOLUTE_TOKEN_CEILING = 20000;
+
+function normalizeBudget(budget: number | TokenBudget): TokenBudget {
+  if (typeof budget === 'number') return { initial: budget, ceiling: budget };
+  const initial = Math.max(512, Math.min(ABSOLUTE_TOKEN_CEILING, Math.round(budget.initial)));
+  const ceiling = Math.max(initial, Math.min(ABSOLUTE_TOKEN_CEILING, Math.round(budget.ceiling)));
+  return { initial, ceiling };
+}
+
+// componentSpec shape comes from the UI spec agent — we read only the fields
+// that meaningfully drive output size and ignore the rest.
+function estimateComponentBudget(
+  componentSpec: any,
+  dependencyCount: number,
+  purpose: string
+): TokenBudget {
+  const props = Array.isArray(componentSpec?.props) ? componentSpec.props.length : 0;
+  const renderLogic = String(componentSpec?.renderLogic || '');
+  const interactive = Array.isArray(componentSpec?.interactiveElements) ? componentSpec.interactiveElements.length : 0;
+  const sections = Array.isArray(componentSpec?.sections) ? componentSpec.sections.length : 0;
+  const stateFields = Array.isArray(componentSpec?.state) ? componentSpec.state.length : 0;
+  // Mentions like "FAQ items", "pricing tiers", "table rows" hint at repeated blocks.
+  const repetitionHints = (renderLogic.match(/\b(items?|rows?|tiers?|cards?|sections?|entries?|fields?)\b/gi) || []).length;
+
+  const initial = Math.round(
+    2000
+    + props * 80
+    + interactive * 220
+    + sections * 260
+    + stateFields * 180
+    + repetitionHints * 200
+    + dependencyCount * 140
+    + (renderLogic.length + purpose.length) * 1.4
+  );
+
+  return normalizeBudget({
+    initial: Math.max(3000, Math.min(9000, initial)),
+    ceiling: 16000,
+  });
+}
+
+function estimateAppBudget(importsCount: number, backendRequired: boolean): TokenBudget {
+  const initial = 2800 + importsCount * 220 + (backendRequired ? 700 : 0);
+  return normalizeBudget({
+    initial: Math.max(3500, Math.min(11000, initial)),
+    ceiling: 18000,
+  });
+}
+
 async function generateJson(
   llmProxy: LLMProxyClient,
   model: string,
   label: string,
   systemPrompt: string,
   userPayload: unknown,
-  maxTokens: number
+  maxTokens: number | TokenBudget
 ): Promise<any> {
+  const { initial, ceiling } = normalizeBudget(maxTokens);
+  let currentBudget = initial;
   // lastBadJson holds the LLM's response only when the call succeeded but parse failed.
   // We don't feed it back when the failure was a network/call error (no useful content to correct).
   let lastBadJson = '';
@@ -776,7 +830,7 @@ async function generateJson(
     }
     let rawContent = '';
     try {
-      const completion = await llmProxy.chatCompletion(messages, model, 0.0, 0.9, maxTokens, 60_000);
+      const completion = await llmProxy.chatCompletion(messages, model, 0.0, 0.9, currentBudget, 60_000);
       rawContent = completion.choices?.[0]?.message?.content || '';
       if (!rawContent.trim()) throw new Error(`${label}: LLM returned empty response`);
       lastBadJson = rawContent; // store before parse so we can feed it back on parse failure
@@ -786,7 +840,20 @@ async function generateJson(
       // For call failures rawContent is empty — don't overwrite a prior useful response.
       if (rawContent) lastBadJson = rawContent;
       const message = err instanceof Error ? err.message : String(err);
-      logWarn(`${label}:json-attempt-failed:${jsonAttempt}`, { error: message, rawSnippet: lastBadJson.slice(0, 240) });
+      // Adaptive growth: if the model hit the token cap mid-JSON, the next
+      // attempt needs more room or it will fail the same way.
+      const wasTruncated = /Truncated LLM JSON response/.test(message);
+      const nextBudget = wasTruncated && currentBudget < ceiling
+        ? Math.min(ceiling, Math.max(currentBudget + 1500, Math.ceil(currentBudget * 1.6)))
+        : currentBudget;
+      logWarn(`${label}:json-attempt-failed:${jsonAttempt}`, {
+        error: message,
+        budget: currentBudget,
+        nextBudget,
+        truncated: wasTruncated,
+        rawSnippet: lastBadJson.slice(0, 240),
+      });
+      currentBudget = nextBudget;
       if (jsonAttempt === 3) throw err;
     }
   }
@@ -931,7 +998,7 @@ CRITICAL RULES:
       componentSpec,
       dependencyCode: dependencyCode.length > 0 ? dependencyCode : undefined,
     },
-    6000
+    estimateComponentBudget(componentSpec, dependencyCode.length, String(component.purpose || ''))
   );
 
   return validateGeneratedFile(parsed, expectedPath, 'frontend', `frontendComponent:${expectedPath}`);
@@ -998,7 +1065,7 @@ CRITICAL RULES:
       backendRequired,
       uiSpec: uiSpec ? { generationOrder: uiSpec.generationOrder, navigationStrategy: uiSpec.navigationStrategy, stateManagementStrategy: uiSpec.stateManagementStrategy } : undefined,
     },
-    6000
+    estimateAppBudget(imports.length, backendRequired)
   );
 
   const appFile = validateGeneratedFile(parsed, 'src/App.jsx', 'frontend', 'frontendApp');
