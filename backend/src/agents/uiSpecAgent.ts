@@ -234,16 +234,13 @@ export async function uiSpecAgent(input: any): Promise<StateAwareAgentResult<Str
       : '';
 
     // Step 1: Generate component interfaces
-    const componentInterfacePrompt = `You are a React component architect. Based on the system design, canonical project spec, and requirements, define detailed component interfaces.
+    const componentInterfacePrompt = `You are a React component architect. Your job is to decompose the UI into small, focused, single-responsibility component files.
 
-Canonical project spec (authoritative, if present):
+Canonical project spec (authoritative):
 ${JSON.stringify(projectSpec, null, 2)}
 
 System Design:
 ${JSON.stringify(systemDesign, null, 2)}
-
-Canonical Project Spec:
-${JSON.stringify(projectSpec, null, 2)}
 
 Requirements:
 ${JSON.stringify(requirements, null, 2)}
@@ -253,7 +250,7 @@ Generate a JSON array with this exact shape (no markdown fences):
   {
     "name": "ComponentName",
     "path": "src/components/ComponentName.jsx",
-    "purpose": "What this component does",
+    "purpose": "One sentence: what exactly this component renders",
     "props": {
       "propName": {
         "type": "string|number|boolean|object|array",
@@ -261,19 +258,24 @@ Generate a JSON array with this exact shape (no markdown fences):
         "description": "What this prop is for"
       }
     },
-    "state": ["stateVarName1", "stateVarName2"],
-    "effects": ["Description of side effects"],
+    "state": ["stateVarName1"],
+    "effects": ["Description of side effect if any"],
     "dependencies": ["OtherComponentName"],
-    "renderLogic": "Brief description of what this component renders"
+    "renderLogic": "Concrete description of JSX output — what the user sees"
   }
 ]
 
-RULES:
-- Create as many components as needed to fully implement the requirements (typically 3-8)
-- Each component must have clear, specific props
-- Dependencies should be other component names (for leaf-first generation)
-- renderLogic should describe actual UI output, not generic placeholders
-- Components should be specific to the user's request, not generic examples${feedbackBlock}`;
+DECOMPOSITION RULES — these are absolute, non-negotiable:
+1. ONE file = ONE UI responsibility. A component renders ONE thing (a navbar, a hero, a pricing table, a footer).
+2. App.jsx is the ONLY file allowed to contain BrowserRouter, Routes, Route, or any routing logic. NO component file may import or use react-router routing primitives.
+3. Every distinct page (Home, Pricing, Dashboard, About, etc.) = its own component file: HomePage.jsx, PricingPage.jsx, etc.
+4. Every major section (hero, features list, testimonials, FAQ, footer, nav bar) = its own component file: HeroSection.jsx, FeaturesSection.jsx, NavBar.jsx, Footer.jsx.
+5. A component file must be ~80-150 lines of JSX. If you think it needs more, split it further.
+6. NEVER combine multiple pages or sections into one component. NEVER name a component "AppSection" or similar catch-all.
+7. Lists (pricing tiers, feature cards, team members) — the LIST CONTAINER is one component; individual cards are simple inline JSX inside it, not separate components unless they are genuinely reusable.
+8. Navigation state (active page, current route) lives in App.jsx only. Child components receive the current page via props if needed.
+9. Create between 4 and 10 components. More is better than fewer when it means each is focused.
+10. Name components after what they render: NavBar, HeroSection, PricingSection, FeatureCard, Footer — never AppSection, MainComponent, etc.${feedbackBlock}`;
 
     const componentInterfaceRaw = await callLLMWithRetry(
       llmProxy,
@@ -485,10 +487,11 @@ Generate a JSON object with this exact shape (no markdown fences):
 }
 
 RULES:
-- compositionOrder must list components in logical rendering order
-- stateManagement should describe how props flow and state is shared
-- navigationStrategy describes page/section switching if applicable
-- appRoot should describe the main structure clearly`;
+- compositionOrder must list all components in the order they are rendered in App.jsx
+- App.jsx owns ALL routing (BrowserRouter, Routes, Route) and top-level state — components just receive props
+- stateManagement: use "props drilling" for simple apps; "useState in App" for page switching; "React Context" only if genuinely needed
+- navigationStrategy: describe concretely how App.jsx renders the right page/section (conditional render, react-router Routes, etc)
+- appRoot: describe the actual JSX structure of App (e.g. "<NavBar/> + conditional page render based on activePage state")`;
 
     const layoutRaw = await callLLMWithRetry(
       llmProxy,

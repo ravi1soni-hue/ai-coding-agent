@@ -49,7 +49,7 @@ const FRONTEND_REQUIRED = new Set(['package.json', 'index.html', 'vite.config.js
 const FRONTEND_ALLOWED_PREFIXES = ['src/components/', 'src/pages/'];
 const BACKEND_REQUIRED = new Set(['backend/package.json', 'backend/src/index.ts', 'backend/src/db/database.ts', 'backend/db/init.sql']);
 const BACKEND_ALLOWED_PREFIXES = ['backend/src/routes/', 'backend/src/middleware/'];
-const MAX_COMPONENTS = 6;
+const MAX_COMPONENTS = 12;
 const MAX_BACKEND_ROUTES = 8;
 const MAX_BUILD_ATTEMPTS = 2;
 const MAX_LLM_CALLS_PER_PROJECT = 20;
@@ -822,7 +822,7 @@ function fallbackBackendManifest(): BackendManifest {
 type TokenBudget = { initial: number; ceiling: number };
 
 // Hard cap so a runaway estimator can never blow past provider limits.
-const ABSOLUTE_TOKEN_CEILING = 20000;
+const ABSOLUTE_TOKEN_CEILING = 32000;
 
 function normalizeBudget(budget: number | TokenBudget): TokenBudget {
   if (typeof budget === 'number') return { initial: budget, ceiling: budget };
@@ -858,16 +858,16 @@ function estimateComponentBudget(
   );
 
   return normalizeBudget({
-    initial: Math.max(5000, Math.min(9000, initial)),
-    ceiling: 16000,
+    initial: Math.max(3000, Math.min(6000, initial)),
+    ceiling: 24000,
   });
 }
 
 function estimateAppBudget(importsCount: number, backendRequired: boolean): TokenBudget {
-  const initial = 2800 + importsCount * 220 + (backendRequired ? 700 : 0);
+  const initial = 1800 + importsCount * 120 + (backendRequired ? 500 : 0);
   return normalizeBudget({
-    initial: Math.max(3500, Math.min(14000, initial)),
-    ceiling: 18000,
+    initial: Math.max(2000, Math.min(6000, initial)),
+    ceiling: 20000,
   });
 }
 
@@ -1086,9 +1086,9 @@ async function generateFrontendComponent(
     ?.map((dep: string) => ({ dep, code: generatedDependencies?.get(dep)?.slice(0, 500) }))
     .filter((d: any) => d.code) || [];
 
-  const systemPrompt = `Generate one production-quality React component for: "${userMessage || manifest.appName}".
-Component purpose: ${component.purpose || componentName}
-Component name: ${componentName}
+  const systemPrompt = `Generate one focused React component file for: "${userMessage || manifest.appName}".
+Component: ${componentName}
+Purpose: ${component.purpose || componentName}
 
 ${componentSpec ? `Props interface:
 ${JSON.stringify(componentSpec.props, null, 2)}
@@ -1096,20 +1096,19 @@ ${JSON.stringify(componentSpec.props, null, 2)}
 Render logic: ${componentSpec.renderLogic}
 ` : ''}
 
-${dependencyCode.length > 0 ? `Already-generated dependencies (reference these imports):
+${dependencyCode.length > 0 ? `Already-generated child components (import and use these):
 ${dependencyCode.map((d: any) => `${d.dep}: ${d.code}`).join('\n---\n')}
 ` : ''}
 
-CRITICAL RULES:
-- Component MUST be 100% functional and meaningful, NOT a stub or placeholder
-- MUST include proper JSX structure with actual content/functionality matching the purpose
-- MUST have all necessary imports
-- MUST export as: export default function ${componentName}() { ... }
-- If component needs state: use useState with meaningful initial values
-- If component needs effects: use useEffect with proper dependencies
-- If component is a leaf (no children): implement full feature
-- If component is a parent: properly compose child components using correct imports
-- No comments like "TODO" or "placeholder"`;
+RULES — ALL are mandatory:
+- Export: export default function ${componentName}(props) { ... }
+- ONE responsibility: this component renders ONLY "${component.purpose || componentName}". Nothing else.
+- SIZE LIMIT: target 80-150 lines. Hard max 200 lines. If you need more, you are doing it wrong — reduce scope.
+- ROUTING PROHIBITION: NEVER import or use BrowserRouter, Router, Routes, Route, Switch, useNavigate, useLocation, Link from react-router in this file. Routing lives ONLY in App.jsx. This component receives its data via props.
+- No TODO comments, no placeholder text, no stub implementations.
+- Real JSX with actual content matching the purpose — not lorem ipsum, not generic examples.
+- All imports at the top. Only import what you use.
+- useState/useEffect only if genuinely needed for THIS component's local behaviour.`;
 
   const parsed = await generateFile(
     llmProxy,
@@ -1150,30 +1149,31 @@ async function generateFrontendApp(
   const userMessage = String(requirements?.userMessage || '').slice(0, 500);
   const layoutInfo = uiSpec?.layoutStructure || {};
 
-  const systemPrompt = `Generate src/App.jsx for a React + Vite app: "${userMessage || manifest.appName}".
+  const systemPrompt = `Generate src/App.jsx — the composition root for a React + Vite app: "${userMessage || manifest.appName}".
+
+App.jsx is the ONLY file that owns routing and navigation. All child components are already generated and imported below.
 
 App root structure: ${layoutInfo.appRoot || 'Main app wrapper'}
 State management: ${layoutInfo.stateManagement || 'Props drilling'}
-Navigation: ${layoutInfo.navigationStrategy || 'Single page'}
+Navigation strategy: ${layoutInfo.navigationStrategy || 'Single page'}
 
-Component imports available:
+Component imports — import and render ALL of these:
 ${imports.map((i) => i.importLine).join('\n')}
 
-${backendRequired ? `Backend is required. Initialize API_BASE constant:
-const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:3000';
-
-Include proper error handling for fetch calls and fallback UI states.
+${backendRequired ? `Backend required — initialize at the top of the file:
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 ` : ''}
 
-CRITICAL RULES:
-- App MUST be 100% functional, not a stub
-- MUST properly compose all imported components
-- MUST have real layout structure matching the purpose
-- MUST handle state (useState, useEffect) for actual data flow
-- ${backendRequired ? 'MUST initialize API_BASE and use it for all backend calls\nMUST handle loading/error states\nMUST have proper error boundaries' : 'MUST NOT try to use any backend API'}
-- MUST export as: export default function App() { ... }
-- Component composition must match the generation order: ${(uiSpec?.generationOrder || []).join(' -> ') || 'all components'}
-- No stub code, no TODOs, no placeholders`;
+RULES:
+- Export: export default function App() { ... }
+- This file handles routing (BrowserRouter + Routes + Route) and/or page-switching state. Child components do NOT.
+- Import and render every component listed above — do not skip any.
+- If multi-page: use BrowserRouter + Routes. If single-page with sections: render all sections top-to-bottom.
+- Keep App.jsx lean: routing + layout shell + top-level state only. No business logic inside App.jsx itself.
+- SIZE: target 60-120 lines. Hard max 180 lines. Pass data to children via props, not inline logic.
+- ${backendRequired ? 'Use API_BASE for all fetch calls. Handle loading and error states.' : 'No backend calls.'}
+- No TODOs, no stubs, no placeholder comments.
+- Generation order: ${(uiSpec?.generationOrder || []).join(' -> ') || 'all components'}`;
 
   const parsed = await generateFile(
     llmProxy,
@@ -1245,16 +1245,17 @@ async function generateFrontendCss(manifest: FrontendManifest, requirements: any
 
   const systemPrompt = `Generate src/index.css for this React app: "${userMessage || manifest.appName}".
 
-The app's JSX uses the following class names — your CSS MUST define rules for all of them (plus base element resets):
-${classNames.map((c) => `.${c}`).join(', ') || '(no className attributes found — emit a sensible base stylesheet)'}
+Class names used in the JSX — write rules for all of them:
+${classNames.map((c) => `.${c}`).join(', ') || '(no className attributes — emit a sensible base stylesheet)'}
 
 ${styleNotes ? `Style direction: ${styleNotes}` : ''}
 
-Rules:
-- Output ONE complete, self-contained stylesheet.
-- Use plain CSS (no preprocessor syntax). CSS variables on :root are fine.
-- Include element resets, layout, typography, components, and responsive rules.
-- Do NOT omit selectors for the class names above. Do NOT truncate.`;
+RULES:
+- One complete, self-contained plain CSS file. CSS variables on :root are encouraged.
+- Structure: 1) :root variables, 2) reset/base, 3) layout, 4) component rules, 5) responsive.
+- Every class name listed above must have a rule. No omissions.
+- Write clean, minimal CSS — no duplicated selectors, no redundant rules, no commented-out blocks.
+- Target 150-300 lines. If you are over 400 lines you are over-engineering it — use variables and shared rules.`;
 
   // CSS for rich landing/marketing pages routinely lands at 12k-18k output
   // tokens. Use a generous ceiling close to ABSOLUTE_TOKEN_CEILING so we
@@ -1266,7 +1267,7 @@ Rules:
     'src/index.css',
     systemPrompt,
     { appName: manifest.appName, classNames, styleNotes },
-    { initial: 6000, ceiling: 18000 }
+    { initial: 4000, ceiling: 12000 }
   );
   if (isProbablyTruncatedGeneratedFile(parsed.path, parsed.content)) {
     throw new Error(`frontendCss: generated content appears too short or incomplete for ${parsed.path}`);
