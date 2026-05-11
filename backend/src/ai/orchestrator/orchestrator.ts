@@ -46,7 +46,7 @@ import {
   shouldAttemptRepair,
   shouldRetryStage,
 } from './recovery';
-import { resolveRecoveryRoute, type PipelineStage } from '../../orchestration/pipelineStateMachine';
+import { resolveRecoveryRoute, normalizePipelineStage, stageIndex, type PipelineStage } from '../../orchestration/pipelineStateMachine';
 import { error as logError } from '../../utils/logger';
 import type {
   OrchestrationAdapter,
@@ -224,11 +224,32 @@ async function stageWrap<T>(
 ): Promise<StageResult<T>> {
   const { adapter, persistence, percent, deadlineAt } = options;
   const policy = currentPolicy(memory);
-  const inputHash = hashInput({ stage, input, memory: { projectId: memory.projectId, sessionId: memory.sessionId } });
+  // NOTE: sessionId is intentionally excluded from inputHash — sessionId changes on every
+  // server restart, which would cause all prior checkpoints to be cache-misses, breaking
+  // crash-resume. projectId alone provides the necessary isolation.
+  const inputHash = hashInput({ stage, input, projectId: memory.projectId });
   const cached = memory.checkpoints.find((item) => item.stage === stage && item.inputHash === inputHash);
   if (cached && cached.output !== undefined) {
     adapter?.emit?.({ type: 'info', stage, message: `resumed ${stage} from checkpoint` });
     return createSuccessResult(stage, cached.output as T, undefined, cached.issues);
+  }
+
+  // Defensive: if we are already past this stage (memory advanced further in a prior run)
+  // and there's any checkpoint for this stage, use it rather than attempting a backwards
+  // markStage which would throw an invalid-transition error.
+  const normalizedCurrent = normalizePipelineStage(memory.currentState);
+  const normalizedTarget = normalizePipelineStage(stage);
+  const currentIdx = stageIndex(normalizedCurrent);
+  const targetIdx = stageIndex(normalizedTarget);
+  if (currentIdx > targetIdx) {
+    const anyCheckpoint = memory.checkpoints.find((item) => item.stage === stage && item.output !== undefined);
+    if (anyCheckpoint) {
+      adapter?.emit?.({ type: 'info', stage, message: `resumed ${stage} from checkpoint (hash-miss fallback)` });
+      return createSuccessResult(stage, anyCheckpoint.output as T, undefined, anyCheckpoint.issues);
+    }
+    // No checkpoint at all for a stage we passed — mark it so the state machine
+    // stays consistent, then re-run the stage.
+    memory.currentState = stage as OrchestrationState;
   }
 
   adapter?.emit?.({ type: 'stage_start', stage });
