@@ -44,10 +44,11 @@ export const config = {
     maxBuildAttempts: parseInt(process.env.MAX_BUILD_ATTEMPTS || '2', 10),
     // Phase 3 budget controller: approximate total tokens per projectId allowed
     // before orchestration fails with "Budget Exceeded".
-    maxTokensPerProject: parseInt(process.env.MAX_TOKENS_PER_PROJECT || '120000', 10),
+    maxTokensPerProject: parseInt(process.env.MAX_TOKENS_PER_PROJECT || '300000', 10),
     // Phase 6: Global wall-clock orchestration timeout.
-    // Applies even if an agent hasn't hit its per-stage retry loop.
-    maxOrchestrationMs: parseInt(process.env.MAX_ORCHESTRATION_MS || '600000', 10), // 10 minutes
+    // Code generation alone can take 15+ min for complex multi-component apps;
+    // code_generation gets its own per-stage minimum budget on top of this.
+    maxOrchestrationMs: parseInt(process.env.MAX_ORCHESTRATION_MS || '1200000', 10), // 20 minutes
   },
 };
 

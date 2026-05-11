@@ -978,6 +978,12 @@ export async function runAIOrchestration(
 
   const orchestratorDeadlineAt = Date.now() + config.LIMITS.maxOrchestrationMs;
   const opts: StageOptions = { adapter, persistence, deadlineAt: orchestratorDeadlineAt };
+  // Code generation is by far the heaviest stage (sequential LLM calls per
+  // file). Give it a dedicated minimum budget so that slow earlier stages
+  // can't starve it of time. The effective deadline is whichever is later:
+  // the global wall-clock deadline, or 15 minutes from right now.
+  const CODE_GEN_MIN_BUDGET_MS = 15 * 60 * 1000;
+  const codeGenDeadlineAt = Math.max(orchestratorDeadlineAt, Date.now() + CODE_GEN_MIN_BUDGET_MS);
 
   // Modification fast-path: previously-completed project receiving a change request
   if (command.modification && (memory.status === 'completed' || memory.currentState === 'done') && (memory.deployment?.frontendUrl || memory.deployment?.backendUrl)) {
@@ -1231,7 +1237,7 @@ export async function runAIOrchestration(
     setCode(memory, { files: generated.files || [], patch: generated.patch || '' });
     assertConsistencyWithSelfHeal(memory, command, 'code_generation', repairCode);
     return generated;
-  }, { ...opts, percent: 65 });
+  }, { ...opts, deadlineAt: codeGenDeadlineAt, percent: 65 });
 
   if (codeResult.status !== 'success') return finalizeResult(memory, codeResult, null, null);
 

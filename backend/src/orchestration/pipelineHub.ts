@@ -1,8 +1,14 @@
 import { EventEmitter } from 'events';
+import { randomBytes } from 'crypto';
 import { getRedis } from '../cache/redis';
 import { PIPELINE_TTL_MS } from '../utils/ttlSet';
 import type { OrchestrationAdapter, OrchestrationEmitEvent } from '../ai/contracts/orchestration';
 import type Redis from 'ioredis';
+
+// Unique ID for this process instance. Events written to the Redis stream
+// are tagged with this ID so the fanout loop can skip them — they were
+// already delivered to local subscribers via the direct EventEmitter path.
+const INSTANCE_ID = randomBytes(8).toString('hex');
 
 const emitters = new Map<string, EventEmitter>();
 const localActive = new Map<string, number>(); // projectId -> expiry ms
@@ -97,21 +103,23 @@ async function startStreamFanout(projectId: string): Promise<void> {
 
             // fieldArr = [field1, value1, field2, value2, ...]
             let eventJson: string | undefined;
+            let srcInstance: string | undefined;
 
             for (let i = 0; i < fieldArr.length; i += 2) {
               const field = fieldArr[i];
               const value = fieldArr[i + 1];
-              if (field === 'event' && typeof value === 'string') {
-                eventJson = value;
-                break;
-              }
+              if (field === 'event' && typeof value === 'string') eventJson = value;
+              if (field === 'src' && typeof value === 'string') srcInstance = value;
             }
 
-            if (typeof eventJson !== 'string') {
-              cursor = id;
-              await subscriber.set(cursorKey(projectId), cursor, 'PX', PIPELINE_TTL_MS).catch(() => {});
-              continue;
-            }
+            cursor = id;
+            await subscriber.set(cursorKey(projectId), cursor, 'PX', PIPELINE_TTL_MS).catch(() => {});
+
+            if (typeof eventJson !== 'string') continue;
+
+            // Skip events we published ourselves — they were already delivered
+            // to local subscribers via the direct EventEmitter path in publish().
+            if (srcInstance === INSTANCE_ID) continue;
 
             try {
               const parsed = JSON.parse(eventJson) as OrchestrationEmitEvent;
@@ -120,9 +128,6 @@ async function startStreamFanout(projectId: string): Promise<void> {
               // ignore malformed messages
             }
 
-            cursor = id;
-            // Persist cursor so another backend instance can resume after restart.
-            await subscriber.set(cursorKey(projectId), cursor, 'PX', PIPELINE_TTL_MS).catch(() => {});
           }
         }
       }
@@ -225,6 +230,8 @@ export const pipelineHub = {
     const redis = getRedis();
     if (!redis) return;
 
+    // Tag with INSTANCE_ID so the fanout loop on this same process can skip
+    // these events — they were already delivered via the direct emit above.
     void redis
       .xadd(
         streamKey(projectId),
@@ -234,6 +241,8 @@ export const pipelineHub = {
         '*',
         'event',
         JSON.stringify(event),
+        'src',
+        INSTANCE_ID,
       )
       .catch(() => {
         // ignore stream failures
