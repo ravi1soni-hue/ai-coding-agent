@@ -191,7 +191,10 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
         case 'file_generated':
           if (payload.filePath) {
             setCurrentActivity(`Writing ${payload.filePath}...`);
-            upsertGeneratedFile({ path: payload.filePath, content: '' });
+            upsertGeneratedFile({
+              path: payload.filePath,
+              content: typeof payload.content === 'string' ? payload.content : '',
+            });
             pushMessage('system', `Wrote ${payload.filePath}`);
           }
           break;

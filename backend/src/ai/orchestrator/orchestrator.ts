@@ -1053,9 +1053,14 @@ export async function runAIOrchestration(
       modification: command.modification,
       projectId: command.projectId,
       user_id: command.sessionId,
-      emitEvent: (e: { type: string; filePath?: string; message?: string }) => {
+      emitEvent: (e: { type: string; filePath?: string; message?: string; payload?: { path?: string; content?: string } }) => {
         if (e.type === 'FILE_WRITTEN' && e.filePath) {
-          adapter.emit?.({ type: 'file_generated', stage: 'code_generation', filePath: e.filePath });
+          adapter.emit?.({
+            type: 'file_generated',
+            stage: 'code_generation',
+            filePath: e.filePath,
+            content: typeof e.payload?.content === 'string' ? e.payload.content : undefined,
+          });
         } else if (e.type === 'AGENT_THINKING' && e.message) {
           adapter.emit?.({ type: 'info', stage: 'code_generation', message: e.message });
         }
@@ -1099,6 +1104,7 @@ export async function runAIOrchestration(
       fixFn: async (logs: string) => {
         await selfHealWithCodeGeneration(memory, command, projectSpec, logs, command.projectId);
       },
+      emitInfo: (message: string) => adapter.emit?.({ type: 'info', stage: 'testing', message }),
     });
     const buildArtifacts = toBuildArtifact(result);
     setTests(memory, { success: result.success, logs: result.logs, buildDir: buildArtifacts.buildDir, backendDir: buildArtifacts.backendDir });

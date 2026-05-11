@@ -220,8 +220,11 @@ export async function testFixAgent(input: {
   files?: GeneratedFile[];
   workspaceDir?: string;
   projectId?: string;
+  emitInfo?: (message: string) => void;
 }) {
   debug('testFixAgent:start', { workspaceDir: input.workspaceDir, projectId: input.projectId });
+  const info = (msg: string) => { try { input.emitInfo?.(msg); } catch { /* best-effort */ } };
+  info('Preparing build workspace...');
 
   // ── Pre-build: write VITE_API_BASE_URL to .env / .env.production ──────────
   if (input.workspaceDir) {
@@ -288,16 +291,19 @@ export async function testFixAgent(input: {
 
   try {
     do {
+      info(`Build attempt ${retries + 1} of 3 — running npm install and build (this can take a few minutes)...`);
       debug('testFixAgent:attempt', { attempt: retries + 1 });
       lastResult = await input.buildFn();
       debug('testFixAgent:buildResult', { success: lastResult.success });
 
       if (lastResult.success) {
+        info(retries > 0 ? `Build succeeded after ${retries + 1} attempt(s).` : 'Build succeeded.');
         debug('testFixAgent:success', { fixed: retries > 0 });
         return { ...lastResult, fixed: retries > 0 };
       }
 
       if (input.fixFn && retries < 2) {
+        info(`Build failed — invoking AI self-heal (attempt ${retries + 1})...`);
         debug('testFixAgent:invoking-fixFn', { retry: retries + 1 });
         try {
           await input.fixFn(lastResult.logs);
