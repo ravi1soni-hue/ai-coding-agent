@@ -1,7 +1,5 @@
 // LLM Proxy Client for Coforge
 // Use fetch instead of axios for LLM proxy calls
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const util = require('util');
 import { config } from '../config/env';
 import { enforceBudgetOrThrow } from '../utils/tokenBudget';
 
@@ -28,8 +26,7 @@ export class LLMProxyClient {
   }
 
   private log(message: string, data?: any) {
-    // Use util.inspect for deep objects
-    console.log(`[LLMProxyClient] ${message}${data ? ': ' + util.inspect(data, { depth: 5 }) : ''}`);
+    console.log(`[LLMProxyClient] ${message}${data ? ' ' + JSON.stringify(data) : ''}`);
   }
 
   private shouldRetryStatus(status: number): boolean {

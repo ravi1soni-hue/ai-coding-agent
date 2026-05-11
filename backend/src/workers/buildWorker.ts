@@ -12,6 +12,8 @@ export type ExecutionRunRequest = {
    * Log streaming sink. buildWorker will forward both stdout/stderr chunks.
    */
   onLog?: ExecutionRunLogSink;
+  /** Epoch ms by which the entire build must finish. Used to cap per-command timeouts. */
+  deadlineAt?: number;
 };
 
 export type ExecutionRunResponse = {
@@ -28,6 +30,14 @@ type BuildWorkerPayload = ExecutionRunRequest;
 type BuildWorkerResult = ExecutionRunResponse;
 
 const DOCKER_NODE_IMAGE = 'node:20-bookworm';
+const MAX_CMD_TIMEOUT_MS = 5 * 60_000;
+const MIN_CMD_TIMEOUT_MS = 30_000;
+
+/** Compute a per-command timeout that respects the orchestration deadline. */
+function deadlineMs(deadlineAt?: number): number {
+  if (!deadlineAt) return MAX_CMD_TIMEOUT_MS;
+  return Math.max(MIN_CMD_TIMEOUT_MS, Math.min(MAX_CMD_TIMEOUT_MS, deadlineAt - Date.now()));
+}
 
 function resolveWorkspaceRoot(payload: BuildWorkerPayload): string | undefined {
   return payload.workspaceRoot || payload.workspaceDir;
@@ -237,35 +247,38 @@ async function hasTestScript(workspaceDir: string): Promise<boolean> {
 
 async function installDependencies(
   workspaceDir: string,
-  onLog?: (chunk: string) => void
+  onLog?: (chunk: string) => void,
+  deadlineAt?: number
 ): Promise<{ code: number; output: string }> {
+  const cmdTimeout = deadlineMs(deadlineAt);
   const lockPath = path.join(workspaceDir, 'package-lock.json');
   if (await fileExists(lockPath)) {
-    const ciResult = await runCommand('npm', ['ci', '--no-audit', '--no-fund'], workspaceDir, 5 * 60_000, onLog);
+    const ciResult = await runCommand('npm', ['ci', '--no-audit', '--no-fund'], workspaceDir, cmdTimeout, onLog);
     if (ciResult.code === 0) return ciResult;
-    const fallbackResult = await runCommand('npm', ['install', '--no-audit', '--no-fund'], workspaceDir, 5 * 60_000, onLog);
+    const fallbackResult = await runCommand('npm', ['install', '--no-audit', '--no-fund'], workspaceDir, deadlineMs(deadlineAt), onLog);
     return {
       code: fallbackResult.code,
       output: `${ciResult.output.trim()}\n\n--- npm ci failed, falling back to npm install ---\n\n${fallbackResult.output.trim()}`,
     };
   }
-  return runCommand('npm', ['install', '--no-audit', '--no-fund'], workspaceDir, 5 * 60_000, onLog);
+  return runCommand('npm', ['install', '--no-audit', '--no-fund'], workspaceDir, cmdTimeout, onLog);
 }
 
 async function runFrontendTypeCheck(
   workspaceDir: string,
-  onLog?: (chunk: string) => void
+  onLog?: (chunk: string) => void,
+  deadlineAt?: number
 ): Promise<{ code: number; output: string }> {
   const packageJsonPath = path.join(workspaceDir, 'package.json');
   try {
     const raw = await fs.readFile(packageJsonPath, 'utf8');
     const pkg = JSON.parse(raw) as { scripts?: Record<string, string>; dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
     if (pkg.scripts?.['type-check']) {
-      return runCommand('npm', ['run', 'type-check'], workspaceDir, 5 * 60_000, onLog);
+      return runCommand('npm', ['run', 'type-check'], workspaceDir, deadlineMs(deadlineAt), onLog);
     }
     const tsconfigPath = path.join(workspaceDir, 'tsconfig.json');
     if (await fileExists(tsconfigPath) || pkg.devDependencies?.typescript || pkg.dependencies?.typescript) {
-      return runCommand('npx', ['tsc', '--noEmit'], workspaceDir, 5 * 60_000, onLog);
+      return runCommand('npx', ['tsc', '--noEmit'], workspaceDir, deadlineMs(deadlineAt), onLog);
     }
   } catch {
     // Fall back gracefully when package.json is missing or malformed.
@@ -275,20 +288,23 @@ async function runFrontendTypeCheck(
 
 async function buildWorkspace(
   workspaceDir: string,
-  onLog?: (chunk: string) => void
+  onLog?: (chunk: string) => void,
+  deadlineAt?: number
 ): Promise<{ code: number; output: string }> {
-  return runCommand('npm', ['run', 'build'], workspaceDir, 5 * 60_000, onLog);
+  return runCommand('npm', ['run', 'build'], workspaceDir, deadlineMs(deadlineAt), onLog);
 }
 
 async function testWorkspace(
   workspaceDir: string,
-  onLog?: (chunk: string) => void
+  onLog?: (chunk: string) => void,
+  deadlineAt?: number
 ): Promise<{ code: number; output: string }> {
-  return runCommand('npm', ['test', '--', '--watch=false'], workspaceDir, 5 * 60_000, onLog);
+  return runCommand('npm', ['test', '--', '--watch=false'], workspaceDir, deadlineMs(deadlineAt), onLog);
 }
 
 export async function runBuildWorker(payload: BuildWorkerPayload): Promise<BuildWorkerResult> {
   const onLog = payload.onLog;
+  const { deadlineAt } = payload;
   const workspaceRoot = resolveWorkspaceRoot(payload);
   if (!workspaceRoot) {
     return { success: false, logs: 'workspaceRoot is required for real build/test execution.' };
@@ -338,25 +354,25 @@ export async function runBuildWorker(payload: BuildWorkerPayload): Promise<Build
   if (await fileExists(path.join(frontendDir, 'package.json'))) {
     logs.push(`[buildWorker] cwd=${frontendDir}`);
     logs.push(`[buildWorker] Installing frontend dependencies in ${frontendDir}`);
-    const installResult = await installDependencies(frontendDir, onLog);
+    const installResult = await installDependencies(frontendDir, onLog, deadlineAt);
     logs.push('$ npm install (frontend)');
     logs.push(installResult.output.trim());
     if (installResult.code !== 0) return { success: false, logs: logs.join('\n\n') };
 
-    const typeCheckResult = await runFrontendTypeCheck(frontendDir, onLog);
+    const typeCheckResult = await runFrontendTypeCheck(frontendDir, onLog, deadlineAt);
     if (typeCheckResult.code !== 0) {
       logs.push('$ npm run type-check (frontend)');
       logs.push(typeCheckResult.output.trim());
       return { success: false, logs: logs.join('\n\n') };
     }
 
-    const buildResult = await buildWorkspace(frontendDir, onLog);
+    const buildResult = await buildWorkspace(frontendDir, onLog, deadlineAt);
     logs.push('$ npm run build (frontend)');
     logs.push(buildResult.output.trim());
     if (buildResult.code !== 0) return { success: false, logs: logs.join('\n\n') };
 
     if (await hasTestScript(frontendDir)) {
-      const testResult = await testWorkspace(frontendDir, onLog);
+      const testResult = await testWorkspace(frontendDir, onLog, deadlineAt);
       logs.push('$ npm test -- --watch=false (frontend)');
       logs.push(testResult.output.trim());
       if (testResult.code !== 0) return { success: false, logs: logs.join('\n\n') };
@@ -373,7 +389,7 @@ export async function runBuildWorker(payload: BuildWorkerPayload): Promise<Build
   if (await fileExists(path.join(backendDir, 'package.json'))) {
     logs.push(`[buildWorker] cwd=${backendDir}`);
     logs.push(`[buildWorker] Installing backend dependencies in ${backendDir}`);
-    const installResult = await installDependencies(backendDir, onLog);
+    const installResult = await installDependencies(backendDir, onLog, deadlineAt);
     logs.push('$ npm install (backend)');
     logs.push(installResult.output.trim());
     if (installResult.code !== 0) return { success: false, logs: logs.join('\n\n') };
@@ -382,7 +398,7 @@ export async function runBuildWorker(payload: BuildWorkerPayload): Promise<Build
       const raw = await fs.readFile(path.join(backendDir, 'package.json'), 'utf8');
       const pkg = JSON.parse(raw) as { scripts?: Record<string, string> };
       if (pkg.scripts?.build) {
-        const buildResult = await buildWorkspace(backendDir, onLog);
+        const buildResult = await buildWorkspace(backendDir, onLog, deadlineAt);
         logs.push('$ npm run build (backend)');
         logs.push(buildResult.output.trim());
         if (buildResult.code !== 0) return { success: false, logs: logs.join('\n\n') };
@@ -394,7 +410,7 @@ export async function runBuildWorker(payload: BuildWorkerPayload): Promise<Build
     }
 
     if (await hasTestScript(backendDir)) {
-      const testResult = await testWorkspace(backendDir, onLog);
+      const testResult = await testWorkspace(backendDir, onLog, deadlineAt);
       logs.push('$ npm test -- --watch=false (backend)');
       logs.push(testResult.output.trim());
       if (testResult.code !== 0) return { success: false, logs: logs.join('\n\n') };

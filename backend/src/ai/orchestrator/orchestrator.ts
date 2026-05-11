@@ -458,8 +458,12 @@ async function selfHealWithCodeGeneration(
   command: OrchestrationCommand,
   projectSpec: any,
   logs: string,
-  projectId: string
+  projectId: string,
+  deadlineAt?: number
 ): Promise<void> {
+  if (deadlineAt && deadlineAt - Date.now() < 60_000) {
+    throw new Error(`Orchestration timeout — insufficient budget for self-heal (${Math.max(0, deadlineAt - Date.now())}ms remaining)`);
+  }
   const repaired = await codeGenerationAgent({
     systemDesign: memory.systemDesign,
     uiSpec: memory.uiSpec?.structuredSpec,
@@ -999,12 +1003,11 @@ export async function runAIOrchestration(
 
   const orchestratorDeadlineAt = Date.now() + config.LIMITS.maxOrchestrationMs;
   const opts: StageOptions = { adapter, persistence, deadlineAt: orchestratorDeadlineAt };
-  // Code generation is by far the heaviest stage (sequential LLM calls per
-  // file). Give it a dedicated minimum budget so that slow earlier stages
-  // can't starve it of time. The effective deadline is whichever is later:
-  // the global wall-clock deadline, or 15 minutes from right now.
+  // codeGenDeadlineAt and testDeadlineAt are computed lazily (right before each
+  // stageWrap call) so their minimum-budget windows open from actual stage-start
+  // time, not from orchestration-start time.
   const CODE_GEN_MIN_BUDGET_MS = 15 * 60 * 1000;
-  const codeGenDeadlineAt = Math.max(orchestratorDeadlineAt, Date.now() + CODE_GEN_MIN_BUDGET_MS);
+  const TEST_MIN_BUDGET_MS = 8 * 60 * 1000;
 
   // Modification fast-path: previously-completed project receiving a change request
   if (command.modification && (memory.status === 'completed' || memory.currentState === 'done') && (memory.deployment?.frontendUrl || memory.deployment?.backendUrl)) {
@@ -1213,6 +1216,7 @@ export async function runAIOrchestration(
   setExecutionPlan(memory, executionPlan);
   appendHistory(memory, 'execution_plan', 'execution_plan_ready', 'Execution plan derived', executionPlan);
 
+  const codeGenDeadlineAt = Math.max(orchestratorDeadlineAt, Date.now() + CODE_GEN_MIN_BUDGET_MS);
   const codeResult = await stageWrap(memory, 'code_generation', executionPlan, async () => {
     const generated = await codeGenerationAgent({
       systemDesign: memory.systemDesign,
@@ -1284,11 +1288,15 @@ export async function runAIOrchestration(
     } catch { /* best-effort */ }
   }
 
+  // Give testing its own minimum budget from when it actually starts, so
+  // an extended code_gen run does not starve the build/test/fix loop.
+  const testDeadlineAt = Math.max(orchestratorDeadlineAt, Date.now() + TEST_MIN_BUDGET_MS);
   const testResult = await stageWrap(memory, 'testing', memory.code, async () => {
     const result = await testFixAgent({
       buildFn: () =>
         runBuildWorker({
           workspaceDir: materializedRevision.workspaceDir,
+          deadlineAt: testDeadlineAt,
           onLog: (chunk) => {
             const text = String(chunk || '');
             if (!text.trim()) return;
@@ -1299,15 +1307,16 @@ export async function runAIOrchestration(
       files: memory.code?.files,
       workspaceDir: materializedRevision.workspaceDir,
       projectId: command.projectId,
+      deadlineAt: testDeadlineAt,
       fixFn: async (logs: string) => {
-        await selfHealWithCodeGeneration(memory, command, projectSpec, logs, command.projectId);
+        await selfHealWithCodeGeneration(memory, command, projectSpec, logs, command.projectId, testDeadlineAt);
       },
       emitInfo: (message: string) => adapter.emit?.({ type: 'info', stage: 'testing', message }),
     });
     const buildArtifacts = toBuildArtifact(result);
     setTests(memory, { success: result.success, logs: result.logs, buildDir: buildArtifacts.buildDir, backendDir: buildArtifacts.backendDir });
     return { ...result, ...buildArtifacts };
-  }, { ...opts, percent: 80 });
+  }, { ...opts, deadlineAt: testDeadlineAt, percent: 80 });
 
   if (testResult.status !== 'success') return finalizeResult(memory, testResult, null, null);
 

@@ -245,6 +245,8 @@ export async function testFixAgent(input: {
   workspaceDir?: string;
   projectId?: string;
   emitInfo?: (message: string) => void;
+  /** Epoch ms deadline. Attempts are skipped when < 60 s remain. */
+  deadlineAt?: number;
 }) {
   debug('testFixAgent:start', { workspaceDir: input.workspaceDir, projectId: input.projectId });
   const info = (msg: string) => { try { input.emitInfo?.(msg); } catch { /* best-effort */ } };
@@ -310,11 +312,16 @@ export async function testFixAgent(input: {
   }
 
   // ── Build loop: up to 3 attempts with AI fix between each ─────────────────
+  const MIN_ATTEMPT_BUDGET_MS = 60_000;
   let retries = 0;
   let lastResult: { success: boolean; logs: string } | undefined;
 
   try {
     do {
+      if (input.deadlineAt && input.deadlineAt - Date.now() < MIN_ATTEMPT_BUDGET_MS) {
+        const remaining = Math.max(0, input.deadlineAt - Date.now());
+        throw new Error(`Orchestration timeout — only ${remaining}ms remaining before build attempt ${retries + 1}`);
+      }
       info(`Build attempt ${retries + 1} of 3 — running npm install and build (this can take a few minutes)...`);
       debug('testFixAgent:attempt', { attempt: retries + 1 });
       const currentResult = await input.buildFn();
