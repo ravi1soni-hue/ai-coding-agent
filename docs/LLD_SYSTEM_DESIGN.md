@@ -1,1342 +1,543 @@
-# Low-Level Design (LLD) — AI Autonomous Website Builder
+# Low-Level Design (LLD) — AI Autonomous Website Builder (Current Codebase)
 
 ## 1. Purpose
 
-This document describes the runtime architecture, data flow, orchestration model, storage model, deployment model, and safety boundaries of the AI autonomous website builder.
+This LLD describes the **runtime architecture**, **contracts**, **data ownership**, **control flow**, **persistence model**, **recovery/resume behavior**, **sandbox/build isolation**, and **frontend hydration/reconnection** for the current implementation in this repository.
 
-It is intended to provide a complete implementation-level view of the system, including:
-- total runtime components
-- how components communicate
-- what data each component owns or consumes
-- how generated projects remain isolated from the base app
-- how the system self-heals and resumes after failures
+It is intended to be implementation-level:
+- concrete modules/files
+- concrete API routes and WebSocket event types
+- concrete DB tables/columns involved in orchestration durability
+- concrete execution isolation boundaries and filesystem safety rules
+- concrete Redis Pub/Sub behavior for cross-instance event fanout
+- concrete snapshot/replay behavior for frontend reconnect
 
 ---
 
 ## 2. System Summary
 
-The platform is a session-driven AI orchestration system that converts a user request into a deployable web application.
+The system is a **session-driven AI orchestration pipeline** that transforms a user request into a deployable web application.
 
-The system has two isolated domains:
+The system has two key domains:
 
-1. **Base App**
-   - permanent control plane
-   - runs socket server, orchestration, agents, persistence, deployment, validation
-   - must remain immutable during generated project creation
+1. **Base App (control plane)**  
+   Persistent runtime: auth, orchestration coordinator, socket + HTTP APIs, persistence adapter, audit/event logging, workspace materialization, build/test sandbox, deployment, and recovery/resume.
 
-2. **Generated Project**
-   - per-session ephemeral output
-   - exists in memory first
-   - may be materialized under `/tmp/project-{projectId}`
-   - destroyed after deployment
-
-The base app never stores generated source code inside its own repository tree.
+2. **Generated Project (ephemeral output)**  
+   Per session generated files and derived artifacts live under `/tmp/...` only during execution, and are archived/packaged as revisions for deployment. Generated source is not written into the base app repository tree.
 
 ---
 
-## 3. Fixed Stack
+## 3. Runtime Stack
 
-### Frontend stack
-- React 18
-- Vite
-- JavaScript / JSX
+### Frontend
+- React (Vite)
+- Socket-based live updates
+- Snapshot-first reconnect to avoid message loss/duplication
 
-### Backend stack
-- Node.js
-- TypeScript
-- Express for generated backend services
-- PostgreSQL for persistent multi-tenant data
-- Redis for transient state only
+### Backend (Base App)
+- Node.js + TypeScript
+- Fastify for HTTP routing and server
+- `ws` WebSocket server for interactive orchestration
+- PostgreSQL for persistence (project sessions, events, checkpoints, code revisions, deployments)
+- Redis optional for transient caches and **Pub/Sub fanout** (cross-instance event delivery)
 
 ### Deployment targets
-- Frontend: Vercel
-- Backend: Railway
+- Vercel for frontend
+- Railway for backend
 
 ---
 
 ## 4. Top-Level Runtime Architecture
 
-The system is organized into the following major subsystems:
+### 4.1 Modules (by responsibility)
 
-1. **Client UI**
-2. **WebSocket Gateway**
-3. **HTTP API Layer**
-4. **Authentication Layer**
-5. **Orchestration Engine**
-6. **Agent Layer**
-7. **Workspace Materializer**
-8. **Build Worker**
-9. **Deployment Layer**
-10. **Persistence Layer**
-11. **Redis Transient State**
-12. **Template / Scaffold Layer**
-13. **Logging / Error Handling / Recovery**
-14. **State Machine / Session Controller**
-
----
-
-## 5. Component Inventory
-
-This section lists the total major components and their responsibilities.
-
-### 5.1 Frontend components
-- `frontend/src/App.jsx`
-- `frontend/src/components/AuthPage.jsx`
-- `frontend/src/components/ChatWorkspace.jsx`
-- `frontend/src/components/ProjectHistory.jsx`
-- `frontend/src/main.jsx`
-- `frontend/src/styles.css`
-- `frontend/src/utils/helpers.js`
-
-### 5.2 Backend control-plane components
+**Server bootstrap**
 - `backend/src/index.ts`
-- `backend/src/api/server.ts`
+  - connects Redis/Postgres
+  - ensures DB schema (`ensureCoreTables`, `ensureVectorTable`)
+  - serves static frontend build
+  - starts WebSocket server (`createSocketServer`)
+  - resumes in-flight pipelines on boot (`resumeInFlightPipelines`)
+
+**HTTP API layer**
 - `backend/src/api/routes.ts`
-- `backend/src/api/socket.ts`
+- `backend/src/api/server.ts` (server helper; repo uses `backend/src/index.ts` at runtime)
 - `backend/src/api/projectRoutes.ts`
-- `backend/src/api/authRoutes.ts`
-- `backend/src/api/frontendProxy.ts`
-- `backend/src/api/middleware.ts`
+  - CRUD-like project endpoints
+  - snapshot/events/file retrieval endpoints
+  - redeploy endpoint
 
-### 5.3 Handlers
-- `backend/src/api/handlers/requirementAnalysisHandler.ts`
-- `backend/src/api/handlers/clarificationHandler.ts`
-- `backend/src/api/handlers/confirmationHandler.ts`
-- `backend/src/api/handlers/systemDesignHandler.ts`
-- `backend/src/api/handlers/uiSpecHandler.ts`
-- `backend/src/api/handlers/blueprintHandler.ts`
-- `backend/src/api/handlers/codeGenerationHandler.ts`
-- `backend/src/api/handlers/testFixHandler.ts`
-- `backend/src/api/handlers/deploymentHandler.ts`
+**WebSocket gateway**
+- `backend/src/api/socket.ts`
+  - origin allowlist enforcement
+  - cookie-based auth
+  - per-project pipeline stream subscription via `pipelineHub`
+  - orchestrator command construction (fresh vs clarification vs confirmation vs modification)
+  - rate limiting
+  - sanitize input
+  - app-level acquire lock + hub-based resume signaling
 
-### 5.4 AI orchestration layer
-- `backend/src/ai/index.ts`
-- `backend/src/ai/contracts/orchestration.ts`
+**Orchestration engine**
 - `backend/src/ai/orchestrator/orchestrator.ts`
+  - main pipeline coordinator (`runAIOrchestration`)
+  - stage orchestration and self-healing loop
+  - durable checkpoint snapshot creation
+  - calls build/test/materialize/deploy stages
+
+**In-memory orchestrator memory**
 - `backend/src/ai/orchestrator/memory.ts`
-- `backend/src/ai/orchestrator/errorClassifier.ts`
-- `backend/src/ai/orchestrator/executionPlan.ts`
-- `backend/src/ai/orchestrator/recovery.ts`
+  - memory seed/initialization
+  - mutation helpers and checkpoint snapshot constructors
 
-### 5.5 Pipeline / flow control
-- `backend/src/orchestration/pipelineStateMachine.ts`
-- `backend/src/orchestration/langgraph.ts`
+**FSM state coordination**
+- `backend/src/ai/orchestrator/stateCoordinator.ts`
+  - Outer FSM states mapping to internal stage start points
 
-### 5.6 Agents
-- `backend/src/agents/requirementAnalysisAgent.ts`
-- `backend/src/agents/clarificationAgent.ts`
-- `backend/src/agents/confirmationGate.ts`
-- `backend/src/agents/systemDesignAgent.ts`
-- `backend/src/agents/uiSpecAgent.ts`
-- `backend/src/agents/blueprintAgent.ts`
-- `backend/src/agents/codeGenerationAgent.ts`
-- `backend/src/agents/testFixAgent.ts`
-- `backend/src/agents/deploymentAgent.ts`
-- `backend/src/agents/reviewerAgent.ts`
-- `backend/src/agents/projectSpec.ts`
-- `backend/src/agents/projectConsistency.ts`
-- `backend/src/agents/structuredSpec.ts`
-- `backend/src/agents/blueprintContract.ts`
-- `backend/src/agents/modelRouter.ts`
-- `backend/src/agents/llmProxyClient.ts`
-- `backend/src/agents/vercelDeploy.ts`
+**Recovery/resume scanner**
+- `backend/src/orchestration/pipelineResume.ts`
+  - queries DB for in-flight sessions and re-runs orchestration from persisted checkpoints
 
-### 5.7 Workspace / build / deploy
+**Event fanout hub**
+- `backend/src/orchestration/pipelineHub.ts`
+  - local in-process EventEmitter stream (multi-socket attach support)
+  - Redis Pub/Sub publish/subscribe for cross-instance event fanout
+
+**Persistence adapter**
+- `backend/src/api/persistenceAdapter.ts`
+  - translates orchestration memory into DB persistence operations:
+    - `saveSnapshot` / `loadSnapshot`
+    - `saveCheckpoint` / `loadCheckpoints`
+    - `appendEvent`
+    - `saveCodeRevision`
+    - `saveDeployment`
+
+**Build + Sandbox**
 - `backend/src/factory/projectFactory.ts`
+  - materializes workspaces under `/tmp/workspaces/{projectId}-{revisionId}`
+  - writes generated files into safe paths (scopes bare paths to frontend/)
+  - creates revision patch metadata and archives sources to a stable `.tgz`
+
 - `backend/src/workers/buildWorker.ts`
-- `backend/src/deploy/railwayDeploy.ts`
-- `backend/src/tools/fsTools.ts`
+  - validates generated project structure
+  - runs build/test inside Docker with workspace bind mount to `/workspace`
+  - docker args enforce isolation:
+    - `--network none`
+    - `--security-opt no-new-privileges`
+    - `--cap-drop ALL`
+    - `--pids-limit 256`
+  - executes:
+    - frontend: install/build/test if available
+    - backend: install/build/test if available
+  - returns logs and build directory hints
 
-### 5.8 Persistence and infra
-- `backend/src/db/database.ts`
-- `backend/src/db/postgres.ts`
-- `backend/src/db/schema.ts`
-- `backend/src/db/projectStore.ts`
-- `backend/src/db/auditLog.ts`
-- `backend/src/db/vectorStore.ts`
+**Deployment**
+- `backend/src/agents/deploymentAgent.ts` and related deploy utilities
+  - used by orchestrator deployment stage and redeploy route
+
+**Auth**
 - `backend/src/auth/authService.ts`
-- `backend/src/cache/redis.ts`
-- `backend/src/jobs/jobQueue.ts`
-- `backend/src/config/env.ts`
-- `backend/src/utils/logger.ts`
-- `backend/src/utils/errors.ts`
-- `backend/src/utils/timeout.ts`
-- `backend/src/utils/ttlSet.ts`
-
-### 5.9 Templates
-- `backend/src/templates/frontend/*`
-- `backend/src/templates/backend/*`
+  - user/session/token management in PostgreSQL:
+    - `users`
+    - `auth_sessions`
+  - project session ownership:
+    - `getOrCreateActiveProjectSession`
+    - `createProjectSession`
+    - `isProjectOwnedByUser`
+    - `touchProjectSession`
 
 ---
 
-## 6. Architectural Boundaries
+## 5. Data Ownership & Isolation Model
 
-## 6.1 Base app boundary
-The base app is the immutable control plane.
-
-It owns:
-- orchestration
-- socket transport
-- pipeline state machine
-- AI agents
-- persistence
-- deployment integration
-- workspace materialization
-- build and test execution
-
-The base app must not persist generated source code inside the repository tree.
-
-## 6.2 Generated project boundary
-The generated project is isolated and ephemeral.
-
-Rules:
-- exists only in memory or `/tmp/project-{projectId}`
-- no cross-session sharing
-- disposable after deployment
-- code generation and fix loops operate only on generated files
-
-## 6.3 Data isolation boundary
-- `projectId` scopes session-level generated outputs
+### 5.1 Project scoping
+- `projectId` scopes orchestration session data, events, checkpoints, files, code revisions, deployments
 - `userId` scopes ownership and authorization
-- `project_id` scopes all persisted project data in PostgreSQL
-- Redis stores only transient state
+
+### 5.2 Generated code isolation
+- workspace roots:
+  - materialization workspace: `/tmp/workspaces/{projectId}-{revisionId}`
+  - historical note: previous code may mention `/tmp/project-{projectId}`, but current implementation uses workspace root in `projectFactory.ts`
+- filesystem safety rules are enforced in:
+  - `projectFactory.ts` via `assertInsideWorkspace` + path scoping
+  - `buildWorker.ts` via `assertInsideProjectsRoot` and docker bind mount root checks
+
+### 5.3 Redis usage
+Redis is **optional**:
+- If `REDIS_URL` unset:
+  - Redis is disabled (`backend/src/cache/redis.ts`)
+  - hub falls back to local in-process streaming only
+
+Redis is intended for:
+- transient “active pipeline” lock (cross-process gating)
+- transient pipeline/event fanout across instances (Pub/Sub)
 
 ---
 
-## 7. Data Sets and Ownership
+## 6. DB Schema (as implemented)
 
-This system operates on several distinct data sets.
+Core tables are created in:
+- `backend/src/db/schema.ts`
 
-### 7.1 User auth data set
-Owned by:
+### 6.1 auth
 - `users`
 - `auth_sessions`
 
-Purpose:
-- authentication
-- session validation
-- ownership checks
-
-### 7.2 Project session data set
-Owned by:
+### 6.2 project control plane persistence
 - `project_sessions`
+  - orchestration state snapshot fields (`requirements`, `clarifications`, `confirmation`, `system_design`, `ui_spec`, `structured_spec`, `blueprint`, `code_gen`, `test_result`, `deployment`)
+  - `status`, `current_step`, `progress`, `active_revision_id`, `task_queue`, `terminal_logs`, etc.
 
-Purpose:
-- session status
-- pipeline step
-- progress
-- current artifacts
-- lock state
-- deployment status
-
-### 7.3 Blackboard state data set
-Owned by:
 - `project_blackboards`
+  - stores a JSON `state` used as a current-stage board
 
-Purpose:
-- project session blackboard snapshot
-- current stage snapshot
-- task queue snapshot
-- deployment snapshot
-
-### 7.4 Task data set
-Owned by:
 - `project_tasks`
+  - present but orchestration currently primarily uses stage orchestration + checkpoints
 
-Purpose:
-- generated task queue
-- phase/action tracking
-- retries
-- per-task payloads
-
-### 7.5 Event stream data set
-Owned by:
 - `project_events`
+  - append-only event log for WebSocket replay + auditing
 
-Purpose:
-- all user/system/assistant events
-- WebSocket message history
-- orchestration narrative log
+- `project_checkpoints`
+  - durable per-stage checkpoints including:
+    - `context_snapshot` (serialized full memory slice)
+    - `fsm_state`
+    - `input_hash`, `output`, `issues`, `retry_count`
 
-### 7.6 Revision data set
-Owned by:
 - `project_code_revisions`
+  - metadata to support redeploy:
+    - `workspace_path`
+    - `source_hash`
+    - `patch_path`, patch application metadata
+    - generation payload
 
-Purpose:
-- archive metadata
-- workspace path
-- patch path
-- source hash
-- generation payload
-
-### 7.7 Deployment data set
-Owned by:
 - `project_deployments`
-
-Purpose:
-- Vercel / Railway deployment metadata
-- deploy logs
-- URLs
-- source archive hashes
-- backend/frontend service IDs
-
-### 7.8 Redis transient state set
-Owned by:
-- session state keys
-- pipeline status keys
-- temporary coordination keys
-
-Purpose:
-- short-lived orchestration cache
-- never source of truth
+  - provider URLs and identifiers plus raw payload
 
 ---
 
-## 8. End-to-End Flow Diagram
+## 7. Orchestration Design (Control Flow)
 
-### 8.1 System flow
-```text
-User
-  |
-  v
-Frontend SPA (React/Vite)
-  |
-  +--> HTTP API ------------------------------+
-  |                                           |
-  +--> WebSocket connection                   |
-                                              v
-                                      WebSocket Gateway
-                                              |
-                                              v
-                                     Session Resolver
-                                              |
-                                              v
-                                 Orchestration Controller
-                                              |
-              +-------------------------------+-------------------------------+
-              |                               |                               |
-              v                               v                               v
-     Requirement Analysis               Clarification                    Confirmation Gate
-              |                               |                               |
-              +-------------------------------+-------------------------------+
-                                              |
-                                              v
-                                       System Design
-                                              |
-                                              v
-                                            UI Spec
-                                              |
-                                              v
-                                          Blueprint
-                                              |
-                                              v
-                                       Code Generation
-                                              |
-                                              v
-                                   In-Memory File Map
-                                              |
-                                              v
-                              Materialize /tmp/project-{projectId}
-                                              |
-                                              v
-                                  Build Worker / Test Loop
-                                              |
-                                              v
-                                    Deployment Layer
-                                   /                    \
-                                  v                      v
-                               Vercel                 Railway
-                                  \                    /
-                                   v                  v
-                                   Deployment Metadata
-                                              |
-                                              v
-                                        Final Result
-```
+### 7.1 Stages (internal orchestration states)
+Defined in:
+- `backend/src/ai/contracts/orchestration.ts` as `OrchestrationState`
 
----
-
-## 9. Communication Diagram
-
-### 9.1 Major communication paths
-```text
-Frontend SPA
-  -> WebSocket Gateway
-  -> API Routes
-  -> Auth Service
-  -> Project Session Store
-  -> Orchestrator
-
-Orchestrator
-  -> Requirement Analysis Agent
-  -> Clarification Agent
-  -> Confirmation Gate
-  -> System Design Agent
-  -> UI Spec Agent
-  -> Blueprint Agent
-  -> Code Generation Agent
-  -> Test/Fix Agent
-  -> Workspace Materializer
-  -> Build Worker
-  -> Deployment Agent
-  -> Event Store / Snapshot Store
-
-Code Generation Agent
-  -> LLM Proxy Client
-  -> Model Router
-  -> Reviewer Agent
-  -> Blueprint Contract
-
-Build Worker
-  -> filesystem in /tmp/project-{projectId}
-  -> frontend package manager
-  -> backend package manager
-  -> compiler/test tools
-
-Deployment Agent
-  -> Vercel deploy adapter
-  -> Railway deploy adapter
-  -> PostgreSQL init SQL
-```
-
----
-
-## 10. Pipeline State Machine
-
-The pipeline is state-machine driven.
-
-### 10.1 States
-- `init`
-- `requirementAnalysis`
+Stages used by `backend/src/ai/orchestrator/orchestrator.ts`:
+- `requirements`
 - `clarification`
-- `clarification_wait`
-- `clarification_wait_modification`
 - `confirmation`
-- `confirmation_wait`
-- `systemDesign`
-- `uiSpec`
-- `uiSpec_modification`
+- `system_design`
+- `ui_spec`
 - `blueprint`
-- `codeGen`
-- `codeGen_modification`
-- `testFix`
-- `testFix_modification`
-- `deploy`
-- `deploy_modification`
+- `execution_plan`
+- `code_generation`
+- `testing`
+- `deployment`
+- `modification`
 - `done`
-- `done_modification`
 - `failed`
 
-### 10.2 State groups
-- analysis
-- design
-- generation
-- delivery
-- terminal
+### 7.2 Outer FSM states (for resume grouping)
+Defined in:
+- `backend/src/ai/contracts/orchestration.ts` as `OrchestrationFsmState`
+and mapped in:
+- `backend/src/ai/orchestrator/stateCoordinator.ts`
 
-### 10.3 Transition rules
-- transitions are explicit
-- retryable stages can re-enter safely
-- failed validation blocks deployment
-- deployed projects transition to terminal states
-- completed projects can restart with a fresh request
+### 7.3 Durable checkpoint strategy (Phase 1)
+`backend/src/ai/orchestrator/orchestrator.ts` uses:
+- `createCheckpointSnapshot` in `backend/src/ai/orchestrator/memory.ts`
+  - attempts to store `contextSnapshot` = serialized full memory slice
+- `persistence.saveCheckpoint(...)` from `backend/src/api/persistenceAdapter.ts`
+- checkpoint calls occur:
+  - after stage completion
+  - on error paths
+  - on pause/finalizePartial (clarification/confirmation)
 
----
-
-## 11. Session Lifecycle
-
-### 11.1 Session initialization
-1. client connects
-2. origin is validated
-3. cookie is parsed
-4. user is resolved
-5. current or new project session is selected
-6. blackboard snapshot is loaded
-7. current pipeline state is restored
-
-### 11.2 Session execution
-The orchestrator processes the current request through the pipeline stages.
-
-### 11.3 Session pause
-If clarification or confirmation is needed:
-- session state is persisted
-- the WebSocket waits for user response
-- the pipeline resumes from the paused state
-
-### 11.4 Session completion
-Once deployed:
-- deployment metadata is saved
-- final result is emitted
-- temporary workspace is cleaned up
-
-### 11.5 Session reset
-If the user starts a new request after completion:
-- pipeline resets to `init`
-- transient state is cleared
-- new generation flow begins
+### 7.4 Event audit strategy
+Events are persisted into `project_events`:
+- `backend/src/api/persistenceAdapter.ts` → `appendEvent` → `backend/src/db/projectStore.ts` (`appendProjectEvent`)
+- WS hub also streams live events to all subscribers:
+  - `backend/src/orchestration/pipelineHub.ts`
 
 ---
 
-## 12. Memory Model
+## 8. WebSocket Contracts (Live Stream)
 
-The orchestrator uses a memory-first model.
+### 8.1 Event types
+`backend/src/ai/contracts/orchestration.ts` defines `OrchestrationEmitEvent`.
 
-### 12.1 In-memory stores
-- requirements memory
-- clarification memory
-- system design memory
-- UI spec memory
-- blueprint memory
-- execution plan memory
-- code memory
-- test memory
-- deployment memory
-- issue history
-- fix history
-- checkpoints
+Live WS stream may include:
+- `progress`
+- `stage_start`
+- `stage_complete`
+- `stage_error`
+- `info`
+- `clarification_request` (questions array)
+- `confirmation_request` (summary payload)
+- `file_generated` (path/lines/bytes)
+- `done`
+- `failed`
+- (also: `pong`/`ping` are application heartbeat frames)
 
-### 12.2 Memory constraints
-- session scoped
-- project scoped
-- discarded on completion or cancel
-- not shared across sessions
+### 8.2 WS connection lifecycle
+In `backend/src/api/socket.ts`:
+1. origin validation
+2. cookie parse → session token verification
+3. determine correct `projectId`:
+   - if client supplies query projectId, ownership checked
+   - otherwise use active session
+4. subscribe to `pipelineHub.subscribe(projectId, listener)`
+5. send an initial `info` message
+6. if pipeline is already active:
+   - send `info` with `stage: resume`
 
-### 12.3 What memory contains
-- generated file list
-- patch text
-- build logs
-- deployment metadata
-- validation state
-- error classifications
-- repair attempts
-
----
-
-## 13. Detailed Component Responsibilities
-
-### 13.1 Frontend SPA
-Responsibility:
-- render chat and project history UI
-- connect to WebSocket
-- send user messages
-- display progress, clarification prompts, errors, URLs
-
-Consumes:
-- project history API
-- project event stream
-- session state
-- deployment status
-
-### 13.2 WebSocket Gateway
-Responsibility:
-- transport for interactive orchestration
-- origin and auth validation
-- session resolution
-- event persistence wrapper
-- progress/error/done payload emission
-
-Consumes:
-- auth cookie
-- projectId query parameter
-- user messages
-
-Produces:
-- persistent project events
-- pipeline control messages
-- snapshot updates
-
-### 13.3 HTTP API
-Responsibility:
-- project CRUD-like operations
-- history retrieval
-- project selection
-- redeploy
-- event listing
-- auth flows
-
-Consumes:
-- authenticated session
-- project ownership
-
-Produces:
-- project metadata
-- event history
-- deployment status
-- redeploy responses
-
-### 13.4 Requirement Analysis Agent
-Responsibility:
-- infer website type
-- infer pages
-- infer backend/auth need
-- infer deployment preference
-- detect frontend-only signals
-
-Consumes:
-- raw user request
-
-Produces:
-- structured requirements
-
-### 13.5 Clarification Agent
-Responsibility:
-- ask blocking questions only when needed
-- avoid duplicate questions
-- carry prior answers
-- preserve asked history
-
-Consumes:
-- requirements
-- prior clarification answers
-- asked questions
-- modification context
-
-Produces:
-- questions
-- confirmed flag
-- completion flag
-- clarification context
-
-### 13.6 Confirmation Gate
-Responsibility:
-- convert clarification result into a safe execution gate
-
-Consumes:
-- clarification memory
-
-Produces:
-- approval state
-
-### 13.7 System Design Agent
-Responsibility:
-- produce architecture JSON
-- enforce React/Vite frontend
-- enforce Railway backend when backend exists
-- enforce Vercel frontend
-
-Consumes:
-- requirements
-- project spec
-
-Produces:
-- frontend design
-- backend design
-- database design
-- auth design
-- hosting design
-
-### 13.8 UI Spec Agent
-Responsibility:
-- define components
-- define component dependencies
-- define navigation
-- define state management
-- define API wiring expectations
-
-Consumes:
-- system design
-- requirements
-- project spec
-
-Produces:
-- UI spec
-- structured spec
-
-### 13.9 Blueprint Agent
-Responsibility:
-- validate cross-stage consistency
-- generate machine-readable blueprint
-- enforce file registry
-- enforce route scoping
-- enforce project_id isolation
-
-Consumes:
-- requirements
-- system design
-- UI spec
-- project spec
-
-Produces:
-- blueprint contract
-- file plan
-- route plan
-
-### 13.10 Code Generation Agent
-Responsibility:
-- generate frontend and backend files
-- honor blueprint
-- operate file-by-file
-- preserve project_id scoping
-- avoid base app coupling
-
-Consumes:
-- blueprint
-- UI spec
-- system design
-- requirements
-- project spec
-- modification context
-
-Produces:
-- in-memory file map
-- patch
-- project task queue
-
-### 13.11 Test/Fix Agent
-Responsibility:
-- run build/test loop
-- repair generated files only
-- fix dependencies or missing scaffolds
-- never touch base app code
-
-Consumes:
-- generated file map
-- workspace directory
-- build results
-
-Produces:
-- build result
-- repaired file set
-- logs
-
-### 13.12 Workspace Materializer
-Responsibility:
-- sanitize projectId
-- create temporary workspace
-- copy templates
-- write generated files
-- archive workspace
-- compute source hash
-- apply patch if present
-
-Consumes:
-- projectId
-- code generation output
-
-Produces:
-- workspace path
-- archive path
-- hash
-- patch metadata
-
-### 13.13 Build Worker
-Responsibility:
-- validate generated project structure
-- install dependencies
-- run build/test
-- verify outputs
-- clean dist directories
-- protect workspace boundary
-
-Consumes:
-- workspace path
-
-Produces:
-- build logs
-- build directory
-- backend directory
-
-### 13.14 Deployment Agent
-Responsibility:
-- deploy frontend to Vercel
-- deploy backend to Railway
-- run DB init SQL
-- probe frontend accessibility
-- collect deployment metadata
-
-Consumes:
-- build output
-- backend workspace
-- revision metadata
-- projectId
-
-Produces:
-- frontend URL
-- backend URL
-- provider metadata
-- access warnings
-
-### 13.15 Project Store
-Responsibility:
-- persist project events, snapshots, tasks, revisions, deployments
-
-Consumes:
-- orchestration output
-- deployment output
-- blackboard state
-
-Produces:
-- queryable project history
-- session persistence
+### 8.3 Acquire/resume behavior
+- socket checks whether a pipeline is already active via hub lock
+- if active:
+  - do not start a duplicate pipeline; stream live events instead
+- if not active:
+  - `pipelineHub.tryAcquire(projectId)`
+  - run orchestrator
+  - `pipelineHub.release(projectId)` in finally
 
 ---
 
-## 14. Data Flow by Stage
+## 9. Redis Pub/Sub (Cross-instance Hub Fanout)
 
-### 14.1 Requirement analysis stage
-Input:
-- raw user message
+### 9.1 Implementation
+`backend/src/orchestration/pipelineHub.ts`:
+- local stream:
+  - each `projectId` maps to an in-process `EventEmitter`
+- Redis Pub/Sub:
+  - channel name: `pipeline:events:{projectId}`
+- publishing:
+  - `pipelineHub.publish(projectId, event)` emits locally and publishes to Redis
+- subscribing:
+  - the first local subscriber triggers:
+    - creation of a Redis subscriber
+    - `SUBSCRIBE pipeline:events:{projectId}`
+    - for each message:
+      - parse JSON payload into `OrchestrationEmitEvent`
+      - emit into local emitter
 
-Output:
-- requirements object
-
-Storage:
-- `project_sessions.requirements`
-- `project_events`
-- `project_blackboards`
-
-### 14.2 Clarification stage
-Input:
-- requirements
-- prior answers
-
-Output:
-- questions or clarified result
-
-Storage:
-- `project_sessions.clarifications`
-- `project_events`
-
-### 14.3 Confirmation stage
-Input:
-- clarification output
-
-Output:
-- approved execution gate
-
-Storage:
-- `project_sessions.confirmation`
-
-### 14.4 System design stage
-Input:
-- requirements
-- project spec
-
-Output:
-- system design JSON
-
-Storage:
-- `project_sessions.system_design`
-
-### 14.5 UI spec stage
-Input:
-- system design
-- requirements
-
-Output:
-- UI spec / structured spec
-
-Storage:
-- `project_sessions.ui_spec`
-- `project_sessions.structured_spec`
-
-### 14.6 Blueprint stage
-Input:
-- requirements
-- system design
-- UI spec
-
-Output:
-- blueprint JSON
-
-Storage:
-- `project_sessions.blueprint`
-
-### 14.7 Code generation stage
-Input:
-- blueprint
-- system design
-- UI spec
-- requirements
-
-Output:
-- file map
-- patch
-- task queue
-
-Storage:
-- `project_sessions.code_gen`
-- `project_code_revisions`
-
-### 14.8 Test and fix stage
-Input:
-- generated file map
-- workspace path
-
-Output:
-- build result
-- logs
-- repaired files
-
-Storage:
-- `project_sessions.test_result`
-- `project_events`
-
-### 14.9 Deployment stage
-Input:
-- build output
-- backend output
-- workspace path
-
-Output:
-- deployment URLs
-- provider metadata
-
-Storage:
-- `project_sessions.deployment`
-- `project_deployments`
+### 9.2 Failure mode
+If Redis is disabled/unavailable:
+- hub still works for a single instance (local emitter only)
+- cross-instance fanout will not work
 
 ---
 
-## 15. Backend Data Model
+## 10. Recovery & Resume (Crash Resilience)
 
-### 15.1 `users`
-Purpose:
-- authenticated user identity
+### 10.1 Startup resume scan
+`backend/src/orchestration/pipelineResume.ts`:
+- reads sessions where status is `active`/`recovering` and current step is non-interactive
+- uses `pipelineHub.forceAcquire(projectId)`
+- calls `runAIOrchestration` with:
+  - `step` from latest checkpoint / DB
+  - `recoveryContextSnapshot` from checkpoint context snapshot
+  - `recoveryFsmState` from checkpoint `fsm_state`
 
-Fields:
-- id
-- name
-- email
-- password_hash
-- created_at
-
-### 15.2 `auth_sessions`
-Purpose:
-- login session storage
-
-Fields:
-- id
-- user_id
-- token_hash
-- ip_address
-- user_agent
-- created_at
-- expires_at
-- revoked_at
-
-### 15.3 `project_sessions`
-Purpose:
-- main orchestration state
-
-Fields:
-- id
-- user_id
-- status
-- current_step
-- progress
-- active_revision_id
-- revision_lock_owner
-- revision_lock_expires_at
-- requirements
-- clarifications
-- confirmation
-- system_design
-- ui_spec
-- structured_spec
-- blueprint
-- task_queue
-- terminal_logs
-- code_gen
-- test_result
-- deployment
-- created_at
-- last_active_at
-
-### 15.4 `project_blackboards`
-Purpose:
-- current snapshot of a project session
-
-Fields:
-- id
-- project_id
-- user_id
-- state
-- created_at
-- updated_at
-
-### 15.5 `project_tasks`
-Purpose:
-- generation task queue persistence
-
-Fields:
-- id
-- project_id
-- user_id
-- phase
-- action
-- file_path
-- status
-- priority
-- attempt_count
-- payload
-- error_log
-- created_at
-- updated_at
-
-### 15.6 `project_events`
-Purpose:
-- event log for WebSocket and orchestration messages
-
-Fields:
-- id
-- project_id
-- user_id
-- event_type
-- role
-- message
-- payload
-- created_at
-
-### 15.7 `project_deployments`
-Purpose:
-- deployment metadata
-
-Fields:
-- id
-- project_id
-- user_id
-- frontend_url
-- backend_url
-- vercel_deployment_id
-- vercel_inspect_url
-- vercel_status
-- vercel_log_url
-- railway_deployment_id
-- railway_status
-- railway_log_url
-- railway_dashboard_url
-- code_revision_id
-- source_archive_path
-- source_hash
-- raw_payload
-- created_at
-
-### 15.8 `project_code_revisions`
-Purpose:
-- source archive metadata for a generated revision
-
-Fields:
-- id
-- project_id
-- user_id
-- workspace_path
-- source_archive_path
-- source_hash
-- patch_path
-- patch_applied
-- patch_apply_log
-- generation_payload
-- created_at
+### 10.2 Checkpoint short-circuit
+In `backend/src/ai/orchestrator/orchestrator.ts` → `stageWrap()`:
+- computes `inputHash` from stage + input + memory identifiers
+- if a checkpoint exists with same stage and inputHash and output exists:
+  - returns success immediately (resume)
+- otherwise continues execution.
 
 ---
 
-## 16. Redis Design
+## 11. Token Budget & Loop Protection
 
-Redis is only for transient data.
+### 11.1 Budget controller
+- `backend/src/utils/tokenBudget.ts` implements in-memory budget map per `projectId`
+- `backend/src/agents/llmProxyClient.ts`
+  - enforces budget per call via `enforceBudgetOrThrow(projectId, max_tokens)`
+- orchestrator error handling:
+  - if error message is `"Budget Exceeded"`, orchestrator:
+    - persists a checkpoint (best-effort)
+    - returns a `failed` StageResult (deterministic terminal failure)
 
-### Allowed
-- session state
-- pipeline state
-- temporary coordination
-- temporary deployment status cache
-
-### Forbidden
-- generated source code
-- permanent history
-- deployment source of truth
-- archived build artifacts
-
-### Keying pattern
-- `session:{sessionId}:status`
-- `project:{projectId}:pipeline`
-- `project:{projectId}:temp:*`
+### 11.2 Circuit breaker
+- `backend/src/agents/testFixAgent.ts`
+  - loops bounded by max attempts and staging checks
 
 ---
 
-## 17. Workspace Materialization Flow
+## 12. Execution Isolation: Sandbox / Build Worker
 
-### 17.1 Workspace creation
-- sanitize `projectId`
-- create `/tmp/project-{projectId}`
-- ensure parent directories exist
-- copy templates
+### 12.1 Workspace materialization
+`backend/src/factory/projectFactory.ts`:
+- creates unique workspace root:
+  - `/tmp/workspaces/{sanitizedProjectId}-{revisionId}`
+- copies a valid starter template into workspace root
+- writes generated files:
+  - `scopeGeneratedPath()` ensures bare paths land under `frontend/`
+  - prevents writing `..` or forbidden segments
+- legacy normalization:
+  - ensures TypeScript-only backend expected by build worker pre-validation
 
-### 17.2 File write flow
-- write generated files only
-- validate paths
-- prevent traversal
-- ensure no writes outside workspace
+### 12.2 Docker build/test execution
+`backend/src/workers/buildWorker.ts`:
+- validates generated project required file presence
+- runs commands through `docker run`:
+  - bind mounts workspaceRoot into `/workspace`
+  - runs `npm install`/`npm run build`/`npm test` where scripts exist
+  - enforces timeout (hard kill)
+  - streams stdout/stderr chunks via callback
 
-### 17.3 Archive flow
-- optionally apply patch
-- create source archive
-- compute source hash
-- persist revision metadata
-
-### 17.4 Cleanup flow
-- remove temporary workspace after deployment
-- keep only persisted metadata
-
----
-
-## 18. Build Worker Flow
-
-1. resolve workspace root
-2. verify it is under `/tmp`
-3. validate generated project files
-4. clean stale build outputs
-5. install frontend dependencies
-6. run frontend build
-7. run frontend tests if present
-8. install backend dependencies if backend exists
-9. run backend build if build script exists
-10. run backend tests if present
-11. return build directories
-
-### Build safety rules
-- never operate on base app source
-- never scan unrelated repository files
-- never permit traversal outside workspace
-- fail closed on invalid workspace structure
+### 12.3 Filesystem boundary rules
+- buildWorker refuses to operate outside `/tmp` parent
+- buildWorker refuses writing outside workspaceRoot
+- docker container cannot access other host paths except bind-mounted `/workspace`
 
 ---
 
-## 19. Deployment Flow
+## 13. Deployment Model
 
-### 19.1 Frontend deployment
-- deploy build output to Vercel
-- derive project name from projectId
-- store deployment metadata
+Deployment is stage-driven in orchestrator:
+- `backend/src/ai/orchestrator/orchestrator.ts` → `deployment` stage
+- `backend/src/api/projectRoutes.ts` also provides `/redeploy`
 
-### 19.2 Backend deployment
-- run DB init SQL against shared PostgreSQL
-- deploy backend source to Railway
-- store backend metadata
+### 13.1 Revision archive strategy
+`projectFactory.ts` archives the workspace snapshot as:
+- `workspaceRoot/{revisionId}.tgz`
 
-### 19.3 Health probe
-- probe frontend URL after deployment
-- detect access protection
-- return warning if blocked by deployment protection
-
-### 19.4 Final output contract
-```json
-{
-  "projectId": "...",
-  "frontendUrl": "...",
-  "backendUrl": "..." 
-}
-```
-`backendUrl` may be `null` for frontend-only projects.
+`project_code_revisions` stores metadata enabling redeploy.
 
 ---
 
-## 20. Error Handling and Recovery
+## 14. HTTP API Contracts (Snapshot + Replay + Files)
 
-### 20.1 Error classification
-Typical categories:
-- parsing error
-- schema mismatch
-- missing data
-- semantic inconsistency
-- build error
-- deployment error
-- state transition error
-- access or authorization error
-- unknown error
+### 14.1 Project snapshot endpoint
+`GET /api/projects/:projectId/snapshot`
+Implemented in:
+- `backend/src/api/projectRoutes.ts`
 
-### 20.2 Recovery options
-- retry
-- repair
-- ask user
-- fallback
-- skip non-critical step
+Response shape:
+- `projectId`
+- `status` (from `project_sessions.status`)
+- `currentStep` (`project_sessions.current_step`)
+- `progress`
+- `activeAgent` (derived)
+- `files` (materialized file content derived from `file_generated` events)
+- `lastEventId` (latest event id in `project_events`)
 
-### 20.3 Recovery strategy
-The orchestrator decides recovery by:
-- error type
-- stage
-- retry count
-- whether user input is required
-- whether fallback is safe
+Auth:
+- requires valid session cookie (`requireUser`)
 
-### 20.4 Fail-closed rules
-- never deploy broken builds
-- never proceed with invalid blueprint
-- never mutate base app as a repair action
-- never continue after workspace safety violation
+### 14.2 Event replay endpoint
+`GET /api/projects/:projectId/events`
+Implemented in:
+- `backend/src/api/projectRoutes.ts`
 
----
-
-## 21. Consistency Rules
-
-The system validates consistency across stages.
-
-### Checks
-- requirements pages are reflected in system design
-- UI spec components are present in blueprint
-- blueprint file registry includes required files
-- generated code includes required frontend and backend scaffolds
-- App imports resolve to generated components
-- backend routes are project scoped
-- database queries include `project_id`
-- generated backend files are TypeScript-only
-- page labels are normalized before comparison
-
----
-
-## 22. Cross-Component Communication Matrix
-
-| Component | Sends To | Data Sent |
-|---|---|---|
-| Frontend SPA | WebSocket Gateway | user message, clarification answer, modification request |
-| Frontend SPA | HTTP API | project history, project selection, auth calls |
-| WebSocket Gateway | Orchestrator | user request context, project/session identity |
-| Orchestrator | Requirement Agent | raw user requirement |
-| Orchestrator | Clarification Agent | requirements, prior answers |
-| Orchestrator | Confirmation Gate | clarification state |
-| Orchestrator | System Design Agent | requirements, project spec |
-| Orchestrator | UI Spec Agent | system design, requirements |
-| Orchestrator | Blueprint Agent | requirements, system design, UI spec |
-| Orchestrator | Code Generation Agent | blueprint, UI spec, system design |
-| Orchestrator | Workspace Materializer | generated file map, patch |
-| Orchestrator | Build Worker | workspace path |
-| Orchestrator | Deployment Agent | build output, revision metadata |
-| Build Worker | Package Managers | install/build/test commands |
-| Deployment Agent | Vercel | frontend build directory |
-| Deployment Agent | Railway | backend source directory |
-| Project Store | DB | events, snapshots, tasks, deployments |
-| Redis | Orchestrator | transient progress/state cache |
-
----
-
-## 23. What Data Each Agent Uses
-
-### Requirement analysis
 Uses:
-- user text
+- `getProjectEvents` or cursor-based `getProjectEventsAfterEventId`
 
-Produces:
-- structured requirements
+Contract:
+- deterministic ordering by `(created_at, id)`
 
-### Clarification
-Uses:
-- requirements
-- asked questions
-- answers
-- modification context
+Auth:
+- requires valid session cookie
 
-Produces:
-- questions or confirmed clarification
-
-### System design
-Uses:
-- requirements
-- project spec
-
-Produces:
-- architecture JSON
-
-### UI spec
-Uses:
-- requirements
-- system design
-- project spec
-
-Produces:
-- component and navigation spec
-
-### Blueprint
-Uses:
-- requirements
-- system design
-- UI spec
-- project spec
-
-Produces:
-- validated file and route blueprint
-
-### Code generation
-Uses:
-- blueprint
-- UI spec
-- system design
-- requirements
-- project spec
-
-Produces:
-- generated file map
-- patch
-- task queue
-
-### Test/fix
-Uses:
-- workspace files
-- build logs
-- generated file set
-
-Produces:
-- repaired files
-- success/failure logs
-
-### Deployment
-Uses:
-- build output
-- backend source
-- workspace path
-- project/revision metadata
-
-Produces:
-- deployment URLs
-- provider IDs
-- warnings
+### 14.3 File content endpoint
+`GET /api/projects/:projectId/files?path=...`
+- prefers latest `file_generated` event payload
+- fallback to `code_gen` stored in snapshot
 
 ---
 
-## 24. Safety Guarantees
+## 15. Frontend Hydration / Reconnection Contracts
+
+Implemented in:
+- `frontend/src/components/ChatWorkspace.jsx`
+
+### 15.1 Reconnect algorithm
+1. reset local state
+2. call snapshot endpoint:
+   - `/api/projects/:projectId/snapshot`
+3. render coarse UI state:
+   - status, progress, currentStep
+4. replay only the tail:
+   - `/api/projects/:projectId/events?afterEventId={snapshot.lastEventId}&limit=1000`
+5. upsert generated files from `file_generated` events in tail
+6. dedupe messages by `(role, text)`
+
+This ensures:
+- no missing messages
+- no duplicated messages after reconnect
+
+---
+
+## 16. Error Handling, Self-Heal & Recovery
+
+### 16.1 Error classification
+`backend/src/ai/orchestrator/errorClassifier.ts`
+maps errors into:
+- parsing/schema/semantic/build/deployment/state transition/auth/etc.
+
+### 16.2 Recovery strategies
+`backend/src/ai/orchestrator/recovery.ts`:
+- defines `retry`, `repair`, `ask_user`, `fallback`, `skip`
+
+`backend/src/ai/orchestrator/orchestrator.ts` applies:
+- ask user:
+  - produces `needs_input` / `needs_fix` and pauses (confirmation/clarification gates)
+- repair:
+  - re-enters relevant stage
+- Budget Exceeded:
+  - deterministic terminal failure
+
+### 16.3 Blueprint/codegen self-heal
+Orchestrator replays:
+- system_design / ui_spec with injected hints when blueprint fails due to structural mismatches
+bounded by `maxDesignFeedbackLoops`
+
+---
+
+## 17. Configuration, Security & Threat Model
+
+### 17.1 WebSocket origin allowlist
+- `WS_ALLOWED_ORIGINS` in `backend/src/config/env.ts`
+
+### 17.2 Auth cookie model
+- HttpOnly cookie `sid`
+- token hashed in DB (`authService.ts`)
+- revoked sessions are rejected
+
+### 17.3 Input sanitization
+- sanitize strips HTML tags, script tags, JS URL schemes
+- message size capped at 10KB
+
+### 17.4 Fail-closed rules for safety
+- workspace writes restricted to `/tmp/...` and validated path scoping
+- never ship raw huge `output` frames over WS for code generation; code is streamed as `file_generated` events
+
+---
+
+## 18. Known Critical Integration Points (LLD Review Checklist)
+
+A reviewer should inspect these boundaries carefully:
+
+1. **WebSocket**: `socket.ts` → `pipelineHub` subscription and event sending
+2. **Hub fanout**: `pipelineHub.ts` local emitter + Redis channel wiring
+3. **Durability**: `orchestrator.ts` checkpoint snapshot creation + `persistenceAdapter.ts` save/load
+4. **Replay**: `projectRoutes.ts` snapshot/events order + frontend replay cursor semantics
+5. **Build isolation**: `projectFactory.ts` path scoping + `buildWorker.ts` docker sandbox args
+6. **Consistency**: `projectConsistency.ts` report + self-heal repair patterns
+7. **Auth gating**: `requireUser` for snapshot/events/files endpoints
+
+---
+
+## 19. Final Summary / Invariants
 
 The system enforces:
 
-- no generated code is written into the base app repo
-- no generated code depends on base app internals
-- no cross-session source sharing
-- no database access without `project_id`
-- no deployment without successful validation/build
-- no state machine jump without explicit transition
-- no workspace writes outside `/tmp/project-{projectId}`
-- no permanent storage of generated source in Redis
-
----
-
-## 25. Known Critical Integration Points
-
-These are the places a reviewer should inspect closely:
-
-1. **Socket server ↔ project session store**
-2. **Orchestrator ↔ state machine**
-3. **Blueprint ↔ code generation contract**
-4. **Code generation ↔ materializer**
-5. **Materializer ↔ build worker**
-6. **Build worker ↔ deployment agent**
-7. **Deployment agent ↔ PostgreSQL/Railway/Vercel**
-8. **Event persistence ↔ WebSocket send wrapper**
-9. **Project consistency ↔ generated file set**
-10. **Workspace cleanup ↔ post-deployment completion**
-
----
-
-## 26. Final Summary
-
-The architecture is a fully isolated, session-aware, self-healing generation pipeline.
-
-The most important system invariants are:
-
-- the base app is immutable during project generation
+- base app (control plane) remains immutable during generation
 - generated projects are ephemeral and project-scoped
-- all generated code is in-memory first
-- workspace materialization only occurs under `/tmp/project-{projectId}`
-- all persistent project data is scoped by `project_id`
-- build, validation, and deployment operate only on generated artifacts
-- failures are classified and recovered without crashing the pipeline
-
-This document should be used as the implementation reference for runtime behavior, control flow, persistence, and deployment isolation.
+- persistence is audit-friendly:
+  - checkpoint snapshots for resume
+  - append-only event log for replay
+- frontend reconnect is snapshot-first and tail replay by `lastEventId`
+- build/test runs in a Docker-sandboxed environment
+- cross-instance streaming works via Redis Pub/Sub fanout (when Redis configured)
+- budget/loop protections prevent runaway orchestration

@@ -3,22 +3,63 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { debug } from '../utils/logger';
 
-type BuildWorkerPayload = {
+export type ExecutionRunLogSink = (chunk: string) => void;
+
+export type ExecutionRunRequest = {
   workspaceRoot?: string;
   workspaceDir?: string;
+  /**
+   * Log streaming sink. buildWorker will forward both stdout/stderr chunks.
+   */
+  onLog?: ExecutionRunLogSink;
 };
 
-type ValidationResult = { valid: boolean; errors: string[] };
-
-type BuildWorkerResult = {
+export type ExecutionRunResponse = {
   success: boolean;
   logs: string;
   buildDir?: string;
   backendDir?: string;
 };
 
+type ValidationResult = { valid: boolean; errors: string[] };
+
+// Backwards-compatible internal aliases
+type BuildWorkerPayload = ExecutionRunRequest;
+type BuildWorkerResult = ExecutionRunResponse;
+
+const DOCKER_NODE_IMAGE = 'node:20-bookworm';
+
 function resolveWorkspaceRoot(payload: BuildWorkerPayload): string | undefined {
   return payload.workspaceRoot || payload.workspaceDir;
+}
+
+async function isDockerAvailable(timeoutMs: number): Promise<{ available: boolean; reason?: string }> {
+  return new Promise((resolve) => {
+    const child = spawn('docker', ['info'], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    let stderr = '';
+    let stdout = '';
+
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve({ available: false, reason: `Timed out running "docker info" after ${timeoutMs}ms` });
+    }, timeoutMs);
+
+    child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolve({ available: false, reason: `Failed to spawn docker: ${String(err)}` });
+    });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) return resolve({ available: true });
+      const hint = stderr.trim() || stdout.trim() || `exitCode=${code}`;
+      resolve({ available: false, reason: `docker info failed: ${hint}` });
+    });
+  });
 }
 
 function assertInsideProjectsRoot(workspaceRoot: string): void {
@@ -109,21 +150,65 @@ async function cleanStaleDist(workspaceRoot: string): Promise<void> {
   ]);
 }
 
-function runCommand(command: string, args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; output: string }> {
+function runCommand(
+  command: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+  onLog?: (chunk: string) => void
+): Promise<{ code: number; output: string }> {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Phase 2 sandboxing: run build/test commands in a container.
+    // We mount only the workspaceRoot (parent of cwd) into /workspace.
+    // That blocks container access to other host filesystem paths.
+    const workspaceRoot = path.resolve(cwd, '..');
+    const mountRoot = workspaceRoot;
+
+    // Ensure we still only operate under /tmp (defense in depth).
+    assertInsideProjectsRoot(mountRoot);
+
+    const rel = path.relative(workspaceRoot, cwd).replace(/\\/g, '/');
+    const dockerWorkdir = rel ? `/workspace/${rel}` : '/workspace';
+
+    const dockerArgs = [
+      'run',
+      '--rm',
+      '--network',
+      'none',
+      '--security-opt',
+      'no-new-privileges',
+      '--cap-drop',
+      'ALL',
+      '--pids-limit',
+      '256',
+      '-v',
+      `${mountRoot}:/workspace:rw`,
+      '-w',
+      dockerWorkdir,
+      DOCKER_NODE_IMAGE,
+      command,
+      ...args,
+    ];
+
     let output = '';
-    console.log(`[buildWorker] cwd=${cwd}`);
+    console.log(`[buildWorker] docker cmd=${command} cwd=${cwd} workdir=${dockerWorkdir}`);
+
+    const child = spawn('docker', dockerArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       resolve({ code: 124, output: `${output}\nTimed out after ${timeoutMs}ms` });
     }, timeoutMs);
 
     child.stdout.on('data', (chunk) => {
-      output += String(chunk);
+      const str = String(chunk);
+      output += str;
+      onLog?.(str);
     });
     child.stderr.on('data', (chunk) => {
-      output += String(chunk);
+      const str = String(chunk);
+      output += str;
+      onLog?.(str);
     });
 
     child.on('close', (code) => {
@@ -150,31 +235,37 @@ async function hasTestScript(workspaceDir: string): Promise<boolean> {
   }
 }
 
-async function installDependencies(workspaceDir: string): Promise<{ code: number; output: string }> {
+async function installDependencies(
+  workspaceDir: string,
+  onLog?: (chunk: string) => void
+): Promise<{ code: number; output: string }> {
   const lockPath = path.join(workspaceDir, 'package-lock.json');
   if (await fileExists(lockPath)) {
-    const ciResult = await runCommand('npm', ['ci', '--no-audit', '--no-fund'], workspaceDir, 5 * 60_000);
+    const ciResult = await runCommand('npm', ['ci', '--no-audit', '--no-fund'], workspaceDir, 5 * 60_000, onLog);
     if (ciResult.code === 0) return ciResult;
-    const fallbackResult = await runCommand('npm', ['install', '--no-audit', '--no-fund'], workspaceDir, 5 * 60_000);
+    const fallbackResult = await runCommand('npm', ['install', '--no-audit', '--no-fund'], workspaceDir, 5 * 60_000, onLog);
     return {
       code: fallbackResult.code,
       output: `${ciResult.output.trim()}\n\n--- npm ci failed, falling back to npm install ---\n\n${fallbackResult.output.trim()}`,
     };
   }
-  return runCommand('npm', ['install', '--no-audit', '--no-fund'], workspaceDir, 5 * 60_000);
+  return runCommand('npm', ['install', '--no-audit', '--no-fund'], workspaceDir, 5 * 60_000, onLog);
 }
 
-async function runFrontendTypeCheck(workspaceDir: string): Promise<{ code: number; output: string }> {
+async function runFrontendTypeCheck(
+  workspaceDir: string,
+  onLog?: (chunk: string) => void
+): Promise<{ code: number; output: string }> {
   const packageJsonPath = path.join(workspaceDir, 'package.json');
   try {
     const raw = await fs.readFile(packageJsonPath, 'utf8');
     const pkg = JSON.parse(raw) as { scripts?: Record<string, string>; dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
     if (pkg.scripts?.['type-check']) {
-      return runCommand('npm', ['run', 'type-check'], workspaceDir, 5 * 60_000);
+      return runCommand('npm', ['run', 'type-check'], workspaceDir, 5 * 60_000, onLog);
     }
     const tsconfigPath = path.join(workspaceDir, 'tsconfig.json');
     if (await fileExists(tsconfigPath) || pkg.devDependencies?.typescript || pkg.dependencies?.typescript) {
-      return runCommand('npx', ['tsc', '--noEmit'], workspaceDir, 5 * 60_000);
+      return runCommand('npx', ['tsc', '--noEmit'], workspaceDir, 5 * 60_000, onLog);
     }
   } catch {
     // Fall back gracefully when package.json is missing or malformed.
@@ -182,15 +273,22 @@ async function runFrontendTypeCheck(workspaceDir: string): Promise<{ code: numbe
   return { code: 0, output: '' };
 }
 
-async function buildWorkspace(workspaceDir: string): Promise<{ code: number; output: string }> {
-  return runCommand('npm', ['run', 'build'], workspaceDir, 5 * 60_000);
+async function buildWorkspace(
+  workspaceDir: string,
+  onLog?: (chunk: string) => void
+): Promise<{ code: number; output: string }> {
+  return runCommand('npm', ['run', 'build'], workspaceDir, 5 * 60_000, onLog);
 }
 
-async function testWorkspace(workspaceDir: string): Promise<{ code: number; output: string }> {
-  return runCommand('npm', ['test', '--', '--watch=false'], workspaceDir, 5 * 60_000);
+async function testWorkspace(
+  workspaceDir: string,
+  onLog?: (chunk: string) => void
+): Promise<{ code: number; output: string }> {
+  return runCommand('npm', ['test', '--', '--watch=false'], workspaceDir, 5 * 60_000, onLog);
 }
 
 export async function runBuildWorker(payload: BuildWorkerPayload): Promise<BuildWorkerResult> {
+  const onLog = payload.onLog;
   const workspaceRoot = resolveWorkspaceRoot(payload);
   if (!workspaceRoot) {
     return { success: false, logs: 'workspaceRoot is required for real build/test execution.' };
@@ -200,6 +298,24 @@ export async function runBuildWorker(payload: BuildWorkerPayload): Promise<Build
 
   const logs: string[] = [];
   logs.push(`[buildWorker] workspaceRoot=${workspaceRoot}`);
+
+  // Sandbox validation: Docker-in-Docker (DinD) is required for containerized builds.
+  // Many PaaS environments (e.g. Railway/Vercel) disallow nested Docker.
+  const dockerCheck = await isDockerAvailable(7_500);
+  if (!dockerCheck.available) {
+    const reason = dockerCheck.reason || 'docker not available';
+    const msg =
+      `[buildWorker] Sandbox validation failed: docker is unavailable.\n\n` +
+      `Reason: ${reason}\n\n` +
+      `This platform likely does not support "docker run" inside your running container.\n` +
+      `Fix options:\n` +
+      `  1) Deploy the backend on a VPS/host where Docker socket access is allowed\n` +
+      `  2) Replace the Docker sandbox with a non-Docker sandbox strategy (restricted Node VM / Worker Thread)\n` +
+      `  3) Or document/guard DinD requirements at deploy time.`;
+
+    logs.push(msg);
+    return { success: false, logs: logs.join('\n\n') };
+  }
 
   const validation = await validateGeneratedProject(workspaceRoot);
   if (!validation.valid) {
@@ -222,25 +338,25 @@ export async function runBuildWorker(payload: BuildWorkerPayload): Promise<Build
   if (await fileExists(path.join(frontendDir, 'package.json'))) {
     logs.push(`[buildWorker] cwd=${frontendDir}`);
     logs.push(`[buildWorker] Installing frontend dependencies in ${frontendDir}`);
-    const installResult = await installDependencies(frontendDir);
+    const installResult = await installDependencies(frontendDir, onLog);
     logs.push('$ npm install (frontend)');
     logs.push(installResult.output.trim());
     if (installResult.code !== 0) return { success: false, logs: logs.join('\n\n') };
 
-    const typeCheckResult = await runFrontendTypeCheck(frontendDir);
+    const typeCheckResult = await runFrontendTypeCheck(frontendDir, onLog);
     if (typeCheckResult.code !== 0) {
       logs.push('$ npm run type-check (frontend)');
       logs.push(typeCheckResult.output.trim());
       return { success: false, logs: logs.join('\n\n') };
     }
 
-    const buildResult = await buildWorkspace(frontendDir);
+    const buildResult = await buildWorkspace(frontendDir, onLog);
     logs.push('$ npm run build (frontend)');
     logs.push(buildResult.output.trim());
     if (buildResult.code !== 0) return { success: false, logs: logs.join('\n\n') };
 
     if (await hasTestScript(frontendDir)) {
-      const testResult = await testWorkspace(frontendDir);
+      const testResult = await testWorkspace(frontendDir, onLog);
       logs.push('$ npm test -- --watch=false (frontend)');
       logs.push(testResult.output.trim());
       if (testResult.code !== 0) return { success: false, logs: logs.join('\n\n') };
@@ -257,7 +373,7 @@ export async function runBuildWorker(payload: BuildWorkerPayload): Promise<Build
   if (await fileExists(path.join(backendDir, 'package.json'))) {
     logs.push(`[buildWorker] cwd=${backendDir}`);
     logs.push(`[buildWorker] Installing backend dependencies in ${backendDir}`);
-    const installResult = await installDependencies(backendDir);
+    const installResult = await installDependencies(backendDir, onLog);
     logs.push('$ npm install (backend)');
     logs.push(installResult.output.trim());
     if (installResult.code !== 0) return { success: false, logs: logs.join('\n\n') };
@@ -266,7 +382,7 @@ export async function runBuildWorker(payload: BuildWorkerPayload): Promise<Build
       const raw = await fs.readFile(path.join(backendDir, 'package.json'), 'utf8');
       const pkg = JSON.parse(raw) as { scripts?: Record<string, string> };
       if (pkg.scripts?.build) {
-        const buildResult = await buildWorkspace(backendDir);
+        const buildResult = await buildWorkspace(backendDir, onLog);
         logs.push('$ npm run build (backend)');
         logs.push(buildResult.output.trim());
         if (buildResult.code !== 0) return { success: false, logs: logs.join('\n\n') };
@@ -278,7 +394,7 @@ export async function runBuildWorker(payload: BuildWorkerPayload): Promise<Build
     }
 
     if (await hasTestScript(backendDir)) {
-      const testResult = await testWorkspace(backendDir);
+      const testResult = await testWorkspace(backendDir, onLog);
       logs.push('$ npm test -- --watch=false (backend)');
       logs.push(testResult.output.trim());
       if (testResult.code !== 0) return { success: false, logs: logs.join('\n\n') };

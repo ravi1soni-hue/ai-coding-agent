@@ -1,6 +1,6 @@
 import crypto from 'crypto';
-import { pgQuery } from './postgres';
-import type { OrchestrationCheckpoint, OrchestrationIssue } from '../ai/contracts/orchestration';
+import { pgQuery, pgTransaction } from './postgres';
+import type { OrchestrationCheckpoint, OrchestrationFsmState, OrchestrationIssue } from '../ai/contracts/orchestration';
 
 export type ProjectHistoryRow = {
   id: string;
@@ -367,21 +367,99 @@ export async function getProjectEvents(input: {
   limit?: number;
 }) {
   const rows = await pgQuery<{
+    id: string;
     event_type: string;
     role: string | null;
     message: string | null;
     payload: any;
     created_at: string;
   }>(
-    `SELECT event_type, role, message, payload, created_at
+    `SELECT id, event_type, role, message, payload, created_at
      FROM project_events
      WHERE user_id = $1 AND project_id = $2
-     ORDER BY created_at ASC
+     ORDER BY created_at ASC, id ASC
      LIMIT $3`,
     [input.userId, input.projectId, input.limit ?? 500],
   );
 
   return rows;
+}
+
+export async function getLatestProjectEventId(input: { userId: string; projectId: string }): Promise<string | null> {
+  const rows = await pgQuery<{ id: string }>(
+    `SELECT id
+     FROM project_events
+     WHERE user_id = $1 AND project_id = $2
+     ORDER BY created_at DESC, id DESC
+     LIMIT 1`,
+    [input.userId, input.projectId],
+  );
+  return rows[0]?.id ?? null;
+}
+
+export async function getProjectEventsAfterEventId(input: {
+  userId: string;
+  projectId: string;
+  afterEventId: string;
+  limit?: number;
+}) {
+  // Deterministic cursor: we order by (created_at, id).
+  // This avoids missing/duplicated events when multiple rows share the same created_at.
+  const rows = await pgQuery<{
+    id: string;
+    event_type: string;
+    role: string | null;
+    message: string | null;
+    payload: any;
+    created_at: string;
+  }>(
+    `WITH cursor AS (
+       SELECT created_at, id
+       FROM project_events
+       WHERE user_id = $1 AND project_id = $2 AND id = $3
+       LIMIT 1
+     )
+     SELECT pe.id, pe.event_type, pe.role, pe.message, pe.payload, pe.created_at
+     FROM project_events pe
+     LEFT JOIN cursor c ON TRUE
+     WHERE pe.user_id = $1
+       AND pe.project_id = $2
+       AND c.created_at IS NOT NULL
+       AND (pe.created_at > c.created_at OR (pe.created_at = c.created_at AND pe.id > c.id))
+     ORDER BY pe.created_at ASC, pe.id ASC
+     LIMIT $4`,
+    [input.userId, input.projectId, input.afterEventId, input.limit ?? 500],
+  );
+
+  return rows;
+}
+
+export async function getMaterializedProjectFilesFromEvents(input: { userId: string; projectId: string; limit?: number }) {
+  const rows = await pgQuery<{
+    payload: any;
+  }>(
+    `SELECT payload
+     FROM project_events
+     WHERE user_id = $1 AND project_id = $2 AND event_type = 'file_generated'
+     ORDER BY created_at ASC
+     LIMIT $3`,
+    [input.userId, input.projectId, input.limit ?? 5000],
+  );
+
+  const byPath = new Map<string, { path: string; content: string; lines?: number; bytes?: number }>();
+  for (const r of rows) {
+    const payload = r.payload ?? {};
+    const path = typeof payload.path === 'string' ? payload.path : typeof payload.filePath === 'string' ? payload.filePath : null;
+    if (!path) continue;
+
+    const content = typeof payload.content === 'string' ? payload.content : '';
+    const lines = typeof payload.lines === 'number' ? payload.lines : undefined;
+    const bytes = typeof payload.bytes === 'number' ? payload.bytes : undefined;
+
+    byPath.set(path, { path, content, lines, bytes });
+  }
+
+  return Array.from(byPath.values());
 }
 
 export async function getProjectSnapshot(input: { userId: string; projectId: string }) {
@@ -409,6 +487,119 @@ export async function getProjectSnapshot(input: { userId: string; projectId: str
   );
 
   return rows[0] ?? null;
+}
+
+export async function getAtomicProjectSnapshot(input: {
+  userId: string;
+  projectId: string;
+  limitFiles?: number;
+}): Promise<{
+  snapshot: {
+    status: string;
+    current_step: string | null;
+    progress: number;
+    requirements: any;
+    clarifications: any;
+    confirmation: any;
+    system_design: any;
+    ui_spec: any;
+    structured_spec: any;
+    code_gen: any;
+    test_result: any;
+    deployment: any;
+  };
+  lastEventId: string | null;
+  files: Array<{ path: string; content: string; lines?: number; bytes?: number }>;
+}> {
+  const filesLimit = input.limitFiles ?? 5000;
+
+  return pgTransaction(async (client) => {
+    const snapshotRows = await client.query<{
+      id: string;
+      status: string;
+      current_step: string | null;
+      progress: number;
+      requirements: any;
+      clarifications: any;
+      confirmation: any;
+      system_design: any;
+      ui_spec: any;
+      structured_spec: any;
+      code_gen: any;
+      test_result: any;
+      deployment: any;
+    }>(
+      `SELECT id, status, current_step, progress, requirements, clarifications, confirmation,
+              system_design, ui_spec, structured_spec, code_gen, test_result, deployment
+       FROM project_sessions
+       WHERE id = $1 AND user_id = $2
+       LIMIT 1`,
+      [input.projectId, input.userId],
+    );
+
+    const snapshotRow = snapshotRows.rows[0];
+    if (!snapshotRow) {
+      throw new Error('Project snapshot not found');
+    }
+
+    const lastEventRows = await client.query<{ id: string }>(
+      `SELECT id
+       FROM project_events
+       WHERE user_id = $1 AND project_id = $2
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`,
+      [input.userId, input.projectId],
+    );
+
+    const lastEventId = lastEventRows.rows[0]?.id ?? null;
+
+    const filesRows = await client.query<{ payload: any }>(
+      `SELECT payload
+       FROM project_events
+       WHERE user_id = $1 AND project_id = $2 AND event_type = 'file_generated'
+       ORDER BY created_at ASC
+       LIMIT $3`,
+      [input.userId, input.projectId, filesLimit],
+    );
+
+    const byPath = new Map<string, { path: string; content: string; lines?: number; bytes?: number }>();
+    for (const r of filesRows.rows) {
+      const payload = r.payload ?? {};
+      const path =
+        typeof payload.path === 'string'
+          ? payload.path
+          : typeof payload.filePath === 'string'
+            ? payload.filePath
+            : null;
+      if (!path) continue;
+
+      const content = typeof payload.content === 'string' ? payload.content : '';
+      const lines = typeof payload.lines === 'number' ? payload.lines : undefined;
+      const bytes = typeof payload.bytes === 'number' ? payload.bytes : undefined;
+
+      // Deterministically last-write-wins within the materialized ordering.
+      byPath.set(path, { path, content, lines, bytes });
+    }
+
+    return {
+      snapshot: {
+        status: snapshotRow.status,
+        current_step: snapshotRow.current_step,
+        progress: snapshotRow.progress,
+        requirements: snapshotRow.requirements,
+        clarifications: snapshotRow.clarifications,
+        confirmation: snapshotRow.confirmation,
+        system_design: snapshotRow.system_design,
+        ui_spec: snapshotRow.ui_spec,
+        structured_spec: snapshotRow.structured_spec,
+        code_gen: snapshotRow.code_gen,
+        test_result: snapshotRow.test_result,
+        deployment: snapshotRow.deployment,
+      },
+      lastEventId,
+      files: Array.from(byPath.values()),
+    };
+  });
 }
 
 /**
@@ -451,15 +642,21 @@ export async function saveProjectCheckpoint(input: {
   output: unknown;
   issues: OrchestrationIssue[];
   retryCount: number;
+
+  /** Phase 1 durability */
+  contextSnapshot?: unknown;
+  fsmState?: OrchestrationFsmState;
 }): Promise<void> {
   await pgQuery(
     `INSERT INTO project_checkpoints (
-      id, project_id, user_id, stage, input_hash, output, issues, retry_count
-    ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)
+      id, project_id, user_id, stage, input_hash, output, issues, retry_count, context_snapshot, fsm_state
+    ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb, $10)
     ON CONFLICT (project_id, stage, input_hash) DO UPDATE SET
       output = EXCLUDED.output,
       issues = EXCLUDED.issues,
       retry_count = EXCLUDED.retry_count,
+      context_snapshot = EXCLUDED.context_snapshot,
+      fsm_state = EXCLUDED.fsm_state,
       updated_at = NOW()`,
     [
       crypto.randomUUID(),
@@ -470,6 +667,8 @@ export async function saveProjectCheckpoint(input: {
       JSON.stringify(input.output ?? null),
       JSON.stringify(input.issues ?? []),
       input.retryCount,
+      JSON.stringify(input.contextSnapshot ?? null),
+      input.fsmState ?? null,
     ],
   );
 }
@@ -482,6 +681,8 @@ export async function loadProjectCheckpoints(input: { projectId: string; userId:
     output: unknown;
     issues: OrchestrationIssue[];
     retry_count: number;
+    context_snapshot: unknown;
+    fsm_state: string | null;
     created_at: string;
     updated_at: string;
   }>(
@@ -492,6 +693,8 @@ export async function loadProjectCheckpoints(input: { projectId: string; userId:
       output,
       issues,
       retry_count,
+      context_snapshot,
+      fsm_state,
       created_at,
       updated_at
      FROM project_checkpoints
@@ -510,7 +713,58 @@ export async function loadProjectCheckpoints(input: { projectId: string; userId:
     output: r.output ?? undefined,
     issues: Array.isArray(r.issues) ? r.issues : [],
     retryCount: r.retry_count,
+    contextSnapshot: r.context_snapshot ?? undefined,
+    fsmState: (r.fsm_state as OrchestrationFsmState | null | undefined) ?? undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   }));
+}
+
+export async function getLatestProjectCheckpoint(input: { projectId: string; userId: string }): Promise<OrchestrationCheckpoint | null> {
+  const rows = await pgQuery<{
+    project_id: string;
+    stage: string;
+    input_hash: string;
+    output: unknown;
+    issues: OrchestrationIssue[];
+    retry_count: number;
+    context_snapshot: unknown;
+    fsm_state: string | null;
+    created_at: string;
+    updated_at: string;
+  }>(
+    `SELECT
+      project_id,
+      stage,
+      input_hash,
+      output,
+      issues,
+      retry_count,
+      context_snapshot,
+      fsm_state,
+      created_at,
+      updated_at
+     FROM project_checkpoints
+     WHERE project_id = $1 AND user_id = $2
+     ORDER BY updated_at DESC, created_at DESC
+     LIMIT 1`,
+    [input.projectId, input.userId],
+  );
+
+  const r = rows[0];
+  if (!r) return null;
+
+  return {
+    projectId: r.project_id,
+    sessionId: r.project_id,
+    stage: r.stage as OrchestrationCheckpoint['stage'],
+    inputHash: r.input_hash,
+    output: r.output ?? undefined,
+    issues: Array.isArray(r.issues) ? r.issues : [],
+    retryCount: r.retry_count,
+    contextSnapshot: r.context_snapshot ?? undefined,
+    fsmState: (r.fsm_state as OrchestrationFsmState | null | undefined) ?? undefined,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
 }

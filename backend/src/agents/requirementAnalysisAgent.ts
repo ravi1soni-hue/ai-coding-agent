@@ -164,12 +164,12 @@ function transitionTo(currentState: string, nextState: string): string {
   return normalizedNext;
 }
 
-export async function requirementAnalysisAgent(input: { user_message: string; globalState?: BrainState; activeState?: string }): Promise<StateAwareAgentResult<RequirementAnalysisOutput>> {
+export async function requirementAnalysisAgent(input: { user_message: string; projectId?: string; globalState?: BrainState; activeState?: string }): Promise<StateAwareAgentResult<RequirementAnalysisOutput>> {
   debug('requirementAnalysisAgent', { input });
   try {
     if (!input?.user_message) throw new Error('user_message required');
     const { model, apiKey } = getModelConfigForTask('core_reasoning');
-    const llmProxy = new LLMProxyClient({ apiKey });
+    const llmProxy = new LLMProxyClient({ apiKey, projectId: input.projectId });
     const activeState = String(input.activeState || input.globalState?.activeState || 'requirements');
     if (activeState !== 'requirements') {
       return {

@@ -194,16 +194,27 @@ async function loadSnapshotInto(scope: AdapterScope): Promise<ProjectMemory | nu
 }
 
 async function writeEvent(scope: AdapterScope, event: OrchestrationEvent): Promise<void> {
-  const payload = event.type === 'stage_complete' && event.payload && typeof event.payload === 'object'
-    ? { ...event.payload, output: undefined }
-    : event.payload;
+  // Persist `stage` in payload so REST /events replay can render the same stage
+  // semantics as live WS events.
+  const basePayload =
+    event.payload && typeof event.payload === 'object' ? { ...(event.payload as Record<string, unknown>) } : {};
+
+  if (event.type === 'stage_complete') {
+    // Avoid persisting huge outputs over the event log (code is streamed per-file).
+    if ('output' in basePayload) basePayload.output = undefined;
+  }
+
+  if (typeof (basePayload as Record<string, unknown>).stage !== 'string') {
+    (basePayload as Record<string, unknown>).stage = event.stage;
+  }
+
   await appendProjectEvent({
     projectId: scope.projectId,
     userId: scope.userId,
     eventType: event.type,
     role: 'system',
     message: event.message,
-    payload,
+    payload: basePayload,
   });
 }
 
@@ -261,6 +272,8 @@ export function createPersistenceAdapter(scope: AdapterScope): PersistenceAdapte
         output: checkpoint.output ?? null,
         issues: checkpoint.issues,
         retryCount: checkpoint.retryCount,
+        contextSnapshot: checkpoint.contextSnapshot,
+        fsmState: checkpoint.fsmState,
       }),
     loadCheckpoints: (projectId) =>
       loadProjectCheckpoints({

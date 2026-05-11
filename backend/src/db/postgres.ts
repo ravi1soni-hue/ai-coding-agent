@@ -1,5 +1,5 @@
 import { config } from '../config/env';
-import { Pool } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 
 let pool: Pool | null = null;
 
@@ -26,6 +26,21 @@ export async function pgQuery<T = any>(query: string, params?: any[]): Promise<T
   const client = getPgPool();
   const res = await client.query(query, params);
   return res.rows;
+}
+
+export async function pgTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await getPgPool().connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export async function closePostgres() {

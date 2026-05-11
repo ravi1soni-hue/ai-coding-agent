@@ -5,7 +5,15 @@ import {
   getOrCreateActiveProjectSession,
   touchProjectSession,
 } from '../auth/authService';
-import { getProjectEvents, getProjectSnapshot, getLatestProjectCodeRevision, listUserProjects, saveProjectDeployment } from '../db/projectStore';
+import {
+  getProjectEvents,
+  getProjectEventsAfterEventId,
+  getAtomicProjectSnapshot,
+  getProjectSnapshot,
+  getLatestProjectCodeRevision,
+  listUserProjects,
+  saveProjectDeployment,
+} from '../db/projectStore';
 import { runBuildWorker, cleanupWorkspace } from '../workers/buildWorker';
 import { deploymentAgent } from '../agents/deploymentAgent';
 import { getCacheJson, setCacheJson } from '../cache/redis';
@@ -60,10 +68,58 @@ export async function registerProjectRoutes(fastify: FastifyInstance) {
     if (!user) return;
     const params = req.params as { projectId: string };
     const projectId = params.projectId;
+
+    const query = req.query as { afterEventId?: string; limit?: number };
     const projects = await listUserProjects(user.id);
     if (!projects.some((p) => p.id === projectId)) return reply.status(404).send({ error: 'Project not found.' });
-    const events = await getProjectEvents({ userId: user.id, projectId, limit: 1000 });
+
+    const limit = typeof query.limit === 'number' ? query.limit : 1000;
+    if (query.afterEventId && typeof query.afterEventId === 'string') {
+      const events = await getProjectEventsAfterEventId({
+        userId: user.id,
+        projectId,
+        afterEventId: query.afterEventId,
+        limit,
+      });
+      return { events };
+    }
+
+    const events = await getProjectEvents({ userId: user.id, projectId, limit });
     return { events };
+  });
+
+  fastify.get('/api/projects/:projectId/snapshot', async (req, reply) => {
+    const user = await requireUser(req, reply);
+    if (!user) return;
+
+    const params = req.params as { projectId: string };
+    const projectId = params.projectId;
+
+    const projects = await listUserProjects(user.id);
+    if (!projects.some((p) => p.id === projectId)) return reply.status(404).send({ error: 'Project not found.' });
+
+    try {
+      const atomic = await getAtomicProjectSnapshot({ userId: user.id, projectId, limitFiles: 5000 });
+      return {
+        projectId,
+        status: atomic.snapshot.status,
+        currentStep: atomic.snapshot.current_step,
+        progress: atomic.snapshot.progress,
+        activeAgent: atomic.snapshot.current_step, // materialized from orchestrator's outer stage
+        files: atomic.files.map((f) => ({
+          path: f.path,
+          content: f.content,
+          lines: f.lines,
+          bytes: f.bytes,
+        })),
+        lastEventId: atomic.lastEventId,
+      };
+    } catch (err: any) {
+      if (String(err?.message || '').includes('Project snapshot not found')) {
+        return reply.status(404).send({ error: 'Project snapshot not found.' });
+      }
+      throw err;
+    }
   });
 
   fastify.get('/api/projects/:projectId/files', async (req, reply) => {

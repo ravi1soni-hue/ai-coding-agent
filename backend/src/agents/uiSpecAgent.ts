@@ -216,7 +216,7 @@ export async function uiSpecAgent(input: any): Promise<StateAwareAgentResult<Str
     }
 
     const { model, apiKey } = getModelConfigForTask('code_generation');
-    const llmProxy = new LLMProxyClient({ apiKey });
+    const llmProxy = new LLMProxyClient({ apiKey, projectId: input.projectId });
 
     const systemDesign = input.systemDesign;
     const requirements = input.requirements || {};

@@ -12,6 +12,7 @@ import type {
   OrchestrationEvent,
   OrchestrationIssue,
   OrchestrationState,
+  OrchestrationFsmState,
   ProjectMemory,
   RequirementsMemory,
   SystemDesignMemory,
@@ -84,7 +85,26 @@ export function recordFix(memory: ProjectMemory, stage: OrchestrationState, mess
   });
 }
 
-export function saveCheckpoint<T>(
+function deriveFsmState(stage: OrchestrationState): OrchestrationFsmState {
+  if (stage === 'failed') return 'FAILED';
+  if (stage === 'done') return 'COMPLETED';
+
+  if (stage === 'requirements') return 'ANALYZING';
+
+  if (stage === 'clarification' || stage === 'confirmation' || stage === 'modification') return 'CLARIFYING';
+
+  if (stage === 'system_design' || stage === 'ui_spec' || stage === 'blueprint') return 'DESIGNING';
+
+  if (stage === 'execution_plan' || stage === 'code_generation') return 'CODING';
+
+  if (stage === 'testing') return 'TESTING';
+
+  if (stage === 'deployment') return 'DEPLOYING';
+
+  return 'ANALYZING';
+}
+
+export function createCheckpointSnapshot<T>(
   memory: ProjectMemory,
   stage: OrchestrationState,
   inputHash: string,
@@ -92,6 +112,15 @@ export function saveCheckpoint<T>(
   issues: OrchestrationIssue[],
   retryCount: number
 ): OrchestrationCheckpoint<T> {
+  let contextSnapshot: unknown = undefined;
+  try {
+    contextSnapshot = JSON.parse(JSON.stringify(memory));
+  } catch {
+    // Best-effort: if serialization fails (should be rare), we still persist
+    // stage/inputHash/output/issues without the snapshot.
+    contextSnapshot = undefined;
+  }
+
   const checkpoint: OrchestrationCheckpoint<T> = {
     projectId: memory.projectId,
     sessionId: memory.sessionId,
@@ -102,7 +131,22 @@ export function saveCheckpoint<T>(
     retryCount,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    contextSnapshot,
+    fsmState: deriveFsmState(stage),
   };
+
+  return checkpoint;
+}
+
+export function saveCheckpoint<T>(
+  memory: ProjectMemory,
+  stage: OrchestrationState,
+  inputHash: string,
+  output: T | undefined,
+  issues: OrchestrationIssue[],
+  retryCount: number
+): OrchestrationCheckpoint<T> {
+  const checkpoint = createCheckpointSnapshot(memory, stage, inputHash, output, issues, retryCount);
   memory.checkpoints = memory.checkpoints.filter((item) => item.stage !== stage);
   memory.checkpoints.push(checkpoint);
   return checkpoint;

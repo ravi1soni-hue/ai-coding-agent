@@ -24,8 +24,17 @@ type MaterializeInput = {
   codeGen: any;
 };
 
+const WORKSPACES_ROOT = path.resolve('/tmp/workspaces');
 const PROJECTS_ROOT = path.resolve('/tmp');
-const TEMPLATE_ROOT = path.resolve(__dirname, '../../../templates/fullstack-starter');
+/**
+ * Path Mapping gap:
+ * - Starter templates should live under a read-only directory (/app/templates).
+ * - Generated workspaces are the only mutable filesystem under /tmp/workspaces.
+ */
+const READ_ONLY_TEMPLATE_ROOT = path.resolve('/app/templates/fullstack-starter');
+const FALLBACK_TEMPLATE_CANDIDATES = [
+  path.resolve(__dirname, '../../../templates/fullstack-starter'),
+];
 
 function sanitizeSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48) || 'project';
@@ -125,25 +134,35 @@ type TemplateAttempt = { path: string; existed: boolean; valid?: boolean; reason
 async function materializeTemplate(workspaceRoot: string): Promise<void> {
   const attempts: TemplateAttempt[] = [];
 
-  // Strategy 1: monolithic fullstack-starter at any of these locations
+  const tryCandidate = async (candidate: string): Promise<boolean> => {
+    const existed = await exists(candidate);
+    if (!existed) { attempts.push({ path: candidate, existed: false }); return false; }
+    const valid = await validateTemplateIntegrity(candidate);
+    attempts.push({ path: candidate, existed: true, valid, reason: valid ? 'used' : 'failed integrity check' });
+    if (!valid) return false;
+
+    debug('materializeTemplate:using-fullstack', { path: candidate });
+    await copyDir(candidate, workspaceRoot);
+    return true;
+  };
+
+  // Strategy 1 (primary): monolithic template from read-only /app/templates.
+  // This ensures templates are immutable and only the generated workspace
+  // is mutable under /tmp/workspaces.
+  if (await tryCandidate(READ_ONLY_TEMPLATE_ROOT)) return;
+
+  // Strategy 1 (fallback): allow existing repo-local template locations for dev/testing.
   const fullstackCandidates = [
-    TEMPLATE_ROOT,
+    ...FALLBACK_TEMPLATE_CANDIDATES,
     path.resolve(__dirname, '../../../src/templates/fullstack-starter'),
     path.resolve(__dirname, '../templates/fullstack-starter'),
     path.resolve(process.cwd(), 'templates/fullstack-starter'),
     path.resolve(process.cwd(), 'src/templates/fullstack-starter'),
     path.resolve(process.cwd(), 'dist/templates/fullstack-starter'),
   ];
+
   for (const candidate of fullstackCandidates) {
-    const existed = await exists(candidate);
-    if (!existed) { attempts.push({ path: candidate, existed: false }); continue; }
-    const valid = await validateTemplateIntegrity(candidate);
-    attempts.push({ path: candidate, existed: true, valid, reason: valid ? 'used' : 'failed integrity check' });
-    if (valid) {
-      debug('materializeTemplate:using-fullstack', { path: candidate });
-      await copyDir(candidate, workspaceRoot);
-      return;
-    }
+    if (await tryCandidate(candidate)) return;
   }
 
   // Strategy 2: split frontend + backend fallbacks (search multiple roots)
@@ -223,8 +242,8 @@ async function writeGeneratedFile(workspaceRoot: string, file: GeneratedFile): P
 
 export async function materializeProjectWorkspace(input: MaterializeInput): Promise<MaterializedRevision> {
   const projectSegment = sanitizeSegment(input.projectId);
-  const workspaceRoot = path.join(PROJECTS_ROOT, `project-${projectSegment}`);
   const revisionId = crypto.randomUUID();
+  const workspaceRoot = path.join(WORKSPACES_ROOT, `${projectSegment}-${revisionId}`);
   await fs.mkdir(workspaceRoot, { recursive: true });
   await materializeTemplate(workspaceRoot);
   console.log(`[materializeProjectWorkspace] workspaceRoot=${workspaceRoot}`);

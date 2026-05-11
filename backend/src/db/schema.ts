@@ -174,6 +174,9 @@ export async function ensureCoreTables() {
     )
   `);
 
+  await pgQuery(`ALTER TABLE project_checkpoints ADD COLUMN IF NOT EXISTS context_snapshot JSONB`);
+  await pgQuery(`ALTER TABLE project_checkpoints ADD COLUMN IF NOT EXISTS fsm_state TEXT`);
+
   await pgQuery(`CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id)`);
   await pgQuery(`CREATE INDEX IF NOT EXISTS idx_project_sessions_user_id ON project_sessions(user_id)`);
   await pgQuery(`CREATE INDEX IF NOT EXISTS idx_project_sessions_active_revision ON project_sessions(active_revision_id)`);

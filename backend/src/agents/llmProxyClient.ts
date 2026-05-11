@@ -3,23 +3,28 @@
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const util = require('util');
 import { config } from '../config/env';
+import { enforceBudgetOrThrow } from '../utils/tokenBudget';
 
 export interface LLMProxyOptions {
   apiKey: string;
   chatUrl?: string;
   embeddingUrl?: string;
+  /** Phase 3 budget controller context (optional). */
+  projectId?: string;
 }
 
 export class LLMProxyClient {
   private apiKey: string;
   private chatUrls: string[];
   private embeddingUrls: string[];
+  private projectId?: string;
 
   constructor(options: LLMProxyOptions) {
     this.apiKey = options.apiKey;
     this.chatUrls = this.buildUrlCandidates(options.chatUrl, config.LLM_PROXY_CHAT_URL);
     this.embeddingUrls = this.buildUrlCandidates(options.embeddingUrl, config.LLM_PROXY_EMBEDDING_URL);
-    this.log('LLMProxyClient initialized', { apiKey: !!this.apiKey, chatUrls: this.chatUrls, embeddingUrls: this.embeddingUrls });
+    this.projectId = options.projectId;
+    this.log('LLMProxyClient initialized', { apiKey: !!this.apiKey, projectId: this.projectId, chatUrls: this.chatUrls, embeddingUrls: this.embeddingUrls });
   }
 
   private log(message: string, data?: any) {
@@ -138,6 +143,12 @@ export class LLMProxyClient {
     if (!this.apiKey || this.apiKey.trim().length < 3) {
       this.log('chatCompletion called without valid API key', { model: selectedModel, apiKeyLength: this.apiKey?.length || 0 });
       throw new Error(`LLM Proxy chatCompletion failed: No valid API key configured for model "${selectedModel}". Check your environment variables for API_KEY settings.`);
+    }
+
+    // Phase 3 budget controller: enforce an approximate token budget per call
+    // (using max_tokens as a conservative estimate).
+    if (this.projectId) {
+      enforceBudgetOrThrow(this.projectId, max_tokens);
     }
 
     const estimatedPayloadSize = JSON.stringify(messages || []).length;

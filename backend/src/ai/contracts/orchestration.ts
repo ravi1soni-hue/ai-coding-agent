@@ -15,6 +15,17 @@ export type OrchestrationState =
   | 'done'
   | 'failed';
 
+export type OrchestrationFsmState =
+  | 'IDLE'
+  | 'ANALYZING'
+  | 'CLARIFYING'
+  | 'DESIGNING'
+  | 'CODING'
+  | 'TESTING'
+  | 'DEPLOYING'
+  | 'FAILED'
+  | 'COMPLETED';
+
 export type OrchestrationErrorType =
   | 'parsing_error'
   | 'schema_mismatch'
@@ -69,6 +80,17 @@ export type OrchestrationCheckpoint<T = unknown> = {
   retryCount: number;
   createdAt: string;
   updatedAt: string;
+
+  /**
+   * Phase 1 durability: persist the full orchestrator context needed to
+   * re-initialize the coordinator after crash/pause.
+   */
+  contextSnapshot?: unknown;
+
+  /**
+   * Phase 1 durability: coarse FSM state at the time of checkpoint.
+   */
+  fsmState?: OrchestrationFsmState;
 };
 
 export type OrchestrationEvent = {
@@ -221,6 +243,20 @@ export type OrchestrationCommand = {
   clarificationAnswers?: Record<string, string>;
   confirmation?: { confirmed: boolean; userResponse?: string };
   step?: OrchestrationState;
+
+  /**
+   * Phase 1 durability:
+   * When resuming from a checkpoint, the resume flow can pass the persisted
+   * full context snapshot so the coordinator starts from the exact state.
+   */
+  recoveryContextSnapshot?: ProjectMemory;
+
+  /**
+   * Phase 1 durability:
+   * When resuming, the resume flow can also specify which outer FSM state
+   * was interrupted/failed so the coordinator re-initializes correctly.
+   */
+  recoveryFsmState?: OrchestrationFsmState;
 };
 
 export type OrchestrationResult = {

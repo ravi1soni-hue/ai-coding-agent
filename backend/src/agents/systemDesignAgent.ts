@@ -44,7 +44,7 @@ export async function systemDesignAgent(input: any): Promise<StateAwareAgentResu
   try {
     if (!input) throw new Error('Input required');
     const { model, apiKey } = getModelConfigForTask('core_reasoning');
-    const llmProxy = new LLMProxyClient({ apiKey });
+    const llmProxy = new LLMProxyClient({ apiKey, projectId: input?.projectId });
 
     const projectSpec = input.projectSpec || null;
     const backendRequired = Boolean(input?.requirements?.backend_required ?? input?.backend_required ?? projectSpec?.requirements?.backend_required);

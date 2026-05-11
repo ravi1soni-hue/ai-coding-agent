@@ -24,6 +24,7 @@ import {
   markStage,
   recordFix,
   saveCheckpoint,
+  createCheckpointSnapshot,
   setBlueprint,
   setClarifications,
   setCode,
@@ -57,6 +58,11 @@ import type {
   RetryPolicy,
   StageResult,
 } from '../contracts/orchestration';
+
+import { OUTER_FSM_ORDER, getStartingOuterFsmState, firstInternalStageForOuterState } from './stateCoordinator';
+import { config } from '../../config/env';
+import { initBudget } from '../../utils/tokenBudget';
+import { withTimeout } from '../../utils/timeout';
 
 const DEFAULT_POLICY: Record<OrchestrationState, RetryPolicy> = {
   requirements: { maxAttempts: 2, maxFixAttempts: 1, relaxOnRetry: true, allowFallback: true, allowUserQuestion: false },
@@ -179,6 +185,8 @@ type StageOptions = {
   adapter?: OrchestrationAdapter;
   persistence?: PersistenceAdapter;
   percent?: number;
+  /** Global wall-clock deadline for automated orchestration work. */
+  deadlineAt?: number;
 };
 
 async function persistMemory(memory: ProjectMemory, persistence?: PersistenceAdapter): Promise<void> {
@@ -214,7 +222,7 @@ async function stageWrap<T>(
   handler: () => Promise<T>,
   options: StageOptions = {}
 ): Promise<StageResult<T>> {
-  const { adapter, persistence, percent } = options;
+  const { adapter, persistence, percent, deadlineAt } = options;
   const policy = currentPolicy(memory);
   const inputHash = hashInput({ stage, input, memory: { projectId: memory.projectId, sessionId: memory.sessionId } });
   const cached = memory.checkpoints.find((item) => item.stage === stage && item.inputHash === inputHash);
@@ -235,7 +243,16 @@ async function stageWrap<T>(
   while (shouldRetryStage(attempt, policy)) {
     try {
       markStage(memory, stage);
-      const output = await handler();
+
+      let output: T;
+      if (typeof deadlineAt === 'number') {
+        const remainingMs = deadlineAt - Date.now();
+        if (remainingMs <= 0) throw new Error('Orchestration timeout');
+        output = await withTimeout(handler(), remainingMs, 'Orchestration');
+      } else {
+        output = await handler();
+      }
+
       const checkpoint = saveCheckpoint(memory, stage, inputHash, output, [], attempt);
       appendHistory(memory, stage, 'stage_complete', `Completed ${stage}`, undefined);
       await persistMemory(memory, persistence);
@@ -280,6 +297,74 @@ async function stageWrap<T>(
       adapter?.emit?.({ type: 'stage_error', stage, issue });
       await persistMemory(memory, persistence);
       await persistLastEvent(memory, persistence);
+
+      // Phase 6 global orchestration timeout: deterministic terminal failure.
+      // withTimeout() rejects with `${label} timeout after ${ms}ms`.
+      // We must bypass retry/repair/fallback loops and transition to FAILED immediately.
+      const errMessage = error instanceof Error ? error.message : String(error);
+      if (errMessage === 'Orchestration timeout' || errMessage.startsWith('Orchestration timeout after')) {
+        const issue = classifyError({
+          projectId: memory.projectId,
+          sessionId: memory.sessionId,
+          stage,
+          error,
+          details: { input },
+        });
+        appendIssue(memory, issue);
+        appendHistory(memory, stage, 'stage_error', issue.message, issue);
+
+        if (persistence?.saveCheckpoint) {
+          try {
+            const checkpoint = createCheckpointSnapshot(memory, stage, inputHash, undefined, [issue], 0);
+            await persistence.saveCheckpoint(checkpoint);
+          } catch (err) {
+            logError('orchestrator:persistence_timeout_checkpoint_failed', {
+              stage,
+              projectId: memory.projectId,
+              error: err,
+            });
+          }
+        }
+
+        return createFailedResult(stage, [issue], 'failed');
+      }
+
+      // Phase 3 budget controller: deterministic terminal failure.
+      // tokenBudget.enforceBudgetOrThrow throws Error("Budget Exceeded").
+      // We must bypass retry/repair/fallback loops and transition to FAILED immediately.
+      if (errMessage === 'Budget Exceeded') {
+        if (persistence?.saveCheckpoint) {
+          try {
+            const checkpoint = createCheckpointSnapshot(memory, stage, inputHash, undefined, [issue], 0);
+            await persistence.saveCheckpoint(checkpoint);
+          } catch (err) {
+            logError('orchestrator:persistence_budget_checkpoint_failed', {
+              stage,
+              projectId: memory.projectId,
+              error: err,
+            });
+          }
+        }
+        return createFailedResult(stage, [issue], 'failed');
+      }
+
+      // Phase 1 durability: checkpoint even on non-success paths
+      // (stage_error, needs_input, needs_fix) so resume can restore
+      // the exact coordinator context, not only successful outputs.
+      if (persistence?.saveCheckpoint) {
+        try {
+          const checkpoint = createCheckpointSnapshot(memory, stage, inputHash, undefined, [issue], attempt);
+          await persistence.saveCheckpoint(checkpoint);
+        } catch (err) {
+          logError('orchestrator:persistence_checkpoint_failed', {
+            stage,
+            attempt,
+            projectId: memory.projectId,
+            error: err,
+          });
+        }
+      }
+
       const action = decideRecoveryAction(issue, policy);
 
       if (action === 'ask_user') {
@@ -337,6 +422,7 @@ async function runFinalAudit(projectSpec: any, memory: ProjectMemory): Promise<v
   }
 
   const reviewed = await reviewerAgent({
+    projectId: memory.projectId,
     blueprint: memory.blueprint?.blueprint,
     reviewerName: 'Final Audit Reviewer',
   } as any);
@@ -375,7 +461,20 @@ async function loadOrCreateMemory(
 ): Promise<ProjectMemory> {
   let memory: ProjectMemory | null = null;
 
-  if (persistence.loadSnapshot) {
+  // Phase 1 durability: if resume provides the persisted full context snapshot,
+  // prefer it over the coarse project_sessions snapshot.
+  if (command.recoveryContextSnapshot) {
+    try {
+      memory = command.recoveryContextSnapshot;
+      memory.projectId = command.projectId;
+      memory.sessionId = sessionId;
+    } catch {
+      // fall through to other sources
+      memory = null;
+    }
+  }
+
+  if (!memory && persistence.loadSnapshot) {
     try {
       memory = await persistence.loadSnapshot(command.projectId);
     } catch {
@@ -392,6 +491,19 @@ async function loadOrCreateMemory(
       deploymentMode,
     });
   }
+
+  // If resuming at a specific stage boundary, force it.
+  if (command.step) {
+    memory.currentState = command.step;
+  } else if (command.recoveryFsmState) {
+    memory.currentState = firstInternalStageForOuterState(command.recoveryFsmState);
+  }
+
+  // Ensure invariant fields exist even if the snapshot was partially corrupted.
+  memory.history = Array.isArray(memory.history) ? memory.history : [];
+  memory.errors = Array.isArray(memory.errors) ? memory.errors : [];
+  memory.fixes = Array.isArray(memory.fixes) ? memory.fixes : [];
+  memory.checkpoints = Array.isArray(memory.checkpoints) ? memory.checkpoints : [];
 
   // Rehydrate stage checkpoints so stageWrap() can actually resume.
   if (persistence.loadCheckpoints) {
@@ -457,6 +569,22 @@ function finalizePartial(
 ): Promise<OrchestrationResult> {
   markStage(memory, pausedAt);
   memory.status = 'paused';
+
+  // Phase 1 durability: even though we're pausing (interactive state),
+  // persist a full context_snapshot checkpoint so recovery can restore
+  // outer FSM context precisely.
+  const checkpointStage = pausedAt;
+  const pauseInputHash = hashInput({ stage: checkpointStage, input: { paused: true }, memory: { projectId: memory.projectId, sessionId: memory.sessionId } });
+
+  if (persistence?.saveCheckpoint) {
+    try {
+      const checkpoint = createCheckpointSnapshot(memory, checkpointStage, pauseInputHash, undefined, [], 0);
+      void persistence.saveCheckpoint(checkpoint);
+    } catch {
+      // best-effort
+    }
+  }
+
   return Promise.resolve(persistMemory(memory, persistence)).then(() => ({
     projectId: memory.projectId,
     sessionId: memory.sessionId,
@@ -481,6 +609,7 @@ async function runClarificationLoop(
     { answers: incomingAnswers, askedQuestions: priorAsked },
     async () => {
       const agentResult = await clarificationAgent({
+        projectId: command.projectId,
         requirements: {
           website_type: memory.requirements?.website_type || 'business',
           pages: memory.requirements?.pages || [],
@@ -842,7 +971,13 @@ export async function runAIOrchestration(
 ): Promise<OrchestrationResult> {
   const sessionId = command.sessionId || command.projectId;
   const memory = await loadOrCreateMemory(command, sessionId, persistence);
-  const opts: StageOptions = { adapter, persistence };
+
+  // Phase 3 budget controller: initialize budget tracking for this project
+  // before any LLM proxy call is made.
+  initBudget(memory.projectId, config.LIMITS.maxTokensPerProject);
+
+  const orchestratorDeadlineAt = Date.now() + config.LIMITS.maxOrchestrationMs;
+  const opts: StageOptions = { adapter, persistence, deadlineAt: orchestratorDeadlineAt };
 
   // Modification fast-path: previously-completed project receiving a change request
   if (command.modification && (memory.status === 'completed' || memory.currentState === 'done') && (memory.deployment?.frontendUrl || memory.deployment?.backendUrl)) {
@@ -870,7 +1005,7 @@ export async function runAIOrchestration(
       'requirements',
       command.userMessage,
       async () => {
-        const result = await requirementAnalysisAgent({ user_message: command.userMessage });
+        const result = await requirementAnalysisAgent({ user_message: command.userMessage, projectId: command.projectId });
         const requirements = toRequirementAnalysisOutput(
           (result as { output?: RequirementAnalysisShape }).output || (result as unknown as RequirementAnalysisShape)
         );
@@ -951,6 +1086,7 @@ export async function runAIOrchestration(
             output: buildFrontendOnlySystemDesign(memory.requirements),
           }
         : await systemDesignAgent({
+            projectId: command.projectId,
             requirements: memory.requirements,
             projectSpec,
             previousIssues: feedbackForSystemDesign,
@@ -965,6 +1101,7 @@ export async function runAIOrchestration(
     // 6. UI spec
     const uiSpecResult = await stageWrap(memory, 'ui_spec', memory.systemDesign, async () => {
       const result = await uiSpecAgent({
+        projectId: command.projectId,
         requirements: memory.requirements,
         systemDesign: memory.systemDesign,
         projectSpec,
@@ -1122,7 +1259,16 @@ export async function runAIOrchestration(
 
   const testResult = await stageWrap(memory, 'testing', memory.code, async () => {
     const result = await testFixAgent({
-      buildFn: () => runBuildWorker({ workspaceDir: materializedRevision.workspaceDir }),
+      buildFn: () =>
+        runBuildWorker({
+          workspaceDir: materializedRevision.workspaceDir,
+          onLog: (chunk) => {
+            const text = String(chunk || '');
+            if (!text.trim()) return;
+            // Emit chunked output; client will render as info lines.
+            adapter.emit?.({ type: 'info', stage: 'testing', message: text.trimEnd() });
+          },
+        }),
       files: memory.code?.files,
       workspaceDir: materializedRevision.workspaceDir,
       projectId: command.projectId,

@@ -1452,7 +1452,7 @@ export async function codeGenerationAgent(input: any) {
   const blueprint = assertBlueprintIntegrationSafety(reviewedBlueprint);
 
   const { model, apiKey } = getModelConfigForTask('code_generation');
-  const llmProxy = new LLMProxyClient({ apiKey });
+  const llmProxy = new LLMProxyClient({ apiKey, projectId: input?.projectId });
   const events: EventSink | undefined = typeof input.emitEvent === 'function' ? { emit: input.emitEvent } : undefined;
 
   const retrievedPatches: string[] = [];

@@ -42,6 +42,12 @@ export const config = {
     maxRetriesPerStage: parseInt(process.env.MAX_RETRIES_PER_STAGE || '2', 10),
     maxLlmCallsPerProject: parseInt(process.env.MAX_LLM_CALLS_PER_PROJECT || '20', 10),
     maxBuildAttempts: parseInt(process.env.MAX_BUILD_ATTEMPTS || '2', 10),
+    // Phase 3 budget controller: approximate total tokens per projectId allowed
+    // before orchestration fails with "Budget Exceeded".
+    maxTokensPerProject: parseInt(process.env.MAX_TOKENS_PER_PROJECT || '120000', 10),
+    // Phase 6: Global wall-clock orchestration timeout.
+    // Applies even if an agent hasn't hit its per-stage retry loop.
+    maxOrchestrationMs: parseInt(process.env.MAX_ORCHESTRATION_MS || '600000', 10), // 10 minutes
   },
 };
 

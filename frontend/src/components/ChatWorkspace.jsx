@@ -97,7 +97,8 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
   const pingTimerRef = useRef(null);
   const shouldReconnectRef = useRef(true);
   const connectRef = useRef(() => {});
-  const lastReplayedAtRef = useRef('');
+  const lastReplayedEventIdRef = useRef('');
+  const restoredEventIdsRef = useRef(new Set());
   const [reconnectInSec, setReconnectInSec] = useState(0);
   const displayName = (user.name || 'there').trim();
 
@@ -111,9 +112,10 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
     setInput('');
     setCurrentActivity('');
     setElapsedSeconds(0);
-    lastReplayedAtRef.current = '';
+    lastReplayedEventIdRef.current = '';
+    restoredEventIdsRef.current = new Set();
 
-    replayProjectEvents().catch(() => undefined);
+    restoreFromSnapshotAndReplay().catch(() => undefined);
   }, [projectId]);
 
   function mapEventToMessage(e) {
@@ -128,8 +130,15 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
         return { role: 'assistant', text: 'Confirmation requested.' };
       case 'stage_start':
         return { role: 'system', text: e.message || `Starting ${e.payload?.stage || ''}...` };
-      case 'stage_complete':
-        return { role: 'system', text: `✓ ${e.payload?.stage || 'stage'} complete` };
+      case 'stage_complete': {
+        const msg = typeof e.message === 'string' ? e.message : '';
+        const stageName =
+          msg.replace(/^Completed\s+/i, '').trim() ||
+          e.payload?.stage ||
+          e.payload?.filePath ||
+          'stage';
+        return { role: 'system', text: `✓ ${stageName} complete` };
+      }
       case 'file_generated': {
         const p = e.payload?.path || e.payload?.filePath;
         return p ? { role: 'system', text: `Wrote ${p}` } : null;
@@ -147,34 +156,73 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
     }
   }
 
-  async function replayProjectEvents() {
+  async function restoreFromSnapshotAndReplay() {
     if (!projectId) return;
-    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/events`);
+
+    // 1) Snapshot first
+    const snapRes = await fetch(`/api/projects/${encodeURIComponent(projectId)}/snapshot`);
+    const snapJson = await readJson(snapRes);
+    if (!snapRes.ok) return;
+
+    const snapshotFiles = Array.isArray(snapJson.files) ? snapJson.files : [];
+    setGeneratedFiles(
+      snapshotFiles.map((f) => ({
+        path: f.path,
+        content: typeof f.content === 'string' ? f.content : '',
+        lines: typeof f.lines === 'number' ? f.lines : undefined,
+        bytes: typeof f.bytes === 'number' ? f.bytes : undefined,
+      })),
+    );
+
+    // Restore coarse pipeline UI
+    if (typeof snapJson.progress === 'number') setProgress(Math.max(0, Math.min(1, snapJson.progress)));
+    setStageStatus(typeof snapJson.currentStep === 'string' ? snapJson.currentStep : '');
+    setStatusText(snapJson.status === 'completed' ? 'Complete' : (snapJson.status === 'failed' ? 'Failed' : 'Resuming…'));
+    setPipelineActive(Boolean(snapJson.status && snapJson.status !== 'completed' && snapJson.status !== 'failed'));
+
+    lastReplayedEventIdRef.current = typeof snapJson.lastEventId === 'string' ? snapJson.lastEventId : '';
+    if (!lastReplayedEventIdRef.current) restoredEventIdsRef.current = new Set();
+
+    // 2) Replay only the tail after lastEventId
+    const afterEventId = lastReplayedEventIdRef.current;
+    let url = `/api/projects/${encodeURIComponent(projectId)}/events`;
+    if (afterEventId) url += `?afterEventId=${encodeURIComponent(afterEventId)}&limit=1000`;
+
+    const res = await fetch(url);
     const json = await readJson(res);
     if (!res.ok || !Array.isArray(json.events)) return;
 
-    const since = lastReplayedAtRef.current;
-    const fresh = since
-      ? json.events.filter((e) => (e.created_at || '') > since)
-      : json.events;
+    const fresh = json.events;
 
-    const restored = fresh.map(mapEventToMessage).filter((m) => m && m.text);
+    // Update cursor to the last event we just replayed
     if (fresh.length > 0) {
-      lastReplayedAtRef.current = fresh[fresh.length - 1].created_at || lastReplayedAtRef.current;
+      const last = fresh[fresh.length - 1];
+      if (last && typeof last.id === 'string') lastReplayedEventIdRef.current = last.id;
     }
 
+    // Upsert generated files for file_generated events that occurred after snapshot
     for (const e of fresh) {
       if (e.event_type !== 'file_generated') continue;
       const path = e.payload?.path || e.payload?.filePath;
       if (!path) continue;
+
       upsertGeneratedFile({
         path,
+        content: typeof e.payload?.content === 'string' ? e.payload.content : '',
         lines: typeof e.payload?.lines === 'number' ? e.payload.lines : undefined,
         bytes: typeof e.payload?.bytes === 'number' ? e.payload.bytes : undefined,
       });
+
+      if (typeof e.id === 'string') restoredEventIdsRef.current.add(e.id);
     }
 
+    const restored = fresh
+      .filter((e) => typeof e.id === 'string' ? !restoredEventIdsRef.current.has(e.id) : true)
+      .map(mapEventToMessage)
+      .filter((m) => m && m.text);
+
     if (restored.length === 0) return;
+
     setMessages((prev) => {
       const existing = new Set(prev.map((message) => `${message.role}\u0000${message.text}`));
       const unique = restored.filter((message) => {
@@ -204,7 +252,17 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
   }, [pipelineActive]);
 
   function pushMessage(role, text) {
-    setMessages((prev) => [...prev, { role, text }]);
+    const shouldDedupe = role === 'system' || role === 'error' || role === 'details';
+    if (!shouldDedupe) {
+      setMessages((prev) => [...prev, { role, text }]);
+      return;
+    }
+    setMessages((prev) => {
+      const key = `${role}\u0000${text}`;
+      const existing = prev.some((m) => `${m.role}\u0000${m.text}` === key);
+      if (existing) return prev;
+      return [...prev, { role, text }];
+    });
   }
 
   function upsertGeneratedFile(file) {
@@ -267,8 +325,8 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
         setConnection('connected');
         if (wasReconnect) {
           pushMessage('system', 'Reconnected. Restoring session…');
-          // Replay any events the server persisted while we were disconnected.
-          replayProjectEvents().catch(() => undefined);
+          // Snapshot first, then replay only events after snapshot.lastEventId
+          restoreFromSnapshotAndReplay().catch(() => undefined);
         } else {
           pushMessage('system', `Connected to live build assistant for project ${projectId}.`);
         }

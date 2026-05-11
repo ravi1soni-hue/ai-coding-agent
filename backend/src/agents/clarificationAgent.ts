@@ -199,7 +199,7 @@ export async function clarificationAgent(input: any): Promise<StateAwareAgentRes
   }
 
   const { model, apiKey } = getModelConfigForTask('clarification');
-  const llmProxy = new LLMProxyClient({ apiKey });
+  const llmProxy = new LLMProxyClient({ apiKey, projectId: input.projectId });
   const systemPrompt = buildClarificationPrompt(input, projectSpec);
 
   const userPrompt = JSON.stringify({
