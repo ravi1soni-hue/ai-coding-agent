@@ -102,51 +102,54 @@ function parseJsonSafe(content: string): any {
     try {
       return JSON.parse(slice);
     } catch {}
-    // Robust fallback for {"path":"...","content":"..."} responses.
-    // Large JSX files often contain literal newlines or other characters the LLM
-    // fails to escape, breaking JSON.parse. Since content is always the last field,
-    // we extract path normally and treat everything between the content opening quote
-    // and the final closing quote as the raw file content.
-    const pathMatch = slice.match(/"path"\s*:\s*"([^"]*)"/);
-    const contentKeyIdx = slice.indexOf('"content"');
-    if (pathMatch && contentKeyIdx !== -1) {
-      const colonIdx = slice.indexOf(':', contentKeyIdx);
-      const openQuote = slice.indexOf('"', colonIdx + 1);
-      if (openQuote !== -1) {
-        // The JSON object closes with `"}` — find the last occurrence of that sequence
-        // to locate the end of the content string value rather than any quote inside it.
-        const closingSeq = slice.lastIndexOf('"}');
-        const closeQuote = closingSeq > openQuote ? closingSeq : slice.lastIndexOf('"');
-        if (closeQuote > openQuote) {
-          const rawContent = slice.slice(openQuote + 1, closeQuote);
-          // Unescape only the sequences the LLM does escape; leave literal newlines as-is.
-          const unescaped = rawContent
-            .replace(/\\n/g, '\n')
-            .replace(/\\t/g, '\t')
-            .replace(/\\r/g, '\r')
-            .replace(/\\"/g, '"')
-            .replace(/\\\\/g, '\\');
-
-          // Reject obviously-truncated payloads. When the LLM hits its
-          // output-token cap mid-string, the fallback extracts a slice
-          // ending in a bare `\` or with grossly unbalanced braces;
-          // returning that produces a file Vite can't parse. Force the
-          // caller into its stub/fallback path instead of poisoning the
-          // build with half a component.
-          const looksTruncated =
-            closingSeq === -1 /* never saw '"}' */ ||
-            /\\\s*$/.test(unescaped) /* trailing escape */ ||
-            (unescaped.match(/\{/g)?.length || 0) - (unescaped.match(/\}/g)?.length || 0) !== 0 ||
-            (unescaped.match(/\(/g)?.length || 0) - (unescaped.match(/\)/g)?.length || 0) !== 0;
-          if (looksTruncated) {
-            throw new Error(`Truncated LLM JSON response (content tail: ${unescaped.slice(-80).replace(/\s+/g, ' ')})`);
-          }
-          return { path: pathMatch[1], content: unescaped };
-        }
-      }
-    }
   }
   throw new Error(`No valid JSON found in LLM response. Snippet: ${cleaned.replace(/\s+/g, ' ').slice(0, 220)}`);
+}
+
+// Delimited-file format: avoids JSON-string escape fragility for code.
+// Model is asked to emit:
+//   <<<FILE:relative/path.ext>>>
+//   ...raw code, no escaping...
+//   <<<END>>>
+// Any prose before/after is ignored.
+const FILE_BLOCK_RE = /<<<FILE:([^\n>]+?)>>>\s*\n([\s\S]*?)\n?<<<END>>>/;
+
+function parseFileBlock(content: string, expectedPath?: string): { path: string; content: string } {
+  let raw = content;
+  // Strip code fences only if they wrap the whole response (don't break inner ``` content).
+  const fenceMatch = raw.match(/^\s*```[a-zA-Z]*\s*\n([\s\S]*?)\n```\s*$/);
+  if (fenceMatch) raw = fenceMatch[1];
+
+  const m = raw.match(FILE_BLOCK_RE);
+  if (m) {
+    const filePath = m[1].trim();
+    const body = m[2];
+    if (!body.trim()) throw new Error('File block has empty body');
+    return { path: filePath, content: body };
+  }
+
+  // Tolerant fallback: opening marker but missing/truncated <<<END>>>.
+  // If the response was cut off mid-file, surface a truncation error so the
+  // caller grows the budget on retry instead of writing a half file.
+  const openIdx = raw.search(/<<<FILE:[^\n>]+>>>/);
+  if (openIdx !== -1) {
+    const headerMatch = raw.slice(openIdx).match(/^<<<FILE:([^\n>]+?)>>>\s*\n/);
+    if (headerMatch) {
+      const filePath = headerMatch[1].trim();
+      const bodyStart = openIdx + headerMatch[0].length;
+      const endIdx = raw.indexOf('<<<END>>>', bodyStart);
+      if (endIdx !== -1) {
+        const body = raw.slice(bodyStart, endIdx).replace(/\n$/, '');
+        return { path: filePath, content: body };
+      }
+      throw new Error(`Truncated file block (no <<<END>>> marker) for ${filePath}; tail: ${raw.slice(-80).replace(/\s+/g, ' ')}`);
+    }
+  }
+
+  if (expectedPath) {
+    throw new Error(`No <<<FILE:...>>> block found for ${expectedPath}. Snippet: ${raw.replace(/\s+/g, ' ').slice(0, 220)}`);
+  }
+  throw new Error(`No <<<FILE:...>>> block found. Snippet: ${raw.replace(/\s+/g, ' ').slice(0, 220)}`);
 }
 
 function containsPlaceholderText(value: string): boolean {
@@ -713,12 +716,10 @@ RULES:
 - For DELETE: WHERE id = $1 AND project_id = $2, return 404 if not found
 - Import { query } from '../db/database.ts'
 - Import { randomUUID } from 'crypto' (only if POST/PUT is implemented)
-- Export as: export default router
-
-Return ONLY JSON: {"path":"${routeFile}","content":"complete TypeScript Express route file"}`;
+- Export as: export default router`;
 
   try {
-    const parsed = await generateJson(llmProxy, model, `backendRoute:${resource.name}`, systemPrompt, { resource }, 2000);
+    const parsed = await generateFile(llmProxy, model, `backendRoute:${resource.name}`, routeFile, systemPrompt, { resource }, { initial: 2500, ceiling: 9000 });
     return validateGeneratedFile(parsed, routeFile, 'backend', `backendRoute:${resource.name}`);
   } catch (err) {
     logWarn(`backendRouteFile:llm-failed:${resource.name}`, { error: (err as Error).message });
@@ -809,62 +810,107 @@ async function generateJson(
 ): Promise<any> {
   const { initial, ceiling } = normalizeBudget(maxTokens);
   let currentBudget = initial;
-  // lastBadJson holds the LLM's response only when the call succeeded but parse failed.
-  // We don't feed it back when the failure was a network/call error (no useful content to correct).
-  let lastBadJson = '';
   for (let jsonAttempt = 1; jsonAttempt <= 3; jsonAttempt++) {
     const messages: Array<{ role: string; content: string }> = [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: JSON.stringify(userPayload) },
     ];
-    if (jsonAttempt > 1 && lastBadJson) {
-      const trimmed = lastBadJson.trimEnd();
-      const wasTruncated = !trimmed.endsWith('}') && !trimmed.endsWith('"}');
-      if (wasTruncated) {
-        // Replaying the truncated assistant turn primes the model to repeat the
-        // same oversize structure. Skip it — just ask for a shorter, complete result.
-        messages.push({
-          role: 'user',
-          content: 'Your previous response was truncated before the JSON was closed. Return ONLY a complete, valid JSON object — shorten string values and prose if necessary but ensure the JSON is fully closed with no markdown fences.',
-        });
-      } else {
-        messages.push({ role: 'assistant', content: lastBadJson.slice(0, 1200) });
-        messages.push({
-          role: 'user',
-          content: 'Your previous response was not valid JSON. Return ONLY a valid JSON object with no markdown fences, no prose, and all string values properly escaped.',
-        });
-      }
+    if (jsonAttempt > 1) {
+      messages.push({
+        role: 'user',
+        content: 'Your previous response was not a valid, complete JSON object. Return ONLY a single valid JSON object — no markdown fences, no prose, all strings properly escaped, fully closed.',
+      });
     }
     let rawContent = '';
     try {
-      const completion = await llmProxy.chatCompletion(messages, model, 0.0, 0.9, currentBudget, 60_000);
+      // Pass undefined for timeoutMs so LLMProxyClient auto-scales by max_tokens
+      // (its computed defaultTimeout is much smarter than a fixed 60s).
+      const completion = await llmProxy.chatCompletion(messages, model, 0.0, 0.9, currentBudget);
       rawContent = completion.choices?.[0]?.message?.content || '';
       if (!rawContent.trim()) throw new Error(`${label}: LLM returned empty response`);
-      lastBadJson = rawContent; // store before parse so we can feed it back on parse failure
       return parseJsonSafe(rawContent);
     } catch (err) {
-      // Only set lastBadJson when there was a response to correct (parse failure).
-      // For call failures rawContent is empty — don't overwrite a prior useful response.
-      if (rawContent) lastBadJson = rawContent;
       const message = err instanceof Error ? err.message : String(err);
-      // Adaptive growth: if the model hit the token cap mid-JSON, the next
-      // attempt needs more room or it will fail the same way.
-      const wasTruncated = /Truncated LLM JSON response/.test(message);
-      const nextBudget = wasTruncated && currentBudget < ceiling
+      const looksTruncated = /No valid JSON found|Unexpected end of JSON|Unterminated string/i.test(message);
+      const nextBudget = looksTruncated && currentBudget < ceiling
         ? Math.min(ceiling, Math.max(currentBudget + 4000, Math.ceil(currentBudget * 2.2)))
         : currentBudget;
       logWarn(`${label}:json-attempt-failed:${jsonAttempt}`, {
         error: message,
         budget: currentBudget,
         nextBudget,
-        truncated: wasTruncated,
-        rawSnippet: lastBadJson.slice(0, 240),
+        truncated: looksTruncated,
+        rawSnippet: rawContent.slice(0, 240),
       });
       currentBudget = nextBudget;
       if (jsonAttempt === 3) throw err;
     }
   }
   throw new Error(`${label}: all JSON self-heal attempts exhausted`);
+}
+
+// generateFile asks the LLM to return a single source file using the
+// <<<FILE:path>>> ... <<<END>>> delimited format. This sidesteps the
+// JSON-string-escape fragility that caused the bulk of the truncation
+// failures in the logs (template literals, backslashes, embedded quotes).
+async function generateFile(
+  llmProxy: LLMProxyClient,
+  model: string,
+  label: string,
+  expectedPath: string,
+  systemPromptBody: string,
+  userPayload: unknown,
+  maxTokens: number | TokenBudget
+): Promise<{ path: string; content: string }> {
+  const { initial, ceiling } = normalizeBudget(maxTokens);
+  let currentBudget = initial;
+  const formatPreamble = `Return ONLY a single delimited file block. No JSON, no markdown fences, no prose.
+
+Format EXACTLY (literal markers, raw code in between):
+<<<FILE:${expectedPath}>>>
+...complete file contents here, with real newlines and no escape sequences...
+<<<END>>>
+
+Rules:
+- Emit the opening marker on its own line, then the file body, then <<<END>>> on its own line.
+- Do NOT wrap the body in quotes or escape characters.
+- Do NOT include any text outside the markers.`;
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const messages: Array<{ role: string; content: string }> = [
+      { role: 'system', content: `${systemPromptBody}\n\n${formatPreamble}` },
+      { role: 'user', content: JSON.stringify(userPayload) },
+    ];
+    if (attempt > 1) {
+      messages.push({
+        role: 'user',
+        content: `Your previous response did not produce a complete <<<FILE:${expectedPath}>>>...<<<END>>> block. Emit ONLY the delimited block. The body must be complete, syntactically valid, and end with <<<END>>> on its own line.`,
+      });
+    }
+    let rawContent = '';
+    try {
+      const completion = await llmProxy.chatCompletion(messages, model, 0.0, 0.9, currentBudget);
+      rawContent = completion.choices?.[0]?.message?.content || '';
+      if (!rawContent.trim()) throw new Error(`${label}: LLM returned empty response`);
+      return parseFileBlock(rawContent, expectedPath);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const looksTruncated = /Truncated file block|No <<<FILE/i.test(message);
+      const nextBudget = looksTruncated && currentBudget < ceiling
+        ? Math.min(ceiling, Math.max(currentBudget + 4000, Math.ceil(currentBudget * 2.0)))
+        : currentBudget;
+      logWarn(`${label}:file-attempt-failed:${attempt}`, {
+        error: message,
+        budget: currentBudget,
+        nextBudget,
+        truncated: looksTruncated,
+        rawSnippet: rawContent.slice(0, 240),
+      });
+      currentBudget = nextBudget;
+      if (attempt === 3) throw err;
+    }
+  }
+  throw new Error(`${label}: all file self-heal attempts exhausted`);
 }
 
 async function generateFrontendManifest(systemDesign: any, requirements: any, modification: string | undefined, llmProxy: LLMProxyClient, model: string, uiSpec?: any): Promise<FrontendManifest> {
@@ -978,8 +1024,6 @@ ${dependencyCode.length > 0 ? `Already-generated dependencies (reference these i
 ${dependencyCode.map((d: any) => `${d.dep}: ${d.code}`).join('\n---\n')}
 ` : ''}
 
-Return ONLY JSON: {"path":"${expectedPath}","content":"complete, implementation-ready JSX file with real content matching the purpose, not a stub"}
-
 CRITICAL RULES:
 - Component MUST be 100% functional and meaningful, NOT a stub or placeholder
 - MUST include proper JSX structure with actual content/functionality matching the purpose
@@ -991,10 +1035,11 @@ CRITICAL RULES:
 - If component is a parent: properly compose child components using correct imports
 - No comments like "TODO" or "placeholder"`;
 
-  const parsed = await generateJson(
+  const parsed = await generateFile(
     llmProxy,
     model,
     `frontendComponent:${expectedPath}`,
+    expectedPath,
     systemPrompt,
     {
       component,
@@ -1044,8 +1089,6 @@ const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:3000';
 Include proper error handling for fetch calls and fallback UI states.
 ` : ''}
 
-Return ONLY JSON: {"path":"src/App.jsx","content":"complete, fully-functional App.jsx file"}
-
 CRITICAL RULES:
 - App MUST be 100% functional, not a stub
 - MUST properly compose all imported components
@@ -1056,10 +1099,11 @@ CRITICAL RULES:
 - Component composition must match the generation order: ${(uiSpec?.generationOrder || []).join(' -> ') || 'all components'}
 - No stub code, no TODOs, no placeholders`;
 
-  const parsed = await generateJson(
+  const parsed = await generateFile(
     llmProxy,
     model,
     'frontendApp',
+    'src/App.jsx',
     systemPrompt,
     {
       requirements,
@@ -1101,8 +1145,8 @@ CRITICAL RULES:
 
 async function generateFrontendCss(manifest: FrontendManifest, requirements: any, appFile: GeneratedFile, componentFiles: GeneratedFile[], llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {
   const userMessage = String(requirements?.userMessage || '').slice(0, 300);
-  const systemPrompt = `Generate src/index.css for this React app: "${userMessage || manifest.appName}". Match the visual style to the app's purpose. Return ONLY JSON: {"path":"src/index.css","content":"complete CSS"}`;
-  const parsed = await generateJson(llmProxy, model, 'frontendCss', systemPrompt, { manifest, requirements, appSnippet: appFile.content.slice(0, 4000), componentSnippets: componentFiles.map((f) => ({ path: f.path, content: f.content.slice(0, 1800) })) }, 4000);
+  const systemPrompt = `Generate src/index.css for this React app: "${userMessage || manifest.appName}". Match the visual style to the app's purpose. Output a single complete CSS file.`;
+  const parsed = await generateFile(llmProxy, model, 'frontendCss', 'src/index.css', systemPrompt, { manifest, requirements, appSnippet: appFile.content.slice(0, 4000), componentSnippets: componentFiles.map((f) => ({ path: f.path, content: f.content.slice(0, 1800) })) }, { initial: 4000, ceiling: 10000 });
   return validateGeneratedFile(parsed, 'src/index.css', 'frontend', 'frontendCss');
 }
 
@@ -1133,7 +1177,7 @@ function buildBackendFilesFromManifest(manifest: BackendManifest): GeneratedFile
 }
 
 async function generateBackendInitSql(manifest: BackendManifest, requirements: any, llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {
-  const parsed = await generateJson(llmProxy, model, 'backendInitSql', 'Generate backend/db/init.sql. Return ONLY JSON.', { manifest, requirements, sharedTable: SHARED_TABLE_NAME }, 2200);
+  const parsed = await generateFile(llmProxy, model, 'backendInitSql', 'backend/db/init.sql', `Generate backend/db/init.sql. The file MUST define the shared "${SHARED_TABLE_NAME}" table including a project_id TEXT NOT NULL column. Use only the shared multi-tenant schema; never emit per-project tables.`, { manifest, requirements, sharedTable: SHARED_TABLE_NAME }, { initial: 2200, ceiling: 6000 });
   const file = validateGeneratedFile(parsed, 'backend/db/init.sql', 'backend', 'backendInitSql');
   if (!/project_id/i.test(file.content) || !file.content.includes(SHARED_TABLE_NAME)) throw new Error(`backendInitSql: SQL must define shared table ${SHARED_TABLE_NAME} with project_id`);
   return file;

@@ -242,8 +242,13 @@ export class LLMProxyClient {
             lastError = err;
             const retryableNetworkErr = err?.name === 'AbortError' || /network|timeout|fetch failed/i.test(String(err?.message || ''));
             if (retryableNetworkErr && attempt < 2) {
-              this.log('chatCompletion retrying same target after network error', { modelCandidate, chatUrl, attempt, reason: err?.message });
-              await this.sleep(750 * (attempt + 1));
+              // Exponential backoff with jitter — prevents synchronized retry
+              // storms against the same overloaded target seen in the logs.
+              const base = 1000 * Math.pow(2, attempt);
+              const jitter = Math.floor(Math.random() * 500);
+              const delay = base + jitter;
+              this.log('chatCompletion retrying same target after network error', { modelCandidate, chatUrl, attempt, delay, reason: err?.message });
+              await this.sleep(delay);
               continue;
             }
             if (this.isModelNotFoundError(err) && i < modelCandidates.length - 1) {
