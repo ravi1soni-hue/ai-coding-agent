@@ -164,6 +164,24 @@ async function installDependencies(workspaceDir: string): Promise<{ code: number
   return runCommand('npm', ['install', '--no-audit', '--no-fund'], workspaceDir, 5 * 60_000);
 }
 
+async function runFrontendTypeCheck(workspaceDir: string): Promise<{ code: number; output: string }> {
+  const packageJsonPath = path.join(workspaceDir, 'package.json');
+  try {
+    const raw = await fs.readFile(packageJsonPath, 'utf8');
+    const pkg = JSON.parse(raw) as { scripts?: Record<string, string>; dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+    if (pkg.scripts?.['type-check']) {
+      return runCommand('npm', ['run', 'type-check'], workspaceDir, 5 * 60_000);
+    }
+    const tsconfigPath = path.join(workspaceDir, 'tsconfig.json');
+    if (await fileExists(tsconfigPath) || pkg.devDependencies?.typescript || pkg.dependencies?.typescript) {
+      return runCommand('npx', ['tsc', '--noEmit'], workspaceDir, 5 * 60_000);
+    }
+  } catch {
+    // Fall back gracefully when package.json is missing or malformed.
+  }
+  return { code: 0, output: '' };
+}
+
 async function buildWorkspace(workspaceDir: string): Promise<{ code: number; output: string }> {
   return runCommand('npm', ['run', 'build'], workspaceDir, 5 * 60_000);
 }
@@ -208,6 +226,13 @@ export async function runBuildWorker(payload: BuildWorkerPayload): Promise<Build
     logs.push('$ npm install (frontend)');
     logs.push(installResult.output.trim());
     if (installResult.code !== 0) return { success: false, logs: logs.join('\n\n') };
+
+    const typeCheckResult = await runFrontendTypeCheck(frontendDir);
+    if (typeCheckResult.code !== 0) {
+      logs.push('$ npm run type-check (frontend)');
+      logs.push(typeCheckResult.output.trim());
+      return { success: false, logs: logs.join('\n\n') };
+    }
 
     const buildResult = await buildWorkspace(frontendDir);
     logs.push('$ npm run build (frontend)');

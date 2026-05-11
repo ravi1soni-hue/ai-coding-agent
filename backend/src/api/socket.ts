@@ -178,8 +178,16 @@ export function createSocketServer(server: http.Server) {
     // attaching to a pipeline that was started by an earlier (now-dead) socket.
     const adapter = createHubAdapter(projectId);
     const unsubscribe = pipelineHub.subscribe(projectId, (event) => {
-      try { ws.send(JSON.stringify(event)); } catch { /* socket may be closing */ }
+      try { ws.send(JSON.stringify(sanitizeEmitEvent(event))); } catch { /* socket may be closing */ }
     });
+
+    function sanitizeEmitEvent(event: any) {
+      if (event?.type === 'stage_complete') {
+        const { output, ...trimmed } = event;
+        return trimmed;
+      }
+      return event;
+    }
 
     ws.send(JSON.stringify({ type: 'info', stage: 'requirements', message: 'Connected!' }));
 

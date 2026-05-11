@@ -1,4 +1,5 @@
 import path from 'path';
+import ts from 'typescript';
 import { getModelConfigForTask } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { debug, error as logError, warn as logWarn } from '../utils/logger';
@@ -152,6 +153,30 @@ function parseFileBlock(content: string, expectedPath?: string): { path: string;
   throw new Error(`No <<<FILE:...>>> block found. Snippet: ${raw.replace(/\s+/g, ' ').slice(0, 220)}`);
 }
 
+function isProbablyTruncatedGeneratedFile(filePath: string, content: string): boolean {
+  const trimmed = content.trim();
+  const lines = trimmed.split(/\r?\n/).filter((line) => line.trim()).length;
+  const lowerPath = filePath.toLowerCase();
+
+  if (lowerPath.endsWith('src/app.jsx') || lowerPath.endsWith('src/app.tsx')) {
+    return trimmed.length < 500 || lines < 8 || !/export\s+default\s+function\s+App|export\s+default\s+App|function\s+App\s*\(/.test(trimmed);
+  }
+
+  if (lowerPath.endsWith('src/index.css')) {
+    return trimmed.length < 200 || lines < 8 || /color|display|position|margin|padding|font-size|background/.test(trimmed) === false;
+  }
+
+  if (/\.(jsx|tsx|js|ts)$/.test(lowerPath)) {
+    return trimmed.length < 120 && lines < 5;
+  }
+
+  if (/\.css$/.test(lowerPath)) {
+    return trimmed.length < 100 && lines < 5;
+  }
+
+  return false;
+}
+
 function containsPlaceholderText(value: string): boolean {
   return /(?:\bTODO\b|\bplaceholder\b|\breplace\b|\bgeneric text\b)/i.test(value);
 }
@@ -164,6 +189,30 @@ function validateGeneratedFile(file: unknown, expectedPath: string | undefined, 
   if (expectedPath && filePath !== expectedPath) throw new Error(`${label}: expected path ${expectedPath}, got ${filePath}`);
   if (!isAllowedPath(filePath, scope)) throw new Error(`${label}: invalid or disallowed path ${filePath}`);
   if (typeof content !== 'string' || !content.trim()) throw new Error(`${label}: missing content for ${filePath}`);
+  if (containsPlaceholderText(content)) throw new Error(`${label}: generated content contains placeholder text for ${filePath}`);
+  if (filePath === 'src/App.jsx') {
+    const hasExport = /export\s+default\s+(function|const|class|\w+)/.test(content);
+    const hasAppName = /\bfunction\s+App\b|\bconst\s+App\b|\bclass\s+App\b|\bexport\s+default\s+App\b/.test(content);
+    if (!hasExport || !hasAppName) {
+      throw new Error(`${label}: App.jsx appears incomplete or missing export default App`);
+    }
+  }
+  if (['.jsx', '.tsx', '.js', '.ts'].includes(path.extname(filePath).toLowerCase())) {
+    const sourceKind = ['.tsx', '.jsx'].includes(path.extname(filePath).toLowerCase()) ? ts.JsxEmit.Preserve : undefined;
+    const transpile = ts.transpileModule(content, {
+      compilerOptions: {
+        jsx: sourceKind,
+        target: ts.ScriptTarget.ES2020,
+      },
+      fileName: filePath,
+      reportDiagnostics: true,
+    });
+
+    const diagnostics = transpile.diagnostics || [];
+    if (diagnostics.some((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error)) {
+      throw new Error(`${label}: generated ${filePath} contains syntax or parse errors`);
+    }
+  }
   return { path: filePath, content };
 }
 
@@ -171,9 +220,29 @@ function setFile(files: Map<string, string>, file: GeneratedFile) {
   files.set(normalizePath(file.path), file.content);
 }
 
+// Component basenames that collide with framework files at src/<name>.jsx.
+// A manifest component named "App" would force validateAppImports to require
+// `import App from './components/App.jsx'` inside src/App.jsx — which then
+// redeclares `App` via `export default function App()`, breaking the build.
+const RESERVED_COMPONENT_BASENAMES = new Set(['App', 'Main', 'Index', 'Root']);
+
+function isReservedComponentName(name: string): boolean {
+  return RESERVED_COMPONENT_BASENAMES.has(name);
+}
+
+function deReserveComponentName(name: string): string {
+  return isReservedComponentName(name) ? `${name}Section` : name;
+}
+
 function sanitizeComponentPath(rawPath: string, index: number): string {
   const p = normalizePath(rawPath || '');
-  if (p.startsWith('src/components/') && p.endsWith('.jsx') && !p.includes('..')) return p;
+  if (p.startsWith('src/components/') && p.endsWith('.jsx') && !p.includes('..')) {
+    const base = path.basename(p, '.jsx');
+    if (isReservedComponentName(base)) {
+      return `src/components/${deReserveComponentName(base)}.jsx`;
+    }
+    return p;
+  }
   return `src/components/GeneratedSection${index + 1}.jsx`;
 }
 
@@ -198,7 +267,8 @@ function fallbackFrontendManifest(requirements: any, uiSpec?: any): FrontendMani
     const uiSpecComponents = (uiSpec.components as Array<{ name?: string; path?: string; purpose?: string }>)
       .slice(0, MAX_COMPONENTS)
       .map((c) => {
-        const name = String(c.name || '').trim() || 'Section';
+        const rawName = String(c.name || '').trim() || 'Section';
+        const name = deReserveComponentName(rawName);
         const filePath = c.path && String(c.path).startsWith('src/components/')
           ? String(c.path)
           : `src/components/${name}.jsx`;
@@ -213,7 +283,8 @@ function fallbackFrontendManifest(requirements: any, uiSpec?: any): FrontendMani
     ...(authRequired ? [{ path: 'src/components/Login.jsx', name: 'Login', purpose: 'Authentication form for email and password login.' }] : []),
     ...pages.slice(0, 3).map((page: any, i: number) => {
       const pageLabel = typeof page === 'string' ? page : String(page?.name || page?.title || page?.path || `Page ${i + 1}`);
-      const slug = pageLabel.replace(/[^a-zA-Z0-9]/g, '') || `Page${i + 1}`;
+      const rawSlug = pageLabel.replace(/[^a-zA-Z0-9]/g, '') || `Page${i + 1}`;
+      const slug = deReserveComponentName(rawSlug);
       return { path: `src/components/${slug}.jsx`, name: slug, purpose: `${pageLabel} page content and functionality.` };
     }),
   ];
@@ -795,7 +866,7 @@ function estimateComponentBudget(
 function estimateAppBudget(importsCount: number, backendRequired: boolean): TokenBudget {
   const initial = 2800 + importsCount * 220 + (backendRequired ? 700 : 0);
   return normalizeBudget({
-    initial: Math.max(3500, Math.min(11000, initial)),
+    initial: Math.max(3500, Math.min(14000, initial)),
     ceiling: 18000,
   });
 }
@@ -892,7 +963,11 @@ Rules:
       const completion = await llmProxy.chatCompletion(messages, model, 0.0, 0.9, currentBudget);
       rawContent = completion.choices?.[0]?.message?.content || '';
       if (!rawContent.trim()) throw new Error(`${label}: LLM returned empty response`);
-      return parseFileBlock(rawContent, expectedPath);
+      const parsedFile = parseFileBlock(rawContent, expectedPath);
+      if (isProbablyTruncatedGeneratedFile(parsedFile.path, parsedFile.content)) {
+        throw new Error(`${label}: truncated file block or too-short file content for ${parsedFile.path}`);
+      }
+      return parsedFile;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const looksTruncated = /Truncated file block|No <<<FILE/i.test(message);
@@ -961,7 +1036,8 @@ RULES:
 
   const normalizedComponents = components.map((component, index) => {
     const fallbackName = `GeneratedSection${index + 1}`;
-    const componentName = toComponentName(component?.name, fallbackName);
+    const rawName = toComponentName(component?.name, fallbackName);
+    const componentName = deReserveComponentName(rawName);
     return {
       ...component,
       path: sanitizeComponentPath(component?.path || `src/components/${componentName}.jsx`, index),
@@ -978,7 +1054,7 @@ RULES:
       .filter((c) => c.name && !manifestNames.has(c.name));
     if (missing.length > 0) {
       const extra = missing.flatMap((c, idx) => {
-        const safeName = toComponentName(c.name, `Section${idx + 1}`);
+        const safeName = deReserveComponentName(toComponentName(c.name, `Section${idx + 1}`));
         return [{ path: `src/components/${safeName}.jsx`, name: safeName, purpose: String(c.purpose || `${safeName} component`) }];
       });
       manifest.components = [...manifest.components, ...extra];
@@ -1143,14 +1219,62 @@ CRITICAL RULES:
   return appFile;
 }
 
+// Extract className tokens that actually appear in the generated JSX, so the
+// CSS prompt only has to style what exists — not re-read the entire codebase.
+function extractClassNames(jsxSources: string[]): string[] {
+  const found = new Set<string>();
+  const classAttrRe = /className\s*=\s*(?:"([^"]+)"|'([^']+)'|\{`([^`]+)`\})/g;
+  for (const src of jsxSources) {
+    let m: RegExpExecArray | null;
+    while ((m = classAttrRe.exec(src)) !== null) {
+      const raw = (m[1] || m[2] || m[3] || '').trim();
+      if (!raw) continue;
+      // Strip template-literal interpolations like ${cond ? 'a' : 'b'}.
+      raw.replace(/\$\{[^}]*\}/g, ' ').split(/\s+/).forEach((tok) => {
+        if (tok && /^[a-zA-Z][\w-]*$/.test(tok)) found.add(tok);
+      });
+    }
+  }
+  return Array.from(found).sort();
+}
+
 async function generateFrontendCss(manifest: FrontendManifest, requirements: any, appFile: GeneratedFile, componentFiles: GeneratedFile[], llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {
-  const userMessage = String(requirements?.userMessage || '').slice(0, 300);
-  const systemPrompt = `Generate src/index.css for this React app: "${userMessage || manifest.appName}". Match the visual style to the app's purpose. Output a single complete CSS file.`;
-  const parsed = await generateFile(llmProxy, model, 'frontendCss', 'src/index.css', systemPrompt, { manifest, requirements, appSnippet: appFile.content.slice(0, 4000), componentSnippets: componentFiles.map((f) => ({ path: f.path, content: f.content.slice(0, 1800) })) }, { initial: 4000, ceiling: 10000 });
+  const userMessage = String(requirements?.userMessage || '').slice(0, 400);
+  const styleNotes = String((manifest as any)?.styleNotes || '').slice(0, 600);
+  const classNames = extractClassNames([appFile.content, ...componentFiles.map((f) => f.content)]).slice(0, 220);
+
+  const systemPrompt = `Generate src/index.css for this React app: "${userMessage || manifest.appName}".
+
+The app's JSX uses the following class names — your CSS MUST define rules for all of them (plus base element resets):
+${classNames.map((c) => `.${c}`).join(', ') || '(no className attributes found — emit a sensible base stylesheet)'}
+
+${styleNotes ? `Style direction: ${styleNotes}` : ''}
+
+Rules:
+- Output ONE complete, self-contained stylesheet.
+- Use plain CSS (no preprocessor syntax). CSS variables on :root are fine.
+- Include element resets, layout, typography, components, and responsive rules.
+- Do NOT omit selectors for the class names above. Do NOT truncate.`;
+
+  // CSS for rich landing/marketing pages routinely lands at 12k-18k output
+  // tokens. Use a generous ceiling close to ABSOLUTE_TOKEN_CEILING so we
+  // don't silently fall back to the bare-bones fallback CSS.
+  const parsed = await generateFile(
+    llmProxy,
+    model,
+    'frontendCss',
+    'src/index.css',
+    systemPrompt,
+    { appName: manifest.appName, classNames, styleNotes },
+    { initial: 6000, ceiling: 18000 }
+  );
+  if (isProbablyTruncatedGeneratedFile(parsed.path, parsed.content)) {
+    throw new Error(`frontendCss: generated content appears too short or incomplete for ${parsed.path}`);
+  }
   return validateGeneratedFile(parsed, 'src/index.css', 'frontend', 'frontendCss');
 }
 
-function backendRouteFallbackFiles(manifest: BackendManifest): GeneratedFile[] {
+function buildBackendFilesFromManifest(manifest: BackendManifest): GeneratedFile[] {
   const tables = Array.isArray(manifest.tables) && manifest.tables.length > 0 ? manifest.tables : [{ name: SHARED_TABLE_NAME, columns: SHARED_TABLE_COLUMNS }];
   return [
     ...backendScaffold(),
@@ -1167,13 +1291,8 @@ function backendRouteFallbackFiles(manifest: BackendManifest): GeneratedFile[] {
   ];
 }
 
-function buildBackendFilesFromManifest(manifest: BackendManifest): GeneratedFile[] {
-  const files = backendRouteFallbackFiles(manifest);
-  const resources = (manifest.resources || []).slice(0, MAX_BACKEND_ROUTES);
-  for (const resource of resources) {
-    files.push(backendRouteFileStub(resource));
-  }
-  return files;
+function backendRouteFallbackFiles(manifest: BackendManifest): GeneratedFile[] {
+  return (manifest.resources || []).slice(0, MAX_BACKEND_ROUTES).map((resource) => backendRouteFileStub(resource));
 }
 
 async function generateBackendInitSql(manifest: BackendManifest, requirements: any, llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {

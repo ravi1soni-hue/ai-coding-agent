@@ -194,13 +194,16 @@ async function loadSnapshotInto(scope: AdapterScope): Promise<ProjectMemory | nu
 }
 
 async function writeEvent(scope: AdapterScope, event: OrchestrationEvent): Promise<void> {
+  const payload = event.type === 'stage_complete' && event.payload && typeof event.payload === 'object'
+    ? { ...event.payload, output: undefined }
+    : event.payload;
   await appendProjectEvent({
     projectId: scope.projectId,
     userId: scope.userId,
     eventType: event.type,
     role: 'system',
     message: event.message,
-    payload: event.payload,
+    payload,
   });
 }
 

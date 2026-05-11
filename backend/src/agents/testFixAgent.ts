@@ -1,4 +1,5 @@
 // Test & Fix Agent
+import crypto from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 import { debug, warn as logWarn, error as logError } from '../utils/logger';
@@ -115,6 +116,29 @@ function validateAndFixPackageJson(files: GeneratedFile[], pkgPath: 'package.jso
   debug('testFixAgent:missingDeps', { pkgPath, missing });
   pkg.dependencies = { ...deps, ...missing };
   return JSON.stringify(pkg, null, 2);
+}
+
+async function fingerprintWorkspace(workspaceDir: string): Promise<string> {
+  const entries: Array<{ path: string; hash: string }> = [];
+
+  async function walk(dir: string) {
+    const children = await fs.readdir(dir, { withFileTypes: true });
+    for (const child of children) {
+      const childPath = path.join(dir, child.name);
+      if (child.isDirectory()) {
+        if (child.name === 'node_modules' || child.name === '.git' || child.name === 'dist') continue;
+        await walk(childPath);
+      } else if (child.isFile()) {
+        const content = await fs.readFile(childPath);
+        const hash = crypto.createHash('sha256').update(childPath).update(content).digest('hex');
+        entries.push({ path: path.relative(workspaceDir, childPath), hash });
+      }
+    }
+  }
+
+  await walk(workspaceDir);
+  entries.sort((a, b) => a.path.localeCompare(b.path));
+  return crypto.createHash('sha256').update(entries.map((entry) => `${entry.path}:${entry.hash}`).join('|')).digest('hex');
 }
 
 /**
@@ -293,20 +317,34 @@ export async function testFixAgent(input: {
     do {
       info(`Build attempt ${retries + 1} of 3 — running npm install and build (this can take a few minutes)...`);
       debug('testFixAgent:attempt', { attempt: retries + 1 });
-      lastResult = await input.buildFn();
-      debug('testFixAgent:buildResult', { success: lastResult.success });
+      const currentResult = await input.buildFn();
+      debug('testFixAgent:buildResult', { success: currentResult.success });
 
-      if (lastResult.success) {
+      if (currentResult.success) {
         info(retries > 0 ? `Build succeeded after ${retries + 1} attempt(s).` : 'Build succeeded.');
         debug('testFixAgent:success', { fixed: retries > 0 });
-        return { ...lastResult, fixed: retries > 0 };
+        return { ...currentResult, fixed: retries > 0 };
       }
 
+      if (lastResult && currentResult.logs.trim() === lastResult.logs.trim()) {
+        logWarn('testFixAgent:stagnant-failure', { attempt: retries + 1 });
+        break;
+      }
+
+      lastResult = currentResult;
       if (input.fixFn && retries < 2) {
         info(`Build failed — invoking AI self-heal (attempt ${retries + 1})...`);
         debug('testFixAgent:invoking-fixFn', { retry: retries + 1 });
         try {
+          const preSnapshot = input.workspaceDir ? await fingerprintWorkspace(input.workspaceDir) : undefined;
           await input.fixFn(lastResult.logs);
+          if (input.workspaceDir && preSnapshot) {
+            const postSnapshot = await fingerprintWorkspace(input.workspaceDir);
+            if (preSnapshot === postSnapshot) {
+              logWarn('testFixAgent:fixFn-noop', { retry: retries + 1, workspaceDir: input.workspaceDir });
+              break;
+            }
+          }
         } catch (fixErr) {
           logError('testFixAgent:fixFn-error', fixErr);
         }

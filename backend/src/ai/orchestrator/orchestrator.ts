@@ -257,7 +257,14 @@ async function stageWrap<T>(
           }
         }
       }
-      adapter?.emit?.({ type: 'stage_complete', stage, output });
+      // Do NOT ship `output` over the WS for every stage.
+      // For code_generation in particular it carries the entire generated
+      // file set (hundreds of KB) — which has caused WS frame truncation,
+      // mid-stream disconnects, and the client's JSON.parse fallback to
+      // dump the raw frame into chat as an "assistant" message.
+      // The client never reads `output`; files are already streamed via
+      // per-file FILE_WRITTEN / file_generated events.
+      adapter?.emit?.({ type: 'stage_complete', stage });
       return createSuccessResult(stage, output, undefined, []);
     } catch (error) {
       lastError = error;
@@ -589,7 +596,7 @@ async function runConfirmationGate(
     appendHistory(memory, 'confirmation', 'confirmation_received', 'User confirmed project spec');
     await persistMemory(memory, options.persistence);
     await persistLastEvent(memory, options.persistence);
-    options.adapter?.emit?.({ type: 'stage_complete', stage: 'confirmation', output: projectSpec });
+    options.adapter?.emit?.({ type: 'stage_complete', stage: 'confirmation' });
     return { confirmed: true };
   }
 

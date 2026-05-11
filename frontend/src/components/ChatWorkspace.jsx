@@ -175,7 +175,16 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
     }
 
     if (restored.length === 0) return;
-    setMessages((prev) => (prev.length === 0 ? restored : [...prev, ...restored]));
+    setMessages((prev) => {
+      const existing = new Set(prev.map((message) => `${message.role}\u0000${message.text}`));
+      const unique = restored.filter((message) => {
+        const key = `${message.role}\u0000${message.text}`;
+        if (existing.has(key)) return false;
+        existing.add(key);
+        return true;
+      });
+      return unique.length === 0 ? prev : [...prev, ...unique];
+    });
   }
 
   useEffect(() => {
@@ -291,8 +300,15 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
       let payload = event.data;
       try {
         payload = JSON.parse(event.data);
-      } catch {
-        pushMessage('assistant', String(event.data));
+      } catch (err) {
+        // Server-side protocol events are always JSON. A parse failure here
+        // means the frame was truncated/fragmented in transit — surfacing the
+        // raw payload to the chat used to dump entire stage_complete frames
+        // (with the full generated codebase inside) as an "assistant" message.
+        // Log for debugging and show a discreet notice instead.
+        // eslint-disable-next-line no-console
+        console.warn('WS: dropped non-JSON frame', { size: typeof event.data === 'string' ? event.data.length : undefined, error: err });
+        pushMessage('details', 'Dropped a malformed event from the server (see browser console).');
         return;
       }
 
