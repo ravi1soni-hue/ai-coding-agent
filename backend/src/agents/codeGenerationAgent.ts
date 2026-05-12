@@ -75,8 +75,6 @@ const BACKEND_ALLOWED_PREFIXES = [
   'backend/src/lib/',
   'backend/src/validators/',
 ];
-const MAX_COMPONENTS = 24;
-const MAX_BACKEND_ROUTES = 12;
 const MAX_BUILD_ATTEMPTS = 2;
 
 // Libraries that require external API keys / service credentials at runtime.
@@ -100,7 +98,6 @@ const BANNED_EXTERNAL_PACKAGES = new Set([
 const BANNED_IMPORTS_RULE = `BANNED LIBRARIES (NEVER import or use these — they require external service credentials that are not available at generation time, producing broken code):
 @auth0/auth0-react, auth0, firebase, @supabase/supabase-js, stripe, @stripe/stripe-js, nodemailer, socket.io, socket.io-client, @sendgrid/mail, twilio, aws-sdk, @aws-sdk/*, googleapis, paypal-rest-sdk.
 If the user's request implies payments, email, or auth from a third-party provider: render a realistic static UI placeholder (e.g. a styled "Payment coming soon" card) — do NOT import the real library or call a real API.`;
-const MAX_LLM_CALLS_PER_PROJECT = 20;
 const BAN_LIST = ['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', '.pnpm-store', 'bun.lockb'];
 // Default table name/columns used only when the LLM does not specify a domain-specific schema
 const SHARED_TABLE_NAME = 'project_items';
@@ -212,7 +209,15 @@ function isProbablyTruncatedGeneratedFile(filePath: string, content: string): bo
 function containsPlaceholderText(value: string): boolean {
   // "\breplace\b" was intentionally removed: it matches legitimate content (CSS replace(),
   // natural-language sentences) and caused false rejections that silently produced stubs.
-  return /(?:\bTODO\b|\bplaceholder\b|\bgeneric text\b)/i.test(value);
+  // "placeholder" must NOT match the standard HTML attribute (placeholder="...") — that pattern
+  // caused every component with an <input> or <textarea> to fail validation and become a stub.
+  // Only flag it when it reads like stub prose: as a comment keyword, JSX text, or in patterns
+  // like "placeholder text" / "placeholder content" / "placeholder data".
+  if (/\bTODO\b|\bgeneric text\b/i.test(value)) return true;
+  // Strip all HTML/JSX attribute assignments before scanning for the word "placeholder" so that
+  // legitimate `placeholder="..."` and `placeholder={...}` attribute pairs are ignored.
+  const withoutAttributes = value.replace(/\bplaceholder\s*=\s*(?:"[^"]*"|'[^']*'|`[^`]*`|\{[^}]*\})/gi, '');
+  return /\bplaceholder\b/i.test(withoutAttributes);
 }
 
 function validateGeneratedFile(file: unknown, expectedPath: string | undefined, scope: 'frontend' | 'backend', label: string): GeneratedFile {
@@ -339,7 +344,7 @@ function fallbackFrontendManifest(requirements: any, uiSpec?: any): FrontendMani
   const pages = Array.isArray(requirements?.pages) ? requirements.pages : [];
   const components = [
     ...(authRequired ? [{ path: 'src/components/Login.jsx', name: 'Login', purpose: 'Authentication form for email and password login.' }] : []),
-    ...pages.slice(0, MAX_COMPONENTS).map((page: any, i: number) => {
+    ...pages.map((page: any, i: number) => {
       const pageLabel = typeof page === 'string' ? page : String(page?.name || page?.title || page?.path || `Page ${i + 1}`);
       const rawSlug = pageLabel.replace(/[^a-zA-Z0-9]/g, '') || `Page${i + 1}`;
       const slug = deReserveComponentName(rawSlug);
@@ -354,7 +359,7 @@ function fallbackFrontendManifest(requirements: any, uiSpec?: any): FrontendMani
     );
   }
 
-  return { appName, dependencies: {}, apiResources: [], components: components.slice(0, MAX_COMPONENTS), styleNotes: 'Clean responsive application UI.' };
+  return { appName, dependencies: {}, apiResources: [], components, styleNotes: 'Clean responsive application UI.' };
 }
 
 // Returns components that should be rendered directly in App.jsx (root-level only).
@@ -590,7 +595,7 @@ Rules:
 function parseBackendManifest(raw: unknown): BackendManifest {
   const manifest = assertObject(raw, 'backendManifest') as BackendManifest;
   const resources = Array.isArray(manifest.resources) ? manifest.resources : [];
-  const normalizedResources = resources.slice(0, MAX_BACKEND_ROUTES).map((resource, index) => {
+  const normalizedResources = resources.map((resource, index) => {
     // Slugify the name so human-readable values like "CV Uploads" or "Parsing / Sync"
     // don't silently fail path/route validation downstream.
     const rawName = String(resource?.name || `resource${index + 1}`);
@@ -609,7 +614,7 @@ function parseBackendManifest(raw: unknown): BackendManifest {
   });
 
   const tables = Array.isArray(manifest.tables) ? manifest.tables : [];
-  const normalizedTables = tables.slice(0, MAX_BACKEND_ROUTES).map((table) => {
+  const normalizedTables = tables.map((table) => {
     const tableName = String(table?.name || SHARED_TABLE_NAME).replace(/[^a-zA-Z0-9_]/g, '_');
     const rawColumns: string[] = Array.isArray(table?.columns) && table.columns.length > 0 ? table.columns : [];
     // Ensure required multi-tenant columns are always present
@@ -982,10 +987,12 @@ function estimateComponentBudget(
   );
 
   return normalizeBudget({
-    // Floor raised from 3000→5000: logs showed 13/48 components hit 3000-token limit on
-    // first attempt, each triggering a costly retry. 5000 covers the vast majority in one pass.
-    initial: Math.max(5000, Math.min(8000, initial)),
-    ceiling: 24000,
+    // Floor at 4000 so tiny components never waste budget; no upper clamp so
+    // complex components (large tables, many state fields, many sections) get
+    // the tokens they actually need on the first attempt instead of truncating
+    // and triggering a costly retry.
+    initial: Math.max(4000, initial),
+    ceiling: 32000,
   });
 }
 
@@ -1028,6 +1035,7 @@ async function generateJson(
       return parseJsonResponse(rawContent);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (/Budget Exceeded/i.test(message)) throw err;
       const looksTruncated = /No valid JSON found|Unexpected end of JSON|Unterminated string/i.test(message);
       const nextBudget = looksTruncated && currentBudget < ceiling
         ? Math.min(ceiling, Math.max(currentBudget + 4000, Math.ceil(currentBudget * 2.2)))
@@ -1096,6 +1104,8 @@ Rules:
       return parsedFile;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      // Budget exhausted for this project — retrying won't help, fail immediately.
+      if (/Budget Exceeded/i.test(message)) throw err;
       const looksTruncated = /Truncated file block|No <<<FILE/i.test(message);
       const nextBudget = looksTruncated && currentBudget < ceiling
         ? Math.min(ceiling, Math.max(currentBudget + 4000, Math.ceil(currentBudget * 2.0)))
@@ -1240,10 +1250,6 @@ RULES:
     seenSlugs.add(slug);
     return true;
   });
-
-  if (manifest.components.length > MAX_COMPONENTS && !Array.isArray(uiSpec?.components)) {
-    manifest.components = manifest.components.slice(0, MAX_COMPONENTS);
-  }
 
   return manifest;
 }
@@ -1498,7 +1504,7 @@ function buildBackendFilesFromManifest(manifest: BackendManifest): GeneratedFile
 }
 
 function backendRouteFallbackFiles(manifest: BackendManifest): GeneratedFile[] {
-  return (manifest.resources || []).slice(0, MAX_BACKEND_ROUTES).map((resource) => backendRouteFileStub(resource));
+  return (manifest.resources || []).map((resource) => backendRouteFileStub(resource));
 }
 
 async function generateBackendInitSql(manifest: BackendManifest, requirements: any, llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {
@@ -1699,16 +1705,18 @@ export async function codeGenerationAgent(input: any) {
     }
 
     const scaffoldFiles = frontendScaffold(manifest);
-    // Cap is the maximum of: hardcoded MAX_COMPONENTS, uiSpec component count (authoritative
-    // user intent), and blueprint component file count (single source of truth for what must exist).
+    // Use every component the blueprint/uiSpec decided the project needs.
+    // No artificial cap: the project defines its own scope.
     const hasUiSpecComponents = Array.isArray(uiSpec?.components) && uiSpec.components.length > 0;
     const blueprintComponentCount = blueprint.files.filter((f) => f.kind === 'component' && f.path.startsWith('src/components/')).length;
-    const cap = Math.max(MAX_COMPONENTS, hasUiSpecComponents ? (uiSpec.components as unknown[]).length : 0, blueprintComponentCount);
-    const componentSpecs = (manifest.components || []).slice(0, cap);
+    const authoritative = Math.max(hasUiSpecComponents ? (uiSpec.components as unknown[]).length : 0, blueprintComponentCount);
+    const componentSpecs = authoritative > 0
+      ? (manifest.components || []).slice(0, authoritative)
+      : (manifest.components || []);
 
-    // Generate all components in parallel (concurrency=6) — previously sequential,
-    // causing 10-15min timeouts for 40+ component projects.
-    const COMPONENT_CONCURRENCY = 6;
+    // Scale concurrency with project size: small projects get fewer workers (less
+    // contention on the LLM proxy), large projects scale up to 12.
+    const COMPONENT_CONCURRENCY = Math.min(12, Math.max(4, Math.ceil(componentSpecs.length / 4)));
     const componentResults: Array<{ index: number; file: GeneratedFile }> = [];
     const queue = componentSpecs.map((component, index) => ({ component, index }));
     const generatedDependencies = new Map<string, string>();

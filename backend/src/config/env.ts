@@ -40,11 +40,11 @@ export const config = {
   WS_ALLOWED_ORIGINS: process.env.WS_ALLOWED_ORIGINS || '',
   LIMITS: {
     maxRetriesPerStage: parseInt(process.env.MAX_RETRIES_PER_STAGE || '2', 10),
-    maxLlmCallsPerProject: parseInt(process.env.MAX_LLM_CALLS_PER_PROJECT || '20', 10),
     maxBuildAttempts: parseInt(process.env.MAX_BUILD_ATTEMPTS || '2', 10),
-    // Phase 3 budget controller: approximate total tokens per projectId allowed
-    // before orchestration fails with "Budget Exceeded".
-    maxTokensPerProject: parseInt(process.env.MAX_TOKENS_PER_PROJECT || '300000', 10),
+    // Token budget controller: charges actual tokens consumed per response (not
+    // the max_tokens ceiling), so this scales with real usage. Projects with
+    // many components or complex backends will legitimately use more tokens.
+    maxTokensPerProject: parseInt(process.env.MAX_TOKENS_PER_PROJECT || '1000000', 10),
     // Phase 6: Global wall-clock orchestration timeout.
     // Code generation alone can take 15+ min for complex multi-component apps;
     // code_generation gets its own per-stage minimum budget on top of this.
@@ -91,10 +91,7 @@ function validateConfig() {
   if (config.LIMITS.maxRetriesPerStage < 0) {
     errors.push('MAX_RETRIES_PER_STAGE must be non-negative');
   }
-  if (config.LIMITS.maxLlmCallsPerProject < 1) {
-    errors.push('MAX_LLM_CALLS_PER_PROJECT must be at least 1');
-  }
-  if (config.LIMITS.maxBuildAttempts < 1) {
+if (config.LIMITS.maxBuildAttempts < 1) {
     errors.push('MAX_BUILD_ATTEMPTS must be at least 1');
   }
 

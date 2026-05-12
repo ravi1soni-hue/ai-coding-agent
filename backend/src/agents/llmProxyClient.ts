@@ -142,12 +142,6 @@ export class LLMProxyClient {
       throw new Error(`LLM Proxy chatCompletion failed: No valid API key configured for model "${selectedModel}". Check your environment variables for API_KEY settings.`);
     }
 
-    // Phase 3 budget controller: enforce an approximate token budget per call
-    // (using max_tokens as a conservative estimate).
-    if (this.projectId) {
-      enforceBudgetOrThrow(this.projectId, max_tokens);
-    }
-
     const estimatedPayloadSize = JSON.stringify(messages || []).length;
     const estimatedWorkMs = Math.max(
       max_tokens * 35,
@@ -247,6 +241,12 @@ export class LLMProxyClient {
 
             if (modelCandidate !== selectedModel || chatUrl !== urlCandidates[0]) {
               this.log('chatCompletion recovered with fallback target', { selectedModel, fallbackModel: modelCandidate, chatUrl });
+            }
+            // Charge actual tokens used (not the max_tokens ceiling) so concurrent
+            // workers don't exhaust the project budget with phantom over-estimates.
+            if (this.projectId) {
+              const actualTokens = data?.usage?.total_tokens ?? data?.usage?.output_tokens ?? max_tokens;
+              enforceBudgetOrThrow(this.projectId, actualTokens);
             }
             return data;
           } catch (err: any) {
