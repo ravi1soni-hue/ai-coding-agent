@@ -160,6 +160,39 @@ async function cleanStaleDist(workspaceRoot: string): Promise<void> {
   ]);
 }
 
+// Runs a command directly on the host (no Docker). Used for npm install which needs
+// network access to reach the npm registry — Docker's --network none would block it.
+function runCommandOnHost(
+  command: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+  onLog?: (chunk: string) => void
+): Promise<{ code: number; output: string }> {
+  return new Promise((resolve) => {
+    let output = '';
+    const child = spawn(command, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve({ code: 124, output: `${output}\nTimed out after ${timeoutMs}ms` });
+    }, timeoutMs);
+
+    child.stdout.on('data', (chunk) => { const str = String(chunk); output += str; onLog?.(str); });
+    child.stderr.on('data', (chunk) => { const str = String(chunk); output += str; onLog?.(str); });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code: typeof code === 'number' ? code : 1, output });
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolve({ code: 1, output: `${output}\n${String(err)}` });
+    });
+  });
+}
+
 function runCommand(
   command: string,
   args: string[],
@@ -253,32 +286,34 @@ async function installDependencies(
   const cmdTimeout = deadlineMs(deadlineAt);
   const lockPath = path.join(workspaceDir, 'package-lock.json');
   if (await fileExists(lockPath)) {
-    const ciResult = await runCommand('npm', ['ci', '--no-audit', '--no-fund'], workspaceDir, cmdTimeout, onLog);
+    const ciResult = await runCommandOnHost('npm', ['ci', '--no-audit', '--no-fund'], workspaceDir, cmdTimeout, onLog);
     if (ciResult.code === 0) return ciResult;
-    const fallbackResult = await runCommand('npm', ['install', '--no-audit', '--no-fund'], workspaceDir, deadlineMs(deadlineAt), onLog);
+    const fallbackResult = await runCommandOnHost('npm', ['install', '--no-audit', '--no-fund'], workspaceDir, deadlineMs(deadlineAt), onLog);
     return {
       code: fallbackResult.code,
       output: `${ciResult.output.trim()}\n\n--- npm ci failed, falling back to npm install ---\n\n${fallbackResult.output.trim()}`,
     };
   }
-  return runCommand('npm', ['install', '--no-audit', '--no-fund'], workspaceDir, cmdTimeout, onLog);
+  return runCommandOnHost('npm', ['install', '--no-audit', '--no-fund'], workspaceDir, cmdTimeout, onLog);
 }
 
 async function runFrontendTypeCheck(
   workspaceDir: string,
   onLog?: (chunk: string) => void,
-  deadlineAt?: number
+  deadlineAt?: number,
+  useDocker = true
 ): Promise<{ code: number; output: string }> {
+  const runner = useDocker ? runCommand : runCommandOnHost;
   const packageJsonPath = path.join(workspaceDir, 'package.json');
   try {
     const raw = await fs.readFile(packageJsonPath, 'utf8');
     const pkg = JSON.parse(raw) as { scripts?: Record<string, string>; dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
     if (pkg.scripts?.['type-check']) {
-      return runCommand('npm', ['run', 'type-check'], workspaceDir, deadlineMs(deadlineAt), onLog);
+      return runner('npm', ['run', 'type-check'], workspaceDir, deadlineMs(deadlineAt), onLog);
     }
     const tsconfigPath = path.join(workspaceDir, 'tsconfig.json');
     if (await fileExists(tsconfigPath) || pkg.devDependencies?.typescript || pkg.dependencies?.typescript) {
-      return runCommand('npx', ['tsc', '--noEmit'], workspaceDir, deadlineMs(deadlineAt), onLog);
+      return runner('npx', ['tsc', '--noEmit'], workspaceDir, deadlineMs(deadlineAt), onLog);
     }
   } catch {
     // Fall back gracefully when package.json is missing or malformed.
@@ -289,17 +324,21 @@ async function runFrontendTypeCheck(
 async function buildWorkspace(
   workspaceDir: string,
   onLog?: (chunk: string) => void,
-  deadlineAt?: number
+  deadlineAt?: number,
+  useDocker = true
 ): Promise<{ code: number; output: string }> {
-  return runCommand('npm', ['run', 'build'], workspaceDir, deadlineMs(deadlineAt), onLog);
+  const runner = useDocker ? runCommand : runCommandOnHost;
+  return runner('npm', ['run', 'build'], workspaceDir, deadlineMs(deadlineAt), onLog);
 }
 
 async function testWorkspace(
   workspaceDir: string,
   onLog?: (chunk: string) => void,
-  deadlineAt?: number
+  deadlineAt?: number,
+  useDocker = true
 ): Promise<{ code: number; output: string }> {
-  return runCommand('npm', ['test', '--', '--watch=false'], workspaceDir, deadlineMs(deadlineAt), onLog);
+  const runner = useDocker ? runCommand : runCommandOnHost;
+  return runner('npm', ['test', '--', '--watch=false'], workspaceDir, deadlineMs(deadlineAt), onLog);
 }
 
 export async function runBuildWorker(payload: BuildWorkerPayload): Promise<BuildWorkerResult> {
@@ -315,22 +354,13 @@ export async function runBuildWorker(payload: BuildWorkerPayload): Promise<Build
   const logs: string[] = [];
   logs.push(`[buildWorker] workspaceRoot=${workspaceRoot}`);
 
-  // Sandbox validation: Docker-in-Docker (DinD) is required for containerized builds.
-  // Many PaaS environments (e.g. Railway/Vercel) disallow nested Docker.
+  // Prefer Docker sandboxing for build/test. Fall back to host execution when Docker
+  // is unavailable (e.g. PaaS environments that disallow DinD). npm install always
+  // runs on the host regardless, since it needs network access to the npm registry.
   const dockerCheck = await isDockerAvailable(7_500);
-  if (!dockerCheck.available) {
-    const reason = dockerCheck.reason || 'docker not available';
-    const msg =
-      `[buildWorker] Sandbox validation failed: docker is unavailable.\n\n` +
-      `Reason: ${reason}\n\n` +
-      `This platform likely does not support "docker run" inside your running container.\n` +
-      `Fix options:\n` +
-      `  1) Deploy the backend on a VPS/host where Docker socket access is allowed\n` +
-      `  2) Replace the Docker sandbox with a non-Docker sandbox strategy (restricted Node VM / Worker Thread)\n` +
-      `  3) Or document/guard DinD requirements at deploy time.`;
-
-    logs.push(msg);
-    return { success: false, logs: logs.join('\n\n') };
+  const useDocker = dockerCheck.available;
+  if (!useDocker) {
+    logs.push(`[buildWorker] Docker unavailable (${dockerCheck.reason}); running build/test on host without sandbox.`);
   }
 
   const validation = await validateGeneratedProject(workspaceRoot);
@@ -359,20 +389,20 @@ export async function runBuildWorker(payload: BuildWorkerPayload): Promise<Build
     logs.push(installResult.output.trim());
     if (installResult.code !== 0) return { success: false, logs: logs.join('\n\n') };
 
-    const typeCheckResult = await runFrontendTypeCheck(frontendDir, onLog, deadlineAt);
+    const typeCheckResult = await runFrontendTypeCheck(frontendDir, onLog, deadlineAt, useDocker);
     if (typeCheckResult.code !== 0) {
       logs.push('$ npm run type-check (frontend)');
       logs.push(typeCheckResult.output.trim());
       return { success: false, logs: logs.join('\n\n') };
     }
 
-    const buildResult = await buildWorkspace(frontendDir, onLog, deadlineAt);
+    const buildResult = await buildWorkspace(frontendDir, onLog, deadlineAt, useDocker);
     logs.push('$ npm run build (frontend)');
     logs.push(buildResult.output.trim());
     if (buildResult.code !== 0) return { success: false, logs: logs.join('\n\n') };
 
     if (await hasTestScript(frontendDir)) {
-      const testResult = await testWorkspace(frontendDir, onLog, deadlineAt);
+      const testResult = await testWorkspace(frontendDir, onLog, deadlineAt, useDocker);
       logs.push('$ npm test -- --watch=false (frontend)');
       logs.push(testResult.output.trim());
       if (testResult.code !== 0) return { success: false, logs: logs.join('\n\n') };
@@ -398,7 +428,7 @@ export async function runBuildWorker(payload: BuildWorkerPayload): Promise<Build
       const raw = await fs.readFile(path.join(backendDir, 'package.json'), 'utf8');
       const pkg = JSON.parse(raw) as { scripts?: Record<string, string> };
       if (pkg.scripts?.build) {
-        const buildResult = await buildWorkspace(backendDir, onLog, deadlineAt);
+        const buildResult = await buildWorkspace(backendDir, onLog, deadlineAt, useDocker);
         logs.push('$ npm run build (backend)');
         logs.push(buildResult.output.trim());
         if (buildResult.code !== 0) return { success: false, logs: logs.join('\n\n') };
@@ -410,7 +440,7 @@ export async function runBuildWorker(payload: BuildWorkerPayload): Promise<Build
     }
 
     if (await hasTestScript(backendDir)) {
-      const testResult = await testWorkspace(backendDir, onLog, deadlineAt);
+      const testResult = await testWorkspace(backendDir, onLog, deadlineAt, useDocker);
       logs.push('$ npm test -- --watch=false (backend)');
       logs.push(testResult.output.trim());
       if (testResult.code !== 0) return { success: false, logs: logs.join('\n\n') };

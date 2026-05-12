@@ -233,7 +233,7 @@ async function hashDirectory(rootDir: string): Promise<string> {
   return hash.digest('hex');
 }
 
-async function writeGeneratedFile(workspaceRoot: string, file: GeneratedFile): Promise<void> {
+export async function writeGeneratedFile(workspaceRoot: string, file: GeneratedFile): Promise<void> {
   const target = resolveWorkspacePath(workspaceRoot, file.path);
   debug('materializeProjectWorkspace:fileWrite', { path: target });
   await fs.mkdir(path.dirname(target), { recursive: true });

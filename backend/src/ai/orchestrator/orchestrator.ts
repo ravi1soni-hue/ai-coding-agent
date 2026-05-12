@@ -7,7 +7,7 @@ import { codeGenerationAgent } from '../../agents/codeGenerationAgent';
 import { testFixAgent } from '../../agents/testFixAgent';
 import { deploymentAgent } from '../../agents/deploymentAgent';
 import { reviewerAgent } from '../../agents/reviewerAgent';
-import { materializeProjectWorkspace } from '../../factory/projectFactory';
+import { materializeProjectWorkspace, writeGeneratedFile } from '../../factory/projectFactory';
 import { runBuildWorker, cleanupWorkspace } from '../../workers/buildWorker';
 import { consolidateProjectSpec, validateProjectSpec } from '../../agents/projectSpec';
 import { validateProjectConsistency, formatConsistencyIssues, type ConsistencyIssue } from '../../agents/projectConsistency';
@@ -1310,6 +1310,9 @@ export async function runAIOrchestration(
       deadlineAt: testDeadlineAt,
       fixFn: async (logs: string) => {
         await selfHealWithCodeGeneration(memory, command, projectSpec, logs, command.projectId, testDeadlineAt);
+        // Write healed files to disk so testFixAgent's fingerprint check detects a real change.
+        const healedFiles = memory.code?.files ?? [];
+        await Promise.all(healedFiles.map((f) => writeGeneratedFile(materializedRevision.workspaceDir, f).catch(() => {})));
       },
       emitInfo: (message: string) => adapter.emit?.({ type: 'info', stage: 'testing', message }),
     });
@@ -1320,7 +1323,16 @@ export async function runAIOrchestration(
 
   if (testResult.status !== 'success') return finalizeResult(memory, testResult, null, null);
 
-  await runFinalAudit(projectSpec, memory);
+  try {
+    await runFinalAudit(projectSpec, memory);
+  } catch (auditErr) {
+    // Final audit failures are non-blocking — log the issue and continue to
+    // deployment rather than leaving the project stuck in a non-failed terminal
+    // state with no path to recovery.
+    logError('orchestrator:finalAudit', auditErr);
+    appendIssue(memory, classifyError({ projectId: memory.projectId, sessionId: memory.sessionId, stage: 'testing' as any, error: auditErr, details: {} }));
+    await persistMemory(memory, persistence);
+  }
 
   const deploymentResult = await stageWrap(memory, 'deployment', memory.tests, async () => {
     const result = await deploymentAgent({
