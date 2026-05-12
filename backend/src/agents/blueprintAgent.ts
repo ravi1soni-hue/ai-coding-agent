@@ -76,10 +76,15 @@ function generateBackendRoutes(spec: StructuredSpec): BlueprintBackendRoute[] {
 }
 
 function deriveProjectType(requirements: any, backendRequired: boolean): ProjectBlueprintStrict['projectType'] {
-  const websiteType = String(requirements?.website_type || '').trim();
-  if (websiteType === 'landing_page') return 'landing_page';
-  if (websiteType === 'dashboard') return 'dashboard';
-  return backendRequired ? 'full_app' : 'landing_page';
+  const websiteType = String(requirements?.website_type || '').trim() as ProjectBlueprintStrict['projectType'];
+  const validTypes: ProjectBlueprintStrict['projectType'][] = [
+    'landing_page', 'dashboard', 'full_app', 'portfolio', 'ecommerce', 'marketplace',
+    'crm', 'social', 'lms', 'realtime', 'api_only', 'saas', 'blog', 'directory',
+  ];
+  if (validTypes.includes(websiteType)) return websiteType;
+  // Fallback: infer from context
+  if (!backendRequired) return 'landing_page';
+  return 'full_app';
 }
 
 function transitionTo(currentState: string, nextState: string): string {
@@ -325,7 +330,7 @@ export function generateBlueprint(structuredSpec: StructuredSpec, systemDesign: 
   const uiNavStrategy = String(uiSpec?.navigationStrategy || uiSpec?.layoutStructure?.navigationStrategy || '').toLowerCase();
   const derivedRouting = uiNavStrategy.includes('router') || uiNavStrategy.includes('route') || frontendPages.length > 1;
   const uiStateStrategy = String(uiSpec?.stateManagementStrategy || uiSpec?.layoutStructure?.stateManagement || '').toLowerCase();
-  const derivedStateManagement: 'local' | 'context' = uiStateStrategy.includes('context') ? 'context' : 'local';
+  const derivedStateManagement: 'local' | 'context' | 'zustand' = uiStateStrategy.includes('zustand') ? 'zustand' : uiStateStrategy.includes('context') ? 'context' : 'local';
 
   const strict: ProjectBlueprintStrict = {
     projectType: deriveProjectType(requirements, structuredSpec.backend_required),

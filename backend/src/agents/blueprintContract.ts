@@ -31,13 +31,13 @@ export type BlueprintState = {
 };
 
 export type ProjectBlueprintStrict = {
-  projectType: 'landing_page' | 'dashboard' | 'full_app';
+  projectType: 'landing_page' | 'dashboard' | 'full_app' | 'portfolio' | 'ecommerce' | 'marketplace' | 'crm' | 'social' | 'lms' | 'realtime' | 'api_only' | 'saas' | 'blog' | 'directory';
   modules: string[];
   frontend: {
     pages: string[];
     components: string[];
     routing: boolean;
-    stateManagement: 'local' | 'context';
+    stateManagement: 'local' | 'context' | 'zustand';
   };
   backend: {
     required: boolean;
@@ -93,8 +93,8 @@ export type ProjectBlueprint = {
 const REQUIRED_STRICT_FIELDS = ['projectType', 'modules', 'frontend', 'backend', 'database', 'structure'] as const;
 const REQUIRED_BUILD_FILES = ['package.json', 'index.html', 'vite.config.js', 'src/main.jsx', 'src/App.jsx', 'src/index.css'] as const;
 const REQUIRED_BACKEND_FILES = ['backend/package.json', 'backend/src/index.ts', 'backend/src/db/database.ts', 'backend/db/init.sql'] as const;
-const BLUEPRINT_PROJECT_TYPES = new Set(['landing_page', 'dashboard', 'full_app']);
-const BLUEPRINT_STATE_MANAGEMENT = new Set(['local', 'context']);
+const BLUEPRINT_PROJECT_TYPES = new Set(['landing_page', 'dashboard', 'full_app', 'portfolio', 'ecommerce', 'marketplace', 'crm', 'social', 'lms', 'realtime', 'api_only', 'saas', 'blog', 'directory']);
+const BLUEPRINT_STATE_MANAGEMENT = new Set(['local', 'context', 'zustand']);
 const BLUEPRINT_NAVIGATION_TYPES = new Set(['react-router', 'single-page']);
 const BLUEPRINT_STACK = { frontend: 'react-vite', backend: 'node-ts', database: 'postgresql' } as const;
 const BANNED_PLACEHOLDERS = /(TODO|placeholder|lorem ipsum|TBD|replace me|generic text)/i;
@@ -172,7 +172,7 @@ export function validateProjectBlueprint(raw: unknown, context?: { requirements?
   }
 
   const projectType = assertString(strict.projectType, 'strict.projectType');
-  if (!BLUEPRINT_PROJECT_TYPES.has(projectType)) throw new Error('strict.projectType must be landing_page, dashboard, or full_app');
+  if (!BLUEPRINT_PROJECT_TYPES.has(projectType)) throw new Error(`strict.projectType "${projectType}" is not a recognised type. Must be one of: ${[...BLUEPRINT_PROJECT_TYPES].join(', ')}`);
   const modules = assertStringArray(strict.modules, 'strict.modules');
   const frontend = assertRecord(strict.frontend, 'strict.frontend');
   const backend = assertRecord(strict.backend, 'strict.backend');
@@ -182,7 +182,7 @@ export function validateProjectBlueprint(raw: unknown, context?: { requirements?
   const pages = assertStringArray(frontend.pages, 'strict.frontend.pages');
   const components = assertStringArray(frontend.components, 'strict.frontend.components');
   if (typeof frontend.routing !== 'boolean') throw new Error('strict.frontend.routing must be boolean');
-  if (!BLUEPRINT_STATE_MANAGEMENT.has(String(frontend.stateManagement))) throw new Error('strict.frontend.stateManagement must be local or context');
+  if (!BLUEPRINT_STATE_MANAGEMENT.has(String(frontend.stateManagement))) throw new Error('strict.frontend.stateManagement must be local, context, or zustand');
 
   if (typeof backend.required !== 'boolean') throw new Error('strict.backend.required must be boolean');
   const backendModules = assertStringArray(backend.modules, 'strict.backend.modules');
@@ -220,7 +220,9 @@ export function validateProjectBlueprint(raw: unknown, context?: { requirements?
   if (!modules.length) throw new Error('strict.modules cannot be empty');
 
   const invariants = metadata?.invariants ? assertStringArray(metadata.invariants, 'metadata.invariants') : [];
-  if (invariants.length > 0 && !invariants.some((rule) => /project_id/i.test(rule))) throw new Error('metadata.invariants must include a project_id isolation rule');
+  // project_id isolation is only required for backend projects that persist data
+  const backendPersists = effectiveBackendRequired && tables.length > 0;
+  if (backendPersists && invariants.length > 0 && !invariants.some((rule) => /project_id/i.test(rule))) throw new Error('metadata.invariants must include a project_id isolation rule');
 
   const navigation = metadata?.navigation ? assertRecord(metadata.navigation, 'metadata.navigation') : undefined;
   if (navigation && !BLUEPRINT_NAVIGATION_TYPES.has(String(navigation.type))) throw new Error('metadata.navigation.type must be react-router or single-page');

@@ -41,8 +41,8 @@ function sanitizeInput(input: string): string {
   sanitized = sanitized.replace(/\.\./g, '');
   // Trim and limit length
   sanitized = sanitized.trim();
-  if (sanitized.length > 10000) {
-    sanitized = sanitized.slice(0, 10000) + '...';
+  if (sanitized.length > 50000) {
+    sanitized = sanitized.slice(0, 50000) + '...';
   }
   return sanitized;
 }

@@ -7,37 +7,108 @@ import { config as envConfig } from '../config/env';
 
 // Known third-party library versions for auto-remediation
 const KNOWN_LIBRARY_VERSIONS: Record<string, string> = {
-  // Frontend
+  // Frontend — routing
   'react-router-dom': '^6.20.0',
   'react-router': '^6.20.0',
+  // Frontend — state management
   'redux': '^4.2.1',
   'react-redux': '^8.1.3',
   '@reduxjs/toolkit': '^1.9.7',
+  'zustand': '^4.4.0',
+  'jotai': '^2.6.0',
+  'recoil': '^0.7.7',
+  'valtio': '^1.13.0',
+  'immer': '^10.0.0',
+  // Frontend — data fetching
   'axios': '^1.6.0',
+  'swr': '^2.2.4',
+  'react-query': '^3.39.3',
+  '@tanstack/react-query': '^5.0.0',
+  '@tanstack/react-table': '^8.11.0',
+  '@tanstack/react-router': '^1.15.0',
+  // Frontend — forms
+  'react-hook-form': '^7.48.0',
+  'formik': '^2.4.5',
+  'yup': '^1.3.2',
+  'zod': '^3.22.0',
+  // Frontend — utilities
   'lodash': '^4.17.21',
+  'lodash-es': '^4.17.21',
   'moment': '^2.29.4',
   'date-fns': '^2.30.0',
+  'dayjs': '^1.11.10',
+  'clsx': '^2.0.0',
+  'classnames': '^2.3.2',
+  'uuid': '^9.0.0',
+  'nanoid': '^5.0.4',
+  // Frontend — UI / styling
   'styled-components': '^6.1.0',
   '@emotion/react': '^11.11.1',
   '@emotion/styled': '^11.11.0',
   'tailwindcss': '^3.3.6',
+  'autoprefixer': '^10.4.16',
+  'postcss': '^8.4.32',
   'framer-motion': '^10.16.0',
+  'react-spring': '^9.7.3',
   'react-icons': '^4.12.0',
-  'react-hook-form': '^7.48.0',
-  'react-query': '^3.39.3',
-  '@tanstack/react-query': '^5.0.0',
-  'zustand': '^4.4.0',
-  'clsx': '^2.0.0',
-  // Backend
+  'lucide-react': '^0.294.0',
+  '@heroicons/react': '^2.0.18',
+  'react-feather': '^2.0.10',
+  // Frontend — charts / data vis
+  'recharts': '^2.10.0',
+  'chart.js': '^4.4.0',
+  'react-chartjs-2': '^5.2.0',
+  'd3': '^7.8.5',
+  // Frontend — maps
+  'leaflet': '^1.9.4',
+  'react-leaflet': '^4.2.1',
+  // Frontend — notifications / UI utilities
+  'react-toastify': '^10.0.4',
+  'sonner': '^1.3.1',
+  'react-hot-toast': '^2.4.1',
+  'react-modal': '^3.16.1',
+  '@radix-ui/react-dialog': '^1.0.5',
+  '@radix-ui/react-dropdown-menu': '^2.0.6',
+  '@radix-ui/react-tooltip': '^1.0.7',
+  '@radix-ui/react-popover': '^1.0.7',
+  '@radix-ui/react-tabs': '^1.0.4',
+  '@radix-ui/react-select': '^2.0.0',
+  '@radix-ui/react-checkbox': '^1.0.4',
+  '@radix-ui/react-switch': '^1.0.3',
+  'cmdk': '^0.2.1',
+  // Frontend — component libraries
+  '@mui/material': '^5.15.0',
+  '@mui/icons-material': '^5.15.0',
+  'antd': '^5.12.0',
+  'primereact': '^10.2.0',
+  'react-select': '^5.8.0',
+  'react-datepicker': '^4.25.0',
+  'react-dropzone': '^14.2.3',
+  'react-table': '^7.8.0',
+  'react-virtualized': '^9.22.5',
+  'react-window': '^1.8.10',
+  'react-markdown': '^9.0.1',
+  // Backend — safe, no external credentials needed
   'express': '^4.19.0',
   'cors': '^2.8.5',
   'pg': '^8.20.0',
-  'dotenv': '^16.0.0',
+  'dotenv': '^17.4.2',
   'jsonwebtoken': '^9.0.0',
   'bcryptjs': '^2.4.3',
+  'bcrypt': '^5.1.1',
   'multer': '^1.4.5',
   'helmet': '^7.0.0',
   'morgan': '^1.10.0',
+  'express-validator': '^7.0.1',
+  'express-rate-limit': '^7.1.5',
+  'compression': '^1.7.4',
+  'cookie-parser': '^1.4.6',
+  'express-session': '^1.17.3',
+  'connect-pg-simple': '^9.0.1',
+  // NOTE: @auth0/auth0-react, firebase, @supabase/supabase-js, stripe, nodemailer,
+  // socket.io, ws are intentionally EXCLUDED — they require external credentials /
+  // service accounts that cannot be supplied at generation time, so any generated
+  // code using them would be broken stubs. Block them at the prompt level instead.
 };
 
 // Node.js built-in modules — never need to be in package.json

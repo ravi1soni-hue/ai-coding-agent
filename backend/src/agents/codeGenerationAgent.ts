@@ -47,15 +47,63 @@ type ProjectManifest = {
 };
 
 const FRONTEND_REQUIRED = new Set(['package.json', 'index.html', 'vite.config.js', 'src/main.jsx', 'src/App.jsx', 'src/index.css', 'public/env-config.js']);
-const FRONTEND_ALLOWED_PREFIXES = ['src/components/', 'src/pages/'];
+const FRONTEND_ALLOWED_PREFIXES = [
+  'src/components/',
+  'src/pages/',
+  'src/hooks/',
+  'src/utils/',
+  'src/lib/',
+  'src/context/',
+  'src/store/',
+  'src/types/',
+  'src/services/',
+  'src/layouts/',
+  'src/constants/',
+  'src/assets/',
+  'src/styles/',
+  'src/features/',
+];
 const BACKEND_REQUIRED = new Set(['backend/package.json', 'backend/src/index.ts', 'backend/src/db/database.ts', 'backend/db/init.sql']);
-const BACKEND_ALLOWED_PREFIXES = ['backend/src/routes/', 'backend/src/middleware/'];
-const MAX_COMPONENTS = 24;
-const MAX_BACKEND_ROUTES = 8;
+const BACKEND_ALLOWED_PREFIXES = [
+  'backend/src/routes/',
+  'backend/src/middleware/',
+  'backend/src/services/',
+  'backend/src/utils/',
+  'backend/src/models/',
+  'backend/src/config/',
+  'backend/src/types/',
+  'backend/src/lib/',
+  'backend/src/validators/',
+];
+const MAX_COMPONENTS = 48;
+const MAX_BACKEND_ROUTES = 20;
 const MAX_BUILD_ATTEMPTS = 2;
+
+// Libraries that require external API keys / service credentials at runtime.
+// Generating code that imports these produces broken stubs the user cannot run.
+// Any LLM output importing these is rejected and the LLM is re-prompted.
+const BANNED_EXTERNAL_PACKAGES = new Set([
+  '@auth0/auth0-react', 'auth0',          // needs Auth0 tenant + client ID
+  'firebase', '@firebase/app',             // needs Firebase project config
+  '@supabase/supabase-js',                 // needs Supabase URL + anon key
+  'stripe', '@stripe/stripe-js',           // needs Stripe publishable/secret key
+  'nodemailer',                            // needs SMTP credentials
+  'socket.io', 'socket.io-client',         // needs matching server; complex infra
+  '@sendgrid/mail',                        // needs SendGrid API key
+  'twilio',                                // needs Twilio account SID + auth token
+  'aws-sdk', '@aws-sdk/client-s3',         // needs AWS credentials
+  'googleapis',                            // needs Google OAuth / service account
+  'paypal-rest-sdk', '@paypal/checkout-server-sdk', // needs PayPal credentials
+]);
+
+// Sentence injected into every code-generation prompt so the LLM knows not to use these.
+const BANNED_IMPORTS_RULE = `BANNED LIBRARIES (NEVER import or use these — they require external service credentials that are not available at generation time, producing broken code):
+@auth0/auth0-react, auth0, firebase, @supabase/supabase-js, stripe, @stripe/stripe-js, nodemailer, socket.io, socket.io-client, @sendgrid/mail, twilio, aws-sdk, @aws-sdk/*, googleapis, paypal-rest-sdk.
+If the user's request implies payments, email, or auth from a third-party provider: render a realistic static UI placeholder (e.g. a styled "Payment coming soon" card) — do NOT import the real library or call a real API.`;
 const MAX_LLM_CALLS_PER_PROJECT = 20;
 const BAN_LIST = ['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', '.pnpm-store', 'bun.lockb'];
-const SHARED_TABLE_NAME = 'items';
+// Default table name/columns used only when the LLM does not specify a domain-specific schema
+const SHARED_TABLE_NAME = 'project_items';
 const SHARED_TABLE_COLUMNS = ['id TEXT PRIMARY KEY', 'project_id TEXT NOT NULL', 'name TEXT NOT NULL', "data JSONB NOT NULL DEFAULT '{}'::jsonb", 'created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()'];
 
 function normalizePath(value: string): string {
@@ -174,6 +222,17 @@ function validateGeneratedFile(file: unknown, expectedPath: string | undefined, 
   if (!isAllowedPath(filePath, scope)) throw new Error(`${label}: invalid or disallowed path ${filePath}`);
   if (typeof content !== 'string' || !content.trim()) throw new Error(`${label}: missing content for ${filePath}`);
   if (containsPlaceholderText(content)) throw new Error(`${label}: generated content contains placeholder text for ${filePath}`);
+  // Reject any file that imports a banned external-service library (would produce broken stubs)
+  if (['.jsx', '.tsx', '.js', '.ts'].includes(path.extname(filePath).toLowerCase())) {
+    const importRe = /from\s+['"]([^'"]+)['"]/g;
+    let imp: RegExpExecArray | null;
+    while ((imp = importRe.exec(content)) !== null) {
+      const pkg = imp[1].startsWith('@') ? imp[1].split('/').slice(0, 2).join('/') : imp[1].split('/')[0];
+      if (BANNED_EXTERNAL_PACKAGES.has(pkg)) {
+        throw new Error(`${label}: generated ${filePath} imports banned external-service package "${pkg}" (requires credentials not available at generation time)`);
+      }
+    }
+  }
   if (filePath === 'src/App.jsx') {
     const hasExport = /export\s+default\s+(function|const|class|\w+)/.test(content);
     const hasAppName = /\bfunction\s+App\b|\bconst\s+App\b|\bclass\s+App\b|\bexport\s+default\s+App\b/.test(content);
@@ -195,6 +254,20 @@ function validateGeneratedFile(file: unknown, expectedPath: string | undefined, 
     const diagnostics = transpile.diagnostics || [];
     if (diagnostics.some((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error)) {
       throw new Error(`${label}: generated ${filePath} contains syntax or parse errors`);
+    }
+
+    // ts.transpileModule suppresses duplicate-identifier errors that esbuild catches at build time.
+    // Detect the pattern: same symbol declared twice (e.g. `function Foo` then `export default function Foo`).
+    const topLevelDeclRe = /^\s*(?:export\s+default\s+)?(?:function|const|class|let|var)\s+([A-Z][A-Za-z0-9_$]*)/gm;
+    const declCounts = new Map<string, number>();
+    let m: RegExpExecArray | null;
+    while ((m = topLevelDeclRe.exec(content)) !== null) {
+      const sym = m[1];
+      declCounts.set(sym, (declCounts.get(sym) ?? 0) + 1);
+    }
+    const duplicates = [...declCounts.entries()].filter(([, count]) => count > 1).map(([sym]) => sym);
+    if (duplicates.length > 0) {
+      throw new Error(`${label}: generated ${filePath} has duplicate top-level declarations for: ${duplicates.join(', ')} — esbuild will reject this`);
     }
   }
   return { path: filePath, content };
@@ -264,7 +337,7 @@ function fallbackFrontendManifest(requirements: any, uiSpec?: any): FrontendMani
   const pages = Array.isArray(requirements?.pages) ? requirements.pages : [];
   const components = [
     ...(authRequired ? [{ path: 'src/components/Login.jsx', name: 'Login', purpose: 'Authentication form for email and password login.' }] : []),
-    ...pages.slice(0, 3).map((page: any, i: number) => {
+    ...pages.slice(0, MAX_COMPONENTS).map((page: any, i: number) => {
       const pageLabel = typeof page === 'string' ? page : String(page?.name || page?.title || page?.path || `Page ${i + 1}`);
       const rawSlug = pageLabel.replace(/[^a-zA-Z0-9]/g, '') || `Page${i + 1}`;
       const slug = deReserveComponentName(rawSlug);
@@ -497,8 +570,18 @@ function buildProjectManifest(frontend: FrontendManifest, backend: BackendManife
 
 function generateBackendManifest(systemDesign: any, requirements: any, llmProxy: LLMProxyClient, model: string): Promise<BackendManifest> {
   const userMessage = String(requirements?.userMessage || '').slice(0, 400);
-  const systemPrompt = `Create a backend implementation manifest for Node.js + TypeScript + Express + Postgres for this app: "${userMessage}". Return ONLY JSON with shape: {"resources":[{"name":"...","routePath":"/api/...","tableName":"items","fields":[],"methods":[],"purpose":"..."}],"tables":[{"name":"items","columns":[],"purpose":"..."}]}. Use only shared tables with project_id columns. Never emit per-project table names.`;
-  return generateJson(llmProxy, model, 'backendManifest', systemPrompt, { requirements, userDescription: userMessage, backendDesign: systemDesign?.backend || null, sharedTable: SHARED_TABLE_NAME, modification: null }, 1800)
+  const systemPrompt = `Create a backend implementation manifest for Node.js + TypeScript + Express + PostgreSQL for this app: "${userMessage}".
+Return ONLY JSON with shape:
+{"resources":[{"name":"...","routePath":"/api/...","tableName":"<domain_table>","fields":["field1","field2"],"methods":["GET","POST","PUT","DELETE"],"purpose":"..."}],"tables":[{"name":"<domain_table>","columns":["id TEXT PRIMARY KEY","project_id TEXT NOT NULL","...domain columns...","created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"],"purpose":"..."}]}
+
+Rules:
+- Choose meaningful, domain-specific table names (e.g. "products", "orders", "users", "posts") — NOT generic names like "items".
+- Every table MUST include a "project_id TEXT NOT NULL" column for multi-tenant isolation.
+- Every table MUST include "id TEXT PRIMARY KEY" and "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()".
+- Add domain-appropriate columns based on the app requirements.
+- Each resource's tableName must match a table defined in the tables array.
+- routePath must always start with /api/.`;
+  return generateJson(llmProxy, model, 'backendManifest', systemPrompt, { requirements, userDescription: userMessage, backendDesign: systemDesign?.backend || null, modification: null }, 1800)
     .then((parsed) => parseBackendManifest(parsed));
 }
 
@@ -508,24 +591,39 @@ function parseBackendManifest(raw: unknown): BackendManifest {
   const normalizedResources = resources.slice(0, MAX_BACKEND_ROUTES).map((resource, index) => {
     const name = String(resource?.name || `resource${index + 1}`);
     const routePath = String(resource?.routePath || `/api/${name}`);
+    // Use LLM-specified tableName; fall back to sanitized resource name, then default
+    const rawTable = typeof resource?.tableName === 'string' && resource.tableName.trim() ? resource.tableName.trim() : name.toLowerCase().replace(/[^a-z0-9_]/g, '_') || SHARED_TABLE_NAME;
     return {
       ...resource,
       name,
       routePath: routePath.startsWith('/api/') ? routePath : `/api/${name}`,
-      tableName: SHARED_TABLE_NAME,
+      tableName: rawTable,
       methods: Array.isArray(resource?.methods) && resource.methods.length > 0 ? resource.methods : ['GET', 'POST'],
       purpose: String(resource?.purpose || `Data operations for ${name}`),
     };
   });
 
   const tables = Array.isArray(manifest.tables) ? manifest.tables : [];
-  const normalizedTables = tables.slice(0, MAX_BACKEND_ROUTES).map((table) => ({
-    ...table,
-    // Preserve the LLM-specified table name; fall back to SHARED_TABLE_NAME only when absent.
-    name: String(table?.name || SHARED_TABLE_NAME),
-    columns: Array.isArray(table?.columns) && table.columns.length > 0 ? table.columns : SHARED_TABLE_COLUMNS,
-    purpose: String(table?.purpose || 'Shared storage for project-scoped data'),
-  }));
+  const normalizedTables = tables.slice(0, MAX_BACKEND_ROUTES).map((table) => {
+    const tableName = String(table?.name || SHARED_TABLE_NAME).replace(/[^a-zA-Z0-9_]/g, '_');
+    const rawColumns: string[] = Array.isArray(table?.columns) && table.columns.length > 0 ? table.columns : [];
+    // Ensure required multi-tenant columns are always present
+    const hasId = rawColumns.some(c => /\bid\b/i.test(c));
+    const hasProjectId = rawColumns.some(c => /project_id/i.test(c));
+    const hasCreatedAt = rawColumns.some(c => /created_at/i.test(c));
+    const columns = [
+      ...(hasId ? [] : ['id TEXT PRIMARY KEY']),
+      ...(hasProjectId ? [] : ['project_id TEXT NOT NULL']),
+      ...rawColumns,
+      ...(hasCreatedAt ? [] : ['created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()']),
+    ];
+    return {
+      ...table,
+      name: tableName,
+      columns,
+      purpose: String(table?.purpose || `Domain data storage for ${tableName}`),
+    };
+  });
 
   return { resources: normalizedResources, tables: normalizedTables };
 }
@@ -678,7 +776,7 @@ initDb().then(() => app.listen(port, () => console.log(\`Backend on port \${port
     },
     {
       path: 'backend/db/init.sql',
-      content: `CREATE TABLE IF NOT EXISTS items (
+      content: `CREATE TABLE IF NOT EXISTS project_items (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
   name TEXT NOT NULL,
@@ -692,6 +790,7 @@ initDb().then(() => app.listen(port, () => console.log(\`Backend on port \${port
 
 function backendRouteFileStub(resource: NonNullable<BackendManifest['resources']>[number]): GeneratedFile {
   const routeFile = sanitizeRoutePath('', resource.name || 'resource');
+  const tableName = String(resource.tableName || resource.name || SHARED_TABLE_NAME).replace(/[^a-zA-Z0-9_]/g, '_');
   const methods = Array.isArray(resource.methods) && resource.methods.length > 0 ? resource.methods : ['GET', 'POST'];
   const fields = Array.isArray(resource.fields) && resource.fields.length > 0 ? resource.fields : ['name', 'data'];
   // created_at is DB-managed so never inserted; exclude from both extraction and INSERT columns.
@@ -713,7 +812,7 @@ function backendRouteFileStub(resource: NonNullable<BackendManifest['resources']
   try {
     const projectId = String(req.query.project_id || req.query.projectId || '').trim();
     if (!projectId) return res.status(400).json({ error: 'project_id is required' });
-    const result = await query(\`SELECT * FROM ${SHARED_TABLE_NAME} WHERE project_id = $1 ORDER BY created_at DESC LIMIT 100\`, [projectId]);
+    const result = await query(\`SELECT * FROM ${tableName} WHERE project_id = $1 ORDER BY created_at DESC LIMIT 100\`, [projectId]);
     res.json({ ${resource.name || 'items'}: result.rows });
   } catch (error) {
     next(error);
@@ -729,7 +828,7 @@ function backendRouteFileStub(resource: NonNullable<BackendManifest['resources']
     const id = randomUUID();
 ${fieldExtractions}
     const result = await query(
-      \`INSERT INTO ${SHARED_TABLE_NAME} (${insertFields.join(', ')}) VALUES (${insertPlaceholders}) RETURNING *\`,
+      \`INSERT INTO ${tableName} (${insertFields.join(', ')}) VALUES (${insertPlaceholders}) RETURNING *\`,
       [${insertValues}]
     );
     res.status(201).json(result.rows[0]);
@@ -748,7 +847,7 @@ ${fieldExtractions}
     if (!projectId) return res.status(400).json({ error: 'project_id is required' });
 ${updateFields.map((f) => `    const ${f} = req.body?.${f};`).join('\n')}
     const result = await query(
-      \`UPDATE ${SHARED_TABLE_NAME} SET ${setClauses} WHERE id = $1 AND project_id = $${updateFields.length + 2} RETURNING *\`,
+      \`UPDATE ${tableName} SET ${setClauses} WHERE id = $1 AND project_id = $${updateFields.length + 2} RETURNING *\`,
       [req.params.id, ${updateFields.join(', ')}, projectId]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
@@ -765,7 +864,7 @@ ${updateFields.map((f) => `    const ${f} = req.body?.${f};`).join('\n')}
     const projectId = String(req.query.project_id || req.query.projectId || '').trim();
     if (!projectId) return res.status(400).json({ error: 'project_id is required' });
     const result = await query(
-      \`DELETE FROM ${SHARED_TABLE_NAME} WHERE id = $1 AND project_id = $2 RETURNING id\`,
+      \`DELETE FROM ${tableName} WHERE id = $1 AND project_id = $2 RETURNING id\`,
       [req.params.id, projectId]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
@@ -798,13 +897,14 @@ async function backendRouteFile(
 ): Promise<GeneratedFile> {
   const routeFile = sanitizeRoutePath('', resource.name || 'resource');
   const methods = Array.isArray(resource.methods) && resource.methods.length > 0 ? resource.methods : ['GET', 'POST'];
+  const resourceTable = String(resource.tableName || resource.name || SHARED_TABLE_NAME).replace(/[^a-zA-Z0-9_]/g, '_');
   const systemPrompt = `Generate a Node.js + Express + TypeScript route file for the resource: "${resource.name}".
 Purpose: ${resource.purpose || resource.name}
 Route path registered by caller: ${resource.routePath || '/api/' + resource.name}
 HTTP methods to implement: ${methods.join(', ')}
 Fields: ${Array.isArray(resource.fields) && resource.fields.length > 0 ? resource.fields.join(', ') : 'flexible — infer from purpose'}
-Database table: ${SHARED_TABLE_NAME} (shared multi-tenant table with project_id column)
-Table columns: id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, data JSONB NOT NULL DEFAULT '{}', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+Database table: ${resourceTable} (multi-tenant table with project_id column for isolation)
+Table columns: id TEXT PRIMARY KEY, project_id TEXT NOT NULL, <domain columns>, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 
 RULES:
 - Always require and validate project_id from req.query (GET/DELETE) or req.body (POST/PUT/PATCH)
@@ -816,7 +916,8 @@ RULES:
 - For DELETE: WHERE id = $1 AND project_id = $2, return 404 if not found
 - Import { query } from '../db/database.ts'
 - Import { randomUUID } from 'crypto' (only if POST/PUT is implemented)
-- Export as: export default router`;
+- Export as: export default router
+- ${BANNED_IMPORTS_RULE}`;
 
   try {
     const parsed = await generateFile(llmProxy, model, `backendRoute:${resource.name}`, routeFile, systemPrompt, { resource }, { initial: 2500, ceiling: 9000 });
@@ -1103,6 +1204,26 @@ RULES:
     }
   }
 
+  // Ensure every required page has a corresponding section component in the manifest.
+  // The LLM manifest prompt asks for this but doesn't always produce it.
+  if (pages.length > 0) {
+    const manifestNames = new Set((manifest.components as Array<{ name?: string }>).map((c) => String(c.name || '').toLowerCase()));
+    const missingPages = pages.filter((page: any) => {
+      const pageLabel = typeof page === 'string' ? page : String(page?.name || page?.title || '');
+      const slug = deReserveComponentName(pageLabel.replace(/[^a-zA-Z0-9]/g, '') || 'Section');
+      return !manifestNames.has(slug.toLowerCase()) && !manifestNames.has(`${slug.toLowerCase()}section`) && !manifestNames.has(`${slug.toLowerCase()}page`);
+    });
+    if (missingPages.length > 0) {
+      const added = missingPages.map((page: any, idx: number) => {
+        const pageLabel = typeof page === 'string' ? page : String(page?.name || page?.title || `Section${idx + 1}`);
+        const slug = deReserveComponentName(pageLabel.replace(/[^a-zA-Z0-9]/g, '') || `Section${idx + 1}`);
+        return { path: `src/components/${slug}.jsx`, name: slug, purpose: `${pageLabel} section — full content and functionality` };
+      });
+      manifest.components = [...manifest.components, ...added];
+      logWarn('codeGenerationAgent:manifest-reconciled-pages', { added: added.map((c: { name: string }) => c.name) });
+    }
+  }
+
   if (manifest.components.length > MAX_COMPONENTS && !Array.isArray(uiSpec?.components)) {
     manifest.components = manifest.components.slice(0, MAX_COMPONENTS);
   }
@@ -1154,7 +1275,8 @@ RULES — ALL are mandatory:
 - Real JSX with actual content matching the purpose — not lorem ipsum, not generic examples.
 - All imports at the top. Only import what you use.
 - useState/useEffect only if genuinely needed for THIS component's local behaviour.
-- REACT-ICONS: Only use icon names that actually exist in react-icons v5. Safe Si icons: SiPython, SiTypescript, SiJavascript, SiReact, SiNodedotjs, SiDocker, SiKubernetes, SiAmazon, SiGooglecloud, SiMicrosoftazure, SiPostgresql, SiMongodb, SiRedis, SiGit, SiGithub, SiLinux, SiTensorflow, SiPytorch, SiOpenai, SiHuggingFace, SiMeta, SiVercel, SiNetlify, SiFastapi, SiFlask, SiDjango, SiGraphql, SiTailwindcss, SiVite. NEVER invent icon names — if unsure, omit or use a Fa icon instead.`;
+- REACT-ICONS: Only use icon names that actually exist in react-icons v5. Safe Si icons: SiPython, SiTypescript, SiJavascript, SiReact, SiNodedotjs, SiDocker, SiKubernetes, SiAmazon, SiGooglecloud, SiMicrosoftazure, SiPostgresql, SiMongodb, SiRedis, SiGit, SiGithub, SiLinux, SiTensorflow, SiPytorch, SiOpenai, SiHuggingFace, SiMeta, SiVercel, SiNetlify, SiFastapi, SiFlask, SiDjango, SiGraphql, SiTailwindcss, SiVite. NEVER invent icon names — if unsure, omit or use a Fa icon instead.
+- ${BANNED_IMPORTS_RULE}`;
 
   const parsed = await generateFile(
     llmProxy,
@@ -1231,7 +1353,8 @@ RULES:
 - SIZE: target 60-120 lines. Hard max 180 lines. Pass data to children via props, not inline logic.
 - ${backendRequired ? 'Use API_BASE for all fetch calls. Always include project_id: PROJECT_ID in query params (GET/DELETE) or request body (POST/PUT). Handle loading and error states.' : 'No backend calls.'}
 - No TODOs, no stubs, no placeholder comments.
-- Generation order: ${(uiSpec?.generationOrder || []).join(' -> ') || 'all components'}`;
+- Generation order: ${(uiSpec?.generationOrder || []).join(' -> ') || 'all components'}
+- ${BANNED_IMPORTS_RULE}`;
 
   const parsed = await generateFile(
     llmProxy,
@@ -1355,9 +1478,13 @@ function backendRouteFallbackFiles(manifest: BackendManifest): GeneratedFile[] {
 }
 
 async function generateBackendInitSql(manifest: BackendManifest, requirements: any, llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {
-  const parsed = await generateFile(llmProxy, model, 'backendInitSql', 'backend/db/init.sql', `Generate backend/db/init.sql. The file MUST define the shared "${SHARED_TABLE_NAME}" table including a project_id TEXT NOT NULL column. Use only the shared multi-tenant schema; never emit per-project tables.`, { manifest, requirements, sharedTable: SHARED_TABLE_NAME }, { initial: 2200, ceiling: 6000 });
+  const tables = Array.isArray(manifest.tables) && manifest.tables.length > 0 ? manifest.tables : [{ name: SHARED_TABLE_NAME, columns: SHARED_TABLE_COLUMNS }];
+  const tableNames = tables.map(t => String(t.name)).join(', ');
+  const systemPrompt = `Generate backend/db/init.sql using CREATE TABLE IF NOT EXISTS statements for these domain-specific tables: ${tableNames}.
+Each table MUST include a "project_id TEXT NOT NULL" column for multi-tenant isolation, an "id TEXT PRIMARY KEY", and a "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()". Add domain-appropriate columns based on the table name and app requirements. Use the provided manifest for column hints.`;
+  const parsed = await generateFile(llmProxy, model, 'backendInitSql', 'backend/db/init.sql', systemPrompt, { manifest, requirements }, { initial: 2200, ceiling: 6000 });
   const file = validateGeneratedFile(parsed, 'backend/db/init.sql', 'backend', 'backendInitSql');
-  if (!/project_id/i.test(file.content) || !file.content.includes(SHARED_TABLE_NAME)) throw new Error(`backendInitSql: SQL must define shared table ${SHARED_TABLE_NAME} with project_id`);
+  if (!/project_id/i.test(file.content)) throw new Error('backendInitSql: SQL must include project_id column in all tables');
   return file;
 }
 

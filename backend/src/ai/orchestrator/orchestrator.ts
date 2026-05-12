@@ -210,10 +210,18 @@ async function stageWrap<T>(
   // crash-resume. projectId alone provides the necessary isolation.
   const inputHash = hashInput({ stage, input, projectId: memory.projectId });
   const cached = memory.checkpoints.find((item) => item.stage === stage && item.inputHash === inputHash);
-  if (cached && cached.output !== undefined) {
-    adapter?.emit?.({ type: 'info', stage, message: `resumed ${stage} from checkpoint` });
-    return createSuccessResult(stage, cached.output as T, undefined, cached.issues);
-  }
+    if (cached && cached.output !== undefined) {
+      // Keep FSM outer state consistent when resuming from checkpoints.
+      // Otherwise, memory.currentState may still reflect the previous stage
+      // (e.g. system_design), causing downstream markStage() to throw on an
+      // invalid transition (e.g. system_design -> blueprint).
+      markStage(memory, stage);
+      adapter?.emit?.({ type: 'info', stage, message: `resumed ${stage} from checkpoint` });
+      // Persist immediately so REST snapshot readers can see current_step
+      // even if downstream emits are missing/stalled.
+      await persistMemory(memory, persistence);
+      return createSuccessResult(stage, cached.output as T, undefined, cached.issues);
+    }
 
   // Defensive: if we are already past this stage (memory advanced further in a prior run)
   // and there's a hash-matching checkpoint, use it. We intentionally do NOT fall back to
@@ -242,6 +250,10 @@ async function stageWrap<T>(
   while (shouldRetryStage(attempt, policy)) {
     try {
       markStage(memory, stage);
+
+      // Persist immediately on stage entry so REST snapshot readers see
+      // non-null current_step even while downstream work is in-progress.
+      await persistMemory(memory, persistence);
 
       let output: T;
       if (typeof deadlineAt === 'number') {
@@ -537,7 +549,7 @@ function buildProjectSpec(memory: ProjectMemory, command: OrchestrationCommand) 
       projectId: command.projectId,
       userMessage: command.userMessage,
       requirements: {
-        website_type: (memory.requirements?.website_type || 'business') as 'business' | 'portfolio' | 'saas' | 'ecommerce',
+        website_type: (memory.requirements?.website_type || 'business') as RequirementAnalysisOutput['website_type'],
         pages: (Array.isArray(memory.requirements?.pages) && memory.requirements!.pages.length > 0) ? memory.requirements!.pages : ['home'],
         backend_required: Boolean(memory.requirements?.backend_required),
         auth_required: Boolean(memory.requirements?.auth_required),

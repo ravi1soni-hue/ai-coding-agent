@@ -263,18 +263,31 @@ export function createPersistenceAdapter(scope: AdapterScope): PersistenceAdapte
     saveDeployment: (rec) => writeDeployment(scope, rec),
 
     // Enable real resume-by-checkpoint across WS disconnects / process restarts.
-    saveCheckpoint: (checkpoint) =>
-      saveProjectCheckpoint({
+    //
+    // WARNING: code_generation checkpoint output can include the full generated
+    // file contents (hundreds of KB/MB). Persisting it as JSONB can:
+    //  - blow up Node heap (stringify/GC)
+    //  - blow up Postgres JSONB conversion
+    //  - prevent the rest of the pipeline from emitting stage/file events.
+    //
+    // Mitigation: do not persist `output` for code_generation checkpoints.
+    // The pipeline already materializes files via `file_generated` / workspace,
+    // so the DB resume mechanism primarily needs the stage/inputHash/issues/FSM.
+    saveCheckpoint: (checkpoint) => {
+      const stage = checkpoint.stage;
+      const outputForDb = stage === 'code_generation' ? null : (checkpoint.output ?? null);
+      return saveProjectCheckpoint({
         projectId: checkpoint.projectId,
         userId: scope.userId,
-        stage: checkpoint.stage,
+        stage,
         inputHash: checkpoint.inputHash,
-        output: checkpoint.output ?? null,
+        output: outputForDb,
         issues: checkpoint.issues,
         retryCount: checkpoint.retryCount,
         contextSnapshot: checkpoint.contextSnapshot,
         fsmState: checkpoint.fsmState,
-      }),
+      });
+    },
     loadCheckpoints: (projectId) =>
       loadProjectCheckpoints({
         projectId: projectId,

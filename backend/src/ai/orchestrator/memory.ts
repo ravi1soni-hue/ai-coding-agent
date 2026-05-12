@@ -112,14 +112,12 @@ export function createCheckpointSnapshot<T>(
   issues: OrchestrationIssue[],
   retryCount: number
 ): OrchestrationCheckpoint<T> {
-  let contextSnapshot: unknown = undefined;
-  try {
-    contextSnapshot = JSON.parse(JSON.stringify(memory));
-  } catch {
-    // Best-effort: if serialization fails (should be rare), we still persist
-    // stage/inputHash/output/issues without the snapshot.
-    contextSnapshot = undefined;
-  }
+  // IMPORTANT: Keep checkpoints lightweight.
+  // Deep-cloning the full in-memory coordinator state (history/code/tests)
+  // can exceed Node heap and also produce JSONB conversion errors in Postgres.
+  // Resume uses the persisted project snapshot primarily; checkpoints only need
+  // the stage/inputHash/output/issues + FSM state.
+  const contextSnapshot: unknown = undefined;
 
   const checkpoint: OrchestrationCheckpoint<T> = {
     projectId: memory.projectId,

@@ -22,7 +22,7 @@ export type StateAwareAgentResult<T> = {
 };
 
 export type RequirementAnalysisOutput = {
-  website_type: 'business' | 'portfolio' | 'saas' | 'ecommerce';
+  website_type: 'business' | 'portfolio' | 'saas' | 'ecommerce' | 'marketplace' | 'dashboard' | 'blog' | 'landing_page' | 'crm' | 'lms' | 'social' | 'realtime' | 'directory' | 'api_only';
   pages: string[];
   backend_required: boolean;
   auth_required: boolean;
@@ -136,12 +136,14 @@ export async function requirementAnalysisAgent(input: { user_message: string; pr
 
     const systemPrompt = `You are an expert requirements analyst. Convert the request into a robust website requirements object.
 - Infer a safe, complete website_type and pages set.
+- website_type must be one of: business, portfolio, saas, ecommerce, marketplace, dashboard, blog, landing_page, crm, lms, social, realtime, directory, api_only.
 - If the request is ambiguous, choose a safe default and add a short note.
 - Set backend_required to true ONLY if the request explicitly mentions backend features like database, API, authentication, server-side logic, data storage, user accounts, dynamic content from server, or real-time updates.
 - For static sites, landing pages, portfolios, pricing pages, brochure sites, informational websites, or any request that doesn't mention server-side features, set backend_required to false.
 - Examples of frontend-only: "pricing page", "portfolio website", "landing page", "static site", "simple website".
 - Examples requiring backend: "user login", "database", "API integration", "dynamic content", "real-time chat".
 - Only set auth_required to true if login/authentication/user accounts are explicitly requested.
+- pages can include up to 20 pages — list all requested pages, do not truncate.
 Respond ONLY with valid JSON with keys: website_type, pages, backend_required, auth_required, deployment_pref, notes.
 Do NOT include Markdown fences.`;
     async function runRequirementAnalysisOnce(system: string, temperature: number): Promise<RequirementAnalysisOutput> {
@@ -180,7 +182,7 @@ Do NOT include Markdown fences.`;
 Return ONLY JSON. No trailing commas. No extra keys. Do not include any text before/after the JSON object.`;
       parsed = await runRequirementAnalysisOnce(retryPrompt, 0.15);
     }
-    const normalizedPages = normalizePages(parsed.pages).slice(0, 10);
+    const normalizedPages = normalizePages(parsed.pages).slice(0, 20);
     const result: RequirementAnalysisOutput = {
       website_type: parsed.website_type || 'business',
       pages: normalizedPages.length > 0 ? normalizedPages : ['home'],
