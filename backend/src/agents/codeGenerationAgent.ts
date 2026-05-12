@@ -45,7 +45,7 @@ type ProjectManifest = {
   blueprint?: ProjectBlueprint;
 };
 
-const FRONTEND_REQUIRED = new Set(['package.json', 'index.html', 'vite.config.js', 'src/main.jsx', 'src/App.jsx', 'src/index.css']);
+const FRONTEND_REQUIRED = new Set(['package.json', 'index.html', 'vite.config.js', 'src/main.jsx', 'src/App.jsx', 'src/index.css', 'public/env-config.js']);
 const FRONTEND_ALLOWED_PREFIXES = ['src/components/', 'src/pages/'];
 const BACKEND_REQUIRED = new Set(['backend/package.json', 'backend/src/index.ts', 'backend/src/db/database.ts', 'backend/db/init.sql']);
 const BACKEND_ALLOWED_PREFIXES = ['backend/src/routes/', 'backend/src/middleware/'];
@@ -336,7 +336,8 @@ function fallbackFrontendApp(_manifest: FrontendManifest, components: GeneratedF
   const imports = components.map((file) => `import ${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} from './${file.path.replace(/^src\//, '')}';`).join('\n');
   const componentTags = rootComponents.map((file) => `        <${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} />`).join('\n');
   const apiInit = hasBackend ? `
-  const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:3000';
+  const API_BASE = window.__ENV__?.API_URL || import.meta.env.VITE_API_URL || 'http://localhost:3000';
+  const PROJECT_ID = window.__ENV__?.PROJECT_ID || import.meta.env.VITE_PROJECT_ID || '';
   const [apiReady, setApiReady] = React.useState(false);
 
   React.useEffect(() => {
@@ -571,7 +572,7 @@ function frontendScaffold(manifest: FrontendManifest): GeneratedFile[] {
     {
       path: 'index.html',
       content: `<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>${manifest.appName || 'Generated App'}</title></head><body><div id="root"></div><script type="module" src="/src/main.jsx"></script></body></html>`
+<html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>${manifest.appName || 'Generated App'}</title><script src="/env-config.js"></script></head><body><div id="root"></div><script type="module" src="/src/main.jsx"></script></body></html>`
     },
     {
       path: 'vite.config.js',
@@ -588,6 +589,11 @@ import App from './App.jsx';
 import './index.css';
 createRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>);
 `
+    },
+    {
+      // Placeholder — overwritten with real values (API_URL, PROJECT_ID) after build, before Vercel upload
+      path: 'public/env-config.js',
+      content: `window.__ENV__ = { API_URL: '', PROJECT_ID: '' };`,
     },
   ];
 }
@@ -625,10 +631,18 @@ function backendScaffold(): GeneratedFile[] {
     },
     {
       path: 'backend/src/db/database.ts',
-      content: `import { Pool } from 'pg';
+      content: `import { Pool, type PoolClient } from 'pg';
 
 const connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL || '';
 export const pool = new Pool(connectionString ? { connectionString } : {});
+
+// Isolate each project's data inside its own Postgres schema.
+// DB_SCHEMA is injected as an env var by the deployment pipeline (e.g. proj_<projectId>).
+const DB_SCHEMA = process.env.DB_SCHEMA || 'public';
+
+pool.on('connect', (client: PoolClient) => {
+  client.query(\`SET search_path TO \${DB_SCHEMA}, public\`).catch(() => {});
+});
 
 export function query<T = unknown>(sql: string, params: unknown[] = []): Promise<{ rows: T[] }> {
   return pool.query<T>(sql, params);
@@ -1232,7 +1246,8 @@ ROOT components to render in JSX (render ONLY these — do NOT render child comp
 ${rootNames.join(', ')}
 
 ${backendRequired ? `Backend required — initialize at the top of the file:
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+const API_BASE = window.__ENV__?.API_URL || import.meta.env.VITE_API_URL || 'http://localhost:3000';
+const PROJECT_ID = window.__ENV__?.PROJECT_ID || import.meta.env.VITE_PROJECT_ID || '';
 ` : ''}
 
 RULES:
@@ -1243,7 +1258,7 @@ RULES:
 - If multi-page: use BrowserRouter + Routes. If single-page with sections: render all root sections top-to-bottom.
 - Keep App.jsx lean: routing + layout shell + top-level state only. No business logic inside App.jsx itself.
 - SIZE: target 60-120 lines. Hard max 180 lines. Pass data to children via props, not inline logic.
-- ${backendRequired ? 'Use API_BASE for all fetch calls. Handle loading and error states.' : 'No backend calls.'}
+- ${backendRequired ? 'Use API_BASE for all fetch calls. Always include project_id: PROJECT_ID in query params (GET/DELETE) or request body (POST/PUT). Handle loading and error states.' : 'No backend calls.'}
 - No TODOs, no stubs, no placeholder comments.
 - Generation order: ${(uiSpec?.generationOrder || []).join(' -> ') || 'all components'}`;
 

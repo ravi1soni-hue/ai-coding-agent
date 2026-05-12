@@ -8,10 +8,10 @@ import { config as env } from '../config/env';
 import { debug, error as logError, warn as logWarn } from '../utils/logger';
 
 // ---------------------------------------------------------------------------
-// DB Init — runs backend/db/init.sql against the shared Postgres instance
+// DB Init — creates project schema then runs backend/db/init.sql inside it
 // ---------------------------------------------------------------------------
 
-async function runDbInitSql(backendDir: string): Promise<void> {
+async function runDbInitSql(backendDir: string, projectId: string): Promise<void> {
   const initSqlPath = path.join(backendDir, 'db', 'init.sql');
   if (!fs.existsSync(initSqlPath)) {
     debug('deploymentAgent:db-init', 'no init.sql found, skipping');
@@ -30,10 +30,15 @@ async function runDbInitSql(backendDir: string): Promise<void> {
     return;
   }
 
+  // Sanitize projectId so it can safely be used in an identifier
+  const schemaName = `proj_${projectId.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 48)}`;
   const pool = new Pool({ connectionString: postgresUrl, connectionTimeoutMillis: 15_000 });
   try {
+    // Create the per-project schema if it doesn't exist, then run init.sql within it
+    await pool.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
+    await pool.query(`SET search_path TO ${schemaName}, public`);
     await pool.query(sql);
-    debug('deploymentAgent:db-init', 'DB tables initialized successfully');
+    debug('deploymentAgent:db-init', { schemaName, message: 'DB schema + tables initialized successfully' });
   } catch (err) {
     logWarn('deploymentAgent:db-init-error', {
       message: (err as Error).message,
@@ -66,9 +71,61 @@ export async function deploymentAgent(input: {
     if (!input.workspaceRoot) throw new Error('workspaceRoot required');
 
     const defaultProjectName = `proj-${input.projectId.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 18) || 'site'}`;
+    const schemaName = `proj_${input.projectId.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 48)}`;
     debug('deploymentAgent:workspaceRoot', { projectId: input.projectId, workspaceRoot: input.workspaceRoot });
 
-    // ── Frontend: deploy to Vercel, failover to Railway ──────────────────────────────────────────
+    // ── Backend: deploy first so we have the URL before building the frontend ──
+    const backendService = input.backendService || `backend-${input.projectId.slice(0, 10)}`;
+    const backendRequested = input.hasBackend !== false;
+
+    const backendDirValid = Boolean(
+      input.backendDir &&
+      fs.existsSync(input.backendDir) &&
+      fs.existsSync(path.join(input.backendDir, 'package.json'))
+    );
+
+    const shouldDeployBackend = backendRequested && backendDirValid;
+
+    if (shouldDeployBackend && input.backendDir) {
+      // Create project schema + init tables before deploying the backend service
+      await runDbInitSql(input.backendDir, input.projectId);
+    }
+
+    let railwayResult: Awaited<ReturnType<typeof deployToRailway>> | null = null;
+    if (shouldDeployBackend && input.backendDir) {
+      try {
+        railwayResult = await deployToRailway(backendService, {
+          source: 'deploymentAgent',
+          projectId: input.projectId,
+          revisionId: input.revisionId,
+          sourceDir: input.backendDir,
+          extraEnvVars: {
+            DB_SCHEMA: schemaName,
+            PROJECT_ID: input.projectId,
+          },
+        });
+      } catch (railwayErr) {
+        logWarn('deploymentAgent:railway-failed', {
+          message: (railwayErr as Error).message,
+          hint: 'Frontend deployment will still complete. Railway can be redeployed separately.',
+        });
+      }
+    }
+
+    // ── Write env-config.js into dist/ so the frontend knows the backend URL ──
+    // This must happen after Railway deploy (so we have the serviceUrl) and
+    // before Vercel upload (so the file is included in the deployment bundle).
+    const backendUrl = railwayResult?.serviceUrl || '';
+    const envConfigPath = path.join(input.buildDir, 'env-config.js');
+    try {
+      const envConfigContent = `window.__ENV__ = { API_URL: '${backendUrl}', PROJECT_ID: '${input.projectId}' };`;
+      fs.writeFileSync(envConfigPath, envConfigContent, 'utf8');
+      debug('deploymentAgent:env-config-written', { envConfigPath, backendUrl });
+    } catch (err) {
+      logWarn('deploymentAgent:env-config-write-failed', (err as Error).message);
+    }
+
+    // ── Frontend: deploy to Vercel (with env-config.js in dist/), failover to Railway ──
     let frontendResult: { url: string; deploymentId: string; inspectUrl: string | null; status: string; logUrl: string | null } | null = null;
     try {
       frontendResult = await deployToVercel({
@@ -78,7 +135,6 @@ export async function deploymentAgent(input: {
       });
     } catch (vercelErr) {
       logWarn('deploymentAgent:vercel-failed', { message: (vercelErr as Error).message });
-      // Failover to Railway for frontend
       try {
         const railwayFrontend = await deployToRailway(`frontend-${input.projectId.slice(0, 10)}`, {
           source: 'deploymentAgent-failover',
@@ -97,41 +153,6 @@ export async function deploymentAgent(input: {
       } catch (railwayErr) {
         logError('deploymentAgent:failover-failed', { vercel: (vercelErr as Error).message, railway: (railwayErr as Error).message });
         throw new Error('Both Vercel and Railway deployments failed for frontend');
-      }
-    }
-
-    // ── Backend: deploy to Railway (conditional) ────────────────────────────
-    const backendService = input.backendService || `backend-${input.projectId.slice(0, 10)}`;
-    const backendRequested = input.hasBackend !== false;
-
-    // Verify backend directory has the needed files
-    const backendDirValid = Boolean(
-      input.backendDir &&
-      fs.existsSync(input.backendDir) &&
-      fs.existsSync(path.join(input.backendDir, 'package.json'))
-    );
-
-    const shouldDeployBackend = backendRequested && backendDirValid;
-
-    if (shouldDeployBackend && input.backendDir) {
-      // Run DB init SQL before deploying so tables exist when backend starts
-      await runDbInitSql(input.backendDir);
-    }
-
-    let railwayResult: Awaited<ReturnType<typeof deployToRailway>> | null = null;
-    if (shouldDeployBackend && input.backendDir) {
-      try {
-        railwayResult = await deployToRailway(backendService, {
-          source: 'deploymentAgent',
-          projectId: input.projectId,
-          revisionId: input.revisionId,
-          sourceDir: input.backendDir,
-        });
-      } catch (railwayErr) {
-        logWarn('deploymentAgent:railway-failed', {
-          message: (railwayErr as Error).message,
-          hint: 'Frontend deployment will still complete. Railway can be redeployed separately.',
-        });
       }
     }
 

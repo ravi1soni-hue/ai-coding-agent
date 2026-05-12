@@ -131,10 +131,10 @@ async function getOrCreateProjectService(userProjectId: string): Promise<string 
 
 /**
  * Upserts environment variables on a specific Railway service so the generated
- * backend has POSTGRES_URL, PORT, and NODE_ENV when it starts.
+ * backend has POSTGRES_URL, PORT, NODE_ENV, DB_SCHEMA, and PROJECT_ID when it starts.
  * Uses the per-project service ID, never the base app's RAILWAY_SERVICE_ID.
  */
-async function setRailwayEnvVars(serviceId: string): Promise<void> {
+async function setRailwayEnvVars(serviceId: string, extraVars: Record<string, string> = {}): Promise<void> {
   const canSet =
     Boolean(env.RAILWAY_TOKEN) &&
     Boolean(env.RAILWAY_PROJECT_ID) &&
@@ -149,6 +149,7 @@ async function setRailwayEnvVars(serviceId: string): Promise<void> {
   const variables: Record<string, string> = {
     NODE_ENV: 'production',
     PORT: '3000',
+    ...extraVars,
   };
   if (env.POSTGRES_URL) variables.POSTGRES_URL = env.POSTGRES_URL;
   if (env.REDIS_URL) variables.REDIS_URL = env.REDIS_URL;
@@ -227,6 +228,7 @@ export async function deployToRailway(
     projectId?: string;
     revisionId?: string;
     sourceDir?: string;
+    extraEnvVars?: Record<string, string>;
   }
 ): Promise<RailwayDeployResult> {
   const userProjectId = deployConfig.projectId || '';
@@ -258,7 +260,7 @@ export async function deployToRailway(
 
   // ── Step 2: Inject env vars on the per-project service ───────────────────
   if (targetServiceId) {
-    await setRailwayEnvVars(targetServiceId);
+    await setRailwayEnvVars(targetServiceId, deployConfig.extraEnvVars || {});
   }
 
   // ── Step 3: Deploy via Railway CLI with per-project RAILWAY_SERVICE_ID ───

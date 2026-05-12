@@ -103,25 +103,6 @@ function isFrontendOnlyRequirements(requirements: any): boolean {
   return !requiresBackendArchitecture(requirements);
 }
 
-function buildFrontendOnlySystemDesign(requirements: any) {
-  const pages = Array.isArray(requirements?.pages) ? requirements.pages.filter((page: any) => typeof page === 'string' && page.trim()).map((page: string) => page.trim()) : [];
-  const uniquePages = Array.from(new Set(pages));
-  return {
-    frontend: {
-      framework: 'react-vite',
-      pages: uniquePages,
-      components: uniquePages,
-      styling: 'css',
-    },
-    backend: null,
-    database: null,
-    auth: null,
-    hosting: {
-      frontend: 'vercel',
-      backend: null,
-    },
-  };
-}
 
 function currentPolicy(memory: ProjectMemory): RetryPolicy {
   return DEFAULT_POLICY[memory.currentState] || DEFAULT_POLICY.requirements;
@@ -235,18 +216,15 @@ async function stageWrap<T>(
   }
 
   // Defensive: if we are already past this stage (memory advanced further in a prior run)
-  // and there's any checkpoint for this stage, use it rather than attempting a backwards
-  // markStage which would throw an invalid-transition error.
+  // and there's a hash-matching checkpoint, use it. We intentionally do NOT fall back to
+  // a hash-mismatched checkpoint — doing so would silently load stale output from a prior
+  // run with different input (e.g. a different user message for the same projectId),
+  // causing the entire pipeline to execute against the wrong requirements.
   const normalizedCurrent = normalizePipelineStage(memory.currentState);
   const normalizedTarget = normalizePipelineStage(stage);
   const currentIdx = stageIndex(normalizedCurrent);
   const targetIdx = stageIndex(normalizedTarget);
   if (currentIdx > targetIdx) {
-    const anyCheckpoint = memory.checkpoints.find((item) => item.stage === stage && item.output !== undefined);
-    if (anyCheckpoint) {
-      adapter?.emit?.({ type: 'info', stage, message: `resumed ${stage} from checkpoint (hash-miss fallback)` });
-      return createSuccessResult(stage, anyCheckpoint.output as T, undefined, anyCheckpoint.issues);
-    }
     // No checkpoint at all for a stage we passed — mark it so the state machine
     // stays consistent, then re-run the stage.
     memory.currentState = stage as OrchestrationState;
@@ -464,13 +442,23 @@ async function selfHealWithCodeGeneration(
   if (deadlineAt && deadlineAt - Date.now() < 60_000) {
     throw new Error(`Orchestration timeout — insufficient budget for self-heal (${Math.max(0, deadlineAt - Date.now())}ms remaining)`);
   }
+
+  // Surface stub files from blueprint self-heal so the code-gen agent knows which
+  // files were never fully generated and need real content, not just build-error fixes.
+  const stubPaths = (memory.code?.files ?? [])
+    .filter((f) => f.content.includes('STUB_COMPONENT:'))
+    .map((f) => f.path);
+  const stubContext = stubPaths.length > 0
+    ? `\n\nThe following component files were NOT generated (stubs only — they need real implementations):\n${stubPaths.map((p) => `  - ${p}`).join('\n')}`
+    : '';
+
   const repaired = await codeGenerationAgent({
     systemDesign: memory.systemDesign,
     uiSpec: memory.uiSpec?.structuredSpec,
     structuredSpec: memory.uiSpec?.structuredSpec,
     blueprint: memory.blueprint?.blueprint,
     requirements: memory.requirements,
-    modification: `Fix the build errors below and regenerate complete files:\n${String(logs).slice(-4000)}`,
+    modification: `Fix the build errors below and regenerate complete files:${stubContext}\n\nBuild errors:\n${String(logs).slice(-4000)}`,
     projectSpec,
     projectId,
     user_id: command.sessionId,
@@ -885,12 +873,15 @@ function repairCode(memory: ProjectMemory, issues: ConsistencyIssue[]): string[]
 
       let content = '';
       if (path === 'src/App.jsx') {
-        content = `export default function App() {\n  return null;\n}\n`;
+        // Minimal but renderable App shell — renders nothing visible but does not crash.
+        content = `import React from 'react';\nexport default function App() {\n  return <div id="app" />;\n}\n`;
       } else if (path === 'src/index.css') {
         content = `:root { color-scheme: light; }\nbody { margin: 0; font-family: system-ui, sans-serif; }\n`;
       } else if (/\.jsx$/.test(path)) {
         const name = componentNameFromPath(path);
-        content = `export default function ${name}() {\n  return null;\n}\n`;
+        // Use the STUB_COMPONENT marker so testFixAgent and selfHealWithCodeGeneration
+        // both recognise this file as needing real implementation, not just build-error fixes.
+        content = `import React from 'react';\n/* STUB_COMPONENT: ${name} — needs real implementation */\nexport default function ${name}() {\n  return <div className="section">${name}</div>;\n}\n`;
       } else {
         content = '';
       }
@@ -903,7 +894,7 @@ function repairCode(memory: ProjectMemory, issues: ConsistencyIssue[]): string[]
       const appFile = memory.code.files.find((f) => String(f.path).replace(/\\/g, '/').replace(/^\/+/, '') === 'src/App.jsx');
       if (appFile) {
         const original = String(appFile.content || '');
-        appFile.content = `${original}\n\nexport default function App() {\n  return null;\n}\n`;
+        appFile.content = `${original}\n\nexport default function App() {\n  return <div id="app" />;\n}\n`;
         repairs.push('appended default App export to src/App.jsx');
       }
     }
@@ -1106,25 +1097,28 @@ export async function runAIOrchestration(
     // on the first run but populated on resume — causing a permanent hash mismatch.
     const systemDesignHashInput = { userMessage: command.userMessage, requirements: memory.requirements, clarifications: memory.clarifications };
     const systemDesignResult = await stageWrap(memory, 'system_design', systemDesignHashInput, async () => {
-      const result = isFrontendOnlyRequirements(memory.requirements)
-        ? {
-            updatedState: {
-              activeState: 'UI_SPEC',
-              domain: 'system_design',
-              consistencyScore: 1,
-              transitions: [String(memory.currentState || 'requirements'), 'system_design'],
-              metadata: { frontendOnly: true },
-            },
-            nextStateProposal: 'UI_SPEC',
-            consistencyScore: 1,
-            output: buildFrontendOnlySystemDesign(memory.requirements),
-          }
-        : await systemDesignAgent({
-            projectId: command.projectId,
-            requirements: memory.requirements,
-            projectSpec,
-            previousIssues: feedbackForSystemDesign,
-          });
+      // Always run the real systemDesignAgent so it can produce a rich component tree,
+      // proper styling choices, and page-specific sub-components from the actual requirements.
+      // For frontend-only projects we strip backend/database/auth after the fact rather than
+      // skipping the agent entirely — the old shortcut returned a hardcoded react-vite+css
+      // shell with components == pages, which starved the blueprint and UI-spec of the detail
+      // they need to generate real code.
+      const result = await systemDesignAgent({
+        projectId: command.projectId,
+        requirements: memory.requirements,
+        projectSpec,
+        previousIssues: feedbackForSystemDesign,
+      });
+      // For frontend-only projects, zero out backend artifacts so downstream stages
+      // (blueprint, codeGen) never try to wire a server that won't exist.
+      if (isFrontendOnlyRequirements(memory.requirements) && result.output) {
+        (result.output as any).backend = null;
+        (result.output as any).database = null;
+        (result.output as any).auth = null;
+        if ((result.output as any).hosting) {
+          (result.output as any).hosting.backend = null;
+        }
+      }
       setSystemDesign(memory, result.output);
       assertConsistencyWithSelfHeal(memory, command, 'system_design', repairSystemDesign);
       return result.output;
