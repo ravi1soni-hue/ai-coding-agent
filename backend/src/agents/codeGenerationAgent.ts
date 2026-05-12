@@ -298,9 +298,35 @@ function fallbackFrontendManifest(requirements: any, uiSpec?: any): FrontendMani
   return { appName, dependencies: {}, apiResources: [], components: components.slice(0, MAX_COMPONENTS), styleNotes: 'Clean responsive application UI.' };
 }
 
-function fallbackFrontendApp(_manifest: FrontendManifest, components: GeneratedFile[], hasBackend = false): GeneratedFile {
+// Returns components that should be rendered directly in App.jsx (root-level only).
+// Uses compositionOrder from uiSpec when available; otherwise infers from import analysis.
+function filterRootComponents(components: GeneratedFile[], compositionOrder?: string[]): GeneratedFile[] {
+  const nameOf = (f: GeneratedFile) => sanitizeIdentifier(path.basename(f.path, '.jsx'), 'GeneratedSection');
+  if (compositionOrder && compositionOrder.length > 0) {
+    const ordered = compositionOrder
+      .map((name) => components.find((f) => nameOf(f) === name))
+      .filter((f): f is GeneratedFile => f !== undefined);
+    if (ordered.length > 0) return ordered;
+  }
+  // Heuristic: a component is a child if it is imported or used as JSX tag in any sibling.
+  const childNames = new Set<string>();
+  for (const file of components) {
+    for (const other of components) {
+      if (other === file) continue;
+      const n = nameOf(other);
+      if (file.content.includes(`import ${n}`) || file.content.includes(`<${n}`)) {
+        childNames.add(n);
+      }
+    }
+  }
+  const roots = components.filter((f) => !childNames.has(nameOf(f)));
+  return roots.length > 0 ? roots : components;
+}
+
+function fallbackFrontendApp(_manifest: FrontendManifest, components: GeneratedFile[], hasBackend = false, compositionOrder?: string[]): GeneratedFile {
+  const rootComponents = filterRootComponents(components, compositionOrder);
   const imports = components.map((file) => `import ${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} from './${file.path.replace(/^src\//, '')}';`).join('\n');
-  const componentTags = components.map((file) => `        <${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} />`).join('\n');
+  const componentTags = rootComponents.map((file) => `        <${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} />`).join('\n');
   const apiInit = hasBackend ? `
   const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:3000';
   const [apiReady, setApiReady] = React.useState(false);
@@ -1164,23 +1190,33 @@ async function generateFrontendApp(
   uiSpec?: any
 ): Promise<GeneratedFile> {
   const backendRequired = Boolean(systemDesign?.backend);
-  const imports = componentFiles.map((file) => ({
+  const userMessage = String(requirements?.userMessage || '').slice(0, 500);
+  const layoutInfo = uiSpec?.layoutStructure || {};
+  const compositionOrder: string[] | undefined = Array.isArray(layoutInfo.compositionOrder) && layoutInfo.compositionOrder.length > 0
+    ? layoutInfo.compositionOrder
+    : undefined;
+
+  // All components must be importable; only root components should be rendered at top-level.
+  const allImports = componentFiles.map((file) => ({
     name: sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection'),
     importLine: `import ${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} from './${file.path.replace(/^src\//, '')}';`,
   }));
-  const userMessage = String(requirements?.userMessage || '').slice(0, 500);
-  const layoutInfo = uiSpec?.layoutStructure || {};
+  const rootFiles = filterRootComponents(componentFiles, compositionOrder);
+  const rootNames = rootFiles.map((f) => sanitizeIdentifier(path.basename(f.path, '.jsx'), 'GeneratedSection'));
 
   const systemPrompt = `Generate src/App.jsx — the composition root for a React + Vite app: "${userMessage || manifest.appName}".
 
-App.jsx is the ONLY file that owns routing and navigation. All child components are already generated and imported below.
+App.jsx is the ONLY file that owns routing and navigation. All child components are already generated.
 
 App root structure: ${layoutInfo.appRoot || 'Main app wrapper'}
 State management: ${layoutInfo.stateManagement || 'Props drilling'}
 Navigation strategy: ${layoutInfo.navigationStrategy || 'Single page'}
 
-Component imports — import and render ALL of these:
-${imports.map((i) => i.importLine).join('\n')}
+ALL component imports (import all of these at the top of the file):
+${allImports.map((i) => i.importLine).join('\n')}
+
+ROOT components to render in JSX (render ONLY these — do NOT render child components directly, they are already composed inside their parents):
+${rootNames.join(', ')}
 
 ${backendRequired ? `Backend required — initialize at the top of the file:
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000';
@@ -1188,9 +1224,10 @@ const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
 RULES:
 - Export: export default function App() { ... }
+- Import ALL components listed above but only render the ROOT components in JSX.
+- CRITICAL: Do not render sub-components (non-root) directly in App — they are already used inside their parent components. Rendering them here would duplicate entire sections.
 - This file handles routing (BrowserRouter + Routes + Route) and/or page-switching state. Child components do NOT.
-- Import and render every component listed above — do not skip any.
-- If multi-page: use BrowserRouter + Routes. If single-page with sections: render all sections top-to-bottom.
+- If multi-page: use BrowserRouter + Routes. If single-page with sections: render all root sections top-to-bottom.
 - Keep App.jsx lean: routing + layout shell + top-level state only. No business logic inside App.jsx itself.
 - SIZE: target 60-120 lines. Hard max 180 lines. Pass data to children via props, not inline logic.
 - ${backendRequired ? 'Use API_BASE for all fetch calls. Handle loading and error states.' : 'No backend calls.'}
@@ -1208,17 +1245,18 @@ RULES:
       userDescription: userMessage,
       frontendDesign: systemDesign?.frontend || null,
       manifest,
-      componentImports: imports,
+      componentImports: allImports,
+      rootComponentNames: rootNames,
       modification: modification || null,
       layoutInfo,
       backendRequired,
       uiSpec: uiSpec ? { generationOrder: uiSpec.generationOrder, navigationStrategy: uiSpec.navigationStrategy, stateManagementStrategy: uiSpec.stateManagementStrategy } : undefined,
     },
-    estimateAppBudget(imports.length, backendRequired)
+    estimateAppBudget(allImports.length, backendRequired)
   );
 
   const appFile = validateGeneratedFile(parsed, 'src/App.jsx', 'frontend', 'frontendApp');
-  const hasImports = imports.length > 0 && imports.some((i) => appFile.content.includes(i.name));
+  const hasImports = allImports.length > 0 && allImports.some((i) => appFile.content.includes(i.name));
   const hasExport = appFile.content.includes('export default') && (appFile.content.includes('function App') || appFile.content.includes('const App') || appFile.content.includes('App ='));
   const hasRender = appFile.content.includes('return') && (appFile.content.includes('(') || appFile.content.includes('<') || appFile.content.includes('>'));
   const hasApiBase = backendRequired ? appFile.content.includes('API_BASE') || appFile.content.includes('fetch') || appFile.content.includes('http') : true;
@@ -1545,7 +1583,7 @@ export async function codeGenerationAgent(input: any) {
       appFile = await generateFrontendApp(manifest, input.requirements, input.systemDesign, input.modification, componentFiles, llmProxy, model, uiSpec);
     } catch (err) {
       logWarn('codeGenerationAgent:app-generation-fallback', { error: (err as Error).message });
-      appFile = fallbackFrontendApp(manifest, componentFiles, hasBackend);
+      appFile = fallbackFrontendApp(manifest, componentFiles, hasBackend, uiSpec?.layoutStructure?.compositionOrder);
     }
     // Import validation is advisory — a missing import or path mismatch should not
     // discard a successfully-generated App.jsx. Downgrade to a warning so a single
@@ -1593,7 +1631,7 @@ export async function codeGenerationAgent(input: any) {
       logWarn('codeGenerationAgent:repair-missing', { path: required });
       events?.emit({ type: 'AGENT_THINKING', message: `Repairing missing file: ${required}` });
       if (required === 'src/App.jsx') {
-        const repairedApp = fallbackFrontendApp(fallbackFrontendManifest(input.requirements, uiSpec), frontendFiles.filter((f) => f.path.startsWith('src/components/')), hasBackend);
+        const repairedApp = fallbackFrontendApp(fallbackFrontendManifest(input.requirements, uiSpec), frontendFiles.filter((f) => f.path.startsWith('src/components/')), hasBackend, uiSpec?.layoutStructure?.compositionOrder);
         fileMap.set(required, repairedApp.content);
         events?.emit({ type: 'FILE_WRITTEN', filePath: required, message: `Fallback repair for ${required}`, payload: { path: required, content: repairedApp.content } });
       } else if (required === 'src/index.css') {
@@ -1629,7 +1667,7 @@ export async function codeGenerationAgent(input: any) {
     logWarn('codeGenerationAgent:repair-stub-app', { contentLength: appContent.length });
     const frontendManifest = fallbackFrontendManifest(input.requirements, uiSpec);
     const componentFiles = frontendFiles.filter((f: GeneratedFile) => f.path.startsWith('src/components/'));
-    const repairedStubApp = fallbackFrontendApp(frontendManifest, componentFiles, hasBackend);
+    const repairedStubApp = fallbackFrontendApp(frontendManifest, componentFiles, hasBackend, uiSpec?.layoutStructure?.compositionOrder);
     fileMap.set('src/App.jsx', repairedStubApp.content);
     events?.emit({ type: 'FILE_WRITTEN', filePath: 'src/App.jsx', message: 'Repaired stub App.jsx', payload: { path: 'src/App.jsx', content: repairedStubApp.content } });
   }
