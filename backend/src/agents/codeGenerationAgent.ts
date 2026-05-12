@@ -141,8 +141,8 @@ function assertObject(value: unknown, label: string): Record<string, unknown> {
 //   <<<END>>>
 // Any prose before/after is ignored.
 // Accept both 2 and 3 closing `>` — LLMs occasionally emit `<<` instead of `<<<`.
-const FILE_BLOCK_RE = /<<<FILE:([^\n>]+?)>>>{2,3}\s*\n([\s\S]*?)\n?<<<END>>>/;
-const FILE_OPEN_SCAN_RE = /<<<FILE:[^\n>]+>>>{2,3}/;
+const FILE_BLOCK_RE = /<<<FILE:([^\n>]+?)>{2,3}\s*\n([\s\S]*?)\n?<<<END>>>/;
+const FILE_OPEN_SCAN_RE = /<<<FILE:[^\n>]+>{2,3}/;
 
 function parseFileBlock(content: string, expectedPath?: string): { path: string; content: string } {
   let raw = content;
@@ -163,7 +163,7 @@ function parseFileBlock(content: string, expectedPath?: string): { path: string;
   // caller grows the budget on retry instead of writing a half file.
   const openIdx = raw.search(FILE_OPEN_SCAN_RE);
   if (openIdx !== -1) {
-    const headerMatch = raw.slice(openIdx).match(/^<<<FILE:([^\n>]+?)>>>{2,3}\s*\n/);
+    const headerMatch = raw.slice(openIdx).match(/^<<<FILE:([^\n>]+?)>{2,3}\s*\n/);
     if (headerMatch) {
       const filePath = headerMatch[1].trim();
       const bodyStart = openIdx + headerMatch[0].length;
