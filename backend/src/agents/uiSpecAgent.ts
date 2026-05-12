@@ -118,17 +118,23 @@ async function callLLMWithRetry(
 
 function parseJsonFromResponse(content: string): any {
   const cleaned = content.replace(/```[a-zA-Z]*\s*/g, '').replace(/```/g, '').trim();
+  let lastParseError: unknown;
   try {
     return JSON.parse(cleaned);
-  } catch {
-    const jsonMatch = cleaned.match(/{[\s\S]*}|\[[\s\S]*\]/);
+  } catch (e) {
+    lastParseError = e;
+    // Try largest JSON object/array in the response (handles truncated markdown prose around JSON)
+    const jsonMatch = cleaned.match(/\[[\s\S]*\]|{[\s\S]*}/);
     if (jsonMatch) {
       try {
         return JSON.parse(jsonMatch[0]);
-      } catch {}
+      } catch (e2) {
+        lastParseError = e2;
+      }
     }
   }
-  throw new Error(`No valid JSON found. Snippet: ${content.replace(/\s+/g, ' ').slice(0, 200)}`);
+  const parseMsg = lastParseError instanceof SyntaxError ? ` Parse error: ${lastParseError.message}.` : '';
+  throw new Error(`No valid JSON found.${parseMsg} Snippet: ${content.replace(/\s+/g, ' ').slice(0, 200)}`);
 }
 
 function calculateComponentDependencies(
@@ -285,11 +291,13 @@ DECOMPOSITION RULES — these are absolute, non-negotiable:
 11. Name components after what they render: NavBar, HeroSection, ContactForm, Footer — never vague names like AppSection or MainComponent.
 12. contentData MUST list every concrete value a user sees in this component: item names, labels, numeric values, CTA text. These are the canonical source of truth — downstream code generation copies them verbatim and must not invent different values.${feedbackBlock}`;
 
+    const pageCount = Array.isArray(requirements.pages) ? requirements.pages.length : 4;
+    const componentTokens = Math.min(8000, Math.max(4000, pageCount * 500));
     const componentInterfaceRaw = await callLLMWithRetry(
       llmProxy,
       [{ role: 'system', content: componentInterfacePrompt }, { role: 'user', content: '' }],
       model,
-      4000,
+      componentTokens,
       2,
       'componentInterfaces'
     );
