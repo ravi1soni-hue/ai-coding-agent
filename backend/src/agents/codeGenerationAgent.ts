@@ -75,8 +75,8 @@ const BACKEND_ALLOWED_PREFIXES = [
   'backend/src/lib/',
   'backend/src/validators/',
 ];
-const MAX_COMPONENTS = 48;
-const MAX_BACKEND_ROUTES = 20;
+const MAX_COMPONENTS = 24;
+const MAX_BACKEND_ROUTES = 12;
 const MAX_BUILD_ATTEMPTS = 2;
 
 // Libraries that require external API keys / service credentials at runtime.
@@ -143,7 +143,9 @@ function assertObject(value: unknown, label: string): Record<string, unknown> {
 //   ...raw code, no escaping...
 //   <<<END>>>
 // Any prose before/after is ignored.
-const FILE_BLOCK_RE = /<<<FILE:([^\n>]+?)>>>\s*\n([\s\S]*?)\n?<<<END>>>/;
+// Accept both 2 and 3 closing `>` — LLMs occasionally emit `<<` instead of `<<<`.
+const FILE_BLOCK_RE = /<<<FILE:([^\n>]+?)>>>{2,3}\s*\n([\s\S]*?)\n?<<<END>>>/;
+const FILE_OPEN_SCAN_RE = /<<<FILE:[^\n>]+>>>{2,3}/;
 
 function parseFileBlock(content: string, expectedPath?: string): { path: string; content: string } {
   let raw = content;
@@ -162,9 +164,9 @@ function parseFileBlock(content: string, expectedPath?: string): { path: string;
   // Tolerant fallback: opening marker but missing/truncated <<<END>>>.
   // If the response was cut off mid-file, surface a truncation error so the
   // caller grows the budget on retry instead of writing a half file.
-  const openIdx = raw.search(/<<<FILE:[^\n>]+>>>/);
+  const openIdx = raw.search(FILE_OPEN_SCAN_RE);
   if (openIdx !== -1) {
-    const headerMatch = raw.slice(openIdx).match(/^<<<FILE:([^\n>]+?)>>>\s*\n/);
+    const headerMatch = raw.slice(openIdx).match(/^<<<FILE:([^\n>]+?)>>>{2,3}\s*\n/);
     if (headerMatch) {
       const filePath = headerMatch[1].trim();
       const bodyStart = openIdx + headerMatch[0].length;
@@ -589,7 +591,10 @@ function parseBackendManifest(raw: unknown): BackendManifest {
   const manifest = assertObject(raw, 'backendManifest') as BackendManifest;
   const resources = Array.isArray(manifest.resources) ? manifest.resources : [];
   const normalizedResources = resources.slice(0, MAX_BACKEND_ROUTES).map((resource, index) => {
-    const name = String(resource?.name || `resource${index + 1}`);
+    // Slugify the name so human-readable values like "CV Uploads" or "Parsing / Sync"
+    // don't silently fail path/route validation downstream.
+    const rawName = String(resource?.name || `resource${index + 1}`);
+    const name = rawName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || `resource${index + 1}`;
     const routePath = String(resource?.routePath || `/api/${name}`);
     // Use LLM-specified tableName; fall back to sanitized resource name, then default
     const rawTable = typeof resource?.tableName === 'string' && resource.tableName.trim() ? resource.tableName.trim() : name.toLowerCase().replace(/[^a-z0-9_]/g, '_') || SHARED_TABLE_NAME;
@@ -977,7 +982,9 @@ function estimateComponentBudget(
   );
 
   return normalizeBudget({
-    initial: Math.max(3000, Math.min(6000, initial)),
+    // Floor raised from 3000→5000: logs showed 13/48 components hit 3000-token limit on
+    // first attempt, each triggering a costly retry. 5000 covers the vast majority in one pass.
+    initial: Math.max(5000, Math.min(8000, initial)),
     ceiling: 24000,
   });
 }
@@ -1224,6 +1231,16 @@ RULES:
     }
   }
 
+  // Deduplicate components case-insensitively by slug — logs showed "home"+"Home",
+  // "contact"+"Contact" etc. all entering generation, doubling LLM calls and failures.
+  const seenSlugs = new Set<string>();
+  manifest.components = manifest.components.filter((c) => {
+    const slug = String(c.name || c.path || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (seenSlugs.has(slug)) return false;
+    seenSlugs.add(slug);
+    return true;
+  });
+
   if (manifest.components.length > MAX_COMPONENTS && !Array.isArray(uiSpec?.components)) {
     manifest.components = manifest.components.slice(0, MAX_COMPONENTS);
   }
@@ -1278,25 +1295,32 @@ RULES — ALL are mandatory:
 - REACT-ICONS: Only use icon names that actually exist in react-icons v5. Safe Si icons: SiPython, SiTypescript, SiJavascript, SiReact, SiNodedotjs, SiDocker, SiKubernetes, SiAmazon, SiGooglecloud, SiMicrosoftazure, SiPostgresql, SiMongodb, SiRedis, SiGit, SiGithub, SiLinux, SiTensorflow, SiPytorch, SiOpenai, SiHuggingFace, SiMeta, SiVercel, SiNetlify, SiFastapi, SiFlask, SiDjango, SiGraphql, SiTailwindcss, SiVite. NEVER invent icon names — if unsure, omit or use a Fa icon instead.
 - ${BANNED_IMPORTS_RULE}`;
 
-  const parsed = await generateFile(
-    llmProxy,
-    model,
-    `frontendComponent:${expectedPath}`,
-    expectedPath,
-    systemPrompt,
-    {
-      component,
-      appName: manifest.appName,
-      requirements,
-      componentName,
-      userDescription: userMessage,
-      componentSpec,
-      dependencyCode: dependencyCode.length > 0 ? dependencyCode : undefined,
-    },
-    estimateComponentBudget(componentSpec, dependencyCode.length, String(component.purpose || ''))
-  );
+  const budget = estimateComponentBudget(componentSpec, dependencyCode.length, String(component.purpose || ''));
+  const payload = {
+    component,
+    appName: manifest.appName,
+    requirements,
+    componentName,
+    userDescription: userMessage,
+    componentSpec,
+    dependencyCode: dependencyCode.length > 0 ? dependencyCode : undefined,
+  };
 
-  return validateGeneratedFile(parsed, expectedPath, 'frontend', `frontendComponent:${expectedPath}`);
+  const parsed = await generateFile(llmProxy, model, `frontendComponent:${expectedPath}`, expectedPath, systemPrompt, payload, budget);
+
+  try {
+    return validateGeneratedFile(parsed, expectedPath, 'frontend', `frontendComponent:${expectedPath}`);
+  } catch (err) {
+    // If validation fails only due to placeholder text, make one targeted retry with an explicit
+    // anti-placeholder instruction before letting the caller fall back to a stub.
+    if (/placeholder/i.test((err as Error).message)) {
+      logWarn(`frontendComponent:placeholder-retry:${expectedPath}`, { error: (err as Error).message });
+      const antiPlaceholderPrompt = `${systemPrompt}\n\nCRITICAL: Do NOT use placeholder text, TODO comments, lorem ipsum, or stub content of any kind. Every value in the JSX must be real, specific, and appropriate for "${component.purpose || componentName}".`;
+      const reparsed = await generateFile(llmProxy, model, `frontendComponent:${expectedPath}:noplaceholder`, expectedPath, antiPlaceholderPrompt, payload, budget);
+      return validateGeneratedFile(reparsed, expectedPath, 'frontend', `frontendComponent:${expectedPath}:noplaceholder`);
+    }
+    throw err;
+  }
 }
 
 async function generateFrontendApp(
@@ -1682,45 +1706,51 @@ export async function codeGenerationAgent(input: any) {
     const cap = Math.max(MAX_COMPONENTS, hasUiSpecComponents ? (uiSpec.components as unknown[]).length : 0, blueprintComponentCount);
     const componentSpecs = (manifest.components || []).slice(0, cap);
 
+    // Generate all components in parallel (concurrency=6) — previously sequential,
+    // causing 10-15min timeouts for 40+ component projects.
+    const COMPONENT_CONCURRENCY = 6;
+    const componentResults: Array<{ index: number; file: GeneratedFile }> = [];
+    const queue = componentSpecs.map((component, index) => ({ component, index }));
     const generatedDependencies = new Map<string, string>();
-    const componentFiles: GeneratedFile[] = [];
-    for (const component of componentSpecs) {
-      try {
-        const file = await generateFrontendComponent(component, manifest, input.requirements, llmProxy, model, uiSpec, generatedDependencies);
-        generatedDependencies.set(file.path.replace(/^src\/components\//, '').replace(/\.jsx$/, ''), file.content);
-        componentFiles.push(file);
-        events?.emit({ type: 'FILE_WRITTEN', filePath: file.path, message: `Generated ${file.path}`, payload: { path: file.path, content: file.content } });
-      } catch (err) {
-        logWarn('codeGenerationAgent:component-fallback', { path: component.path, error: (err as Error).message });
-        // Emit a minimal stub so the import in App.jsx resolves, but mark it as a stub so
-        // the build-fix agent can detect and retry it rather than treating it as valid output.
-        const compName = toComponentName(component.name || path.basename(component.path || '', '.jsx'), 'GeneratedSection');
-        const safePath = sanitizeComponentPath(component.path || `src/components/${compName}.jsx`, componentFiles.length);
-        const stubFile: GeneratedFile = {
-          path: safePath,
-          // STUB_COMPONENT marker is intentional — testFixAgent reads it to identify files
-          // that need real generation. Do not remove this comment from the stub.
-          content: `import React from 'react';\n/* STUB_COMPONENT: ${compName} — generation failed, needs real implementation */\nexport default function ${compName}() {\n  return <div className="section">${compName}</div>;\n}\n`,
-        };
-        componentFiles.push(stubFile);
-        events?.emit({ type: 'STUB_COMPONENT', filePath: stubFile.path, message: `Stub emitted for ${stubFile.path} — generation failed: ${(err as Error).message}`, payload: { path: stubFile.path, content: stubFile.content, reason: (err as Error).message } });
+
+    async function runComponentSlot(): Promise<void> {
+      while (queue.length > 0) {
+        const item = queue.shift();
+        if (!item) break;
+        const { component, index } = item;
+        try {
+          const file = await generateFrontendComponent(component, manifest, input.requirements, llmProxy, model, uiSpec, generatedDependencies);
+          generatedDependencies.set(file.path.replace(/^src\/components\//, '').replace(/\.jsx$/, ''), file.content);
+          componentResults.push({ index, file });
+          events?.emit({ type: 'FILE_WRITTEN', filePath: file.path, message: `Generated ${file.path}`, payload: { path: file.path, content: file.content } });
+        } catch (err) {
+          logWarn('codeGenerationAgent:component-fallback', { path: component.path, error: (err as Error).message });
+          const compName = toComponentName(component.name || path.basename(component.path || '', '.jsx'), 'GeneratedSection');
+          const safePath = sanitizeComponentPath(component.path || `src/components/${compName}.jsx`, index);
+          const stubFile: GeneratedFile = {
+            path: safePath,
+            // STUB_COMPONENT marker is intentional — testFixAgent reads it to identify files
+            // that need real generation. Do not remove this comment from the stub.
+            content: `import React from 'react';\n/* STUB_COMPONENT: ${compName} — generation failed, needs real implementation */\nexport default function ${compName}() {\n  return <div className="section">${compName}</div>;\n}\n`,
+          };
+          componentResults.push({ index, file: stubFile });
+          events?.emit({ type: 'STUB_COMPONENT', filePath: stubFile.path, message: `Stub emitted for ${stubFile.path} — generation failed: ${(err as Error).message}`, payload: { path: stubFile.path, content: stubFile.content, reason: (err as Error).message } });
+        }
       }
     }
+
+    await Promise.all(Array.from({ length: Math.min(COMPONENT_CONCURRENCY, componentSpecs.length) }, runComponentSlot));
+    // Restore original blueprint ordering
+    componentResults.sort((a, b) => a.index - b.index);
+    const componentFiles = componentResults.map((r) => r.file);
 
     let appFile: GeneratedFile;
     try {
       appFile = await generateFrontendApp(manifest, input.requirements, input.systemDesign, input.modification, componentFiles, llmProxy, model, uiSpec);
+      try { validateAppImports(appFile.content, componentFiles, blueprint, uiSpec); } catch (e) { logWarn('codeGenerationAgent:app-import-warning', { error: (e as Error).message }); }
     } catch (err) {
       logWarn('codeGenerationAgent:app-generation-fallback', { error: (err as Error).message });
       appFile = fallbackFrontendApp(manifest, componentFiles, hasBackend, uiSpec?.layoutStructure?.compositionOrder);
-    }
-    // Import validation is advisory — a missing import or path mismatch should not
-    // discard a successfully-generated App.jsx. Downgrade to a warning so a single
-    // cosmetic inconsistency doesn't trigger the flat-render fallback.
-    try {
-      validateAppImports(appFile.content, componentFiles, blueprint, uiSpec);
-    } catch (err) {
-      logWarn('codeGenerationAgent:app-import-warning', { error: (err as Error).message });
     }
 
     let cssFile: GeneratedFile;

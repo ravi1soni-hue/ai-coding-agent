@@ -223,6 +223,9 @@ export class LLMProxyClient {
                   chatUrl,
                   reason: parseError instanceof Error ? parseError.message : String(parseError),
                 });
+                // HTML proxy response: retrying the same model is never useful (the proxy is
+                // broken for this model right now). Break immediately to try the next model.
+                if (isHtmlResponse) break;
                 if (attempt < 2) {
                   await this.sleep(750 * (attempt + 1));
                   continue;

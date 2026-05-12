@@ -555,7 +555,7 @@ export async function testFixAgent(input: {
             }
           }
         } catch (fixErr) {
-          logError('testFixAgent:fixFn-error', fixErr);
+          logError('testFixAgent:fixFn-error', { error: fixErr instanceof Error ? fixErr.message : String(fixErr), stage: 'fixFn', retries });
         }
         // Re-apply deterministic fixes on the healed files so package.json stays in sync.
         await applyPreBuildFixes(lastResult.logs);
@@ -566,7 +566,7 @@ export async function testFixAgent(input: {
     const lastLogs = lastResult?.logs || 'No build output.';
     throw new Error(`Build failed after 3 attempts.\n${lastLogs.slice(-2000)}`);
   } catch (err) {
-    logError('testFixAgent', err);
+    logError('testFixAgent', { error: err instanceof Error ? err.message : String(err), stage: 'testFixAgent', stack: err instanceof Error ? err.stack?.slice(0, 400) : undefined });
     throw err;
   }
 }
