@@ -1,6 +1,76 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { makeSocketUrl, readJson, buildDetailedLogPayload, copyTextToClipboard } from '../utils/helpers';
 
+function ConfirmationSummaryCard({ summary }) {
+  const req = summary?.requirements || {};
+  const clarifications = summary?.clarifications?.context?.clarificationAnswers || {};
+  const pages = Array.isArray(req.pages) ? req.pages : [];
+  const qaEntries = Object.entries(clarifications);
+
+  const badges = [
+    req.website_type && { label: req.website_type.replace(/_/g, ' '), color: '#7c3aed' },
+    req.backend_required && { label: 'Backend', color: '#0369a1' },
+    req.auth_required && { label: 'Auth', color: '#0369a1' },
+    req.deployment_pref && req.deployment_pref !== 'auto' && { label: req.deployment_pref, color: '#047857' },
+  ].filter(Boolean);
+
+  return (
+    <div className="confirmCard">
+      <div className="confirmCardHeader">
+        <span className="confirmCardIcon">📋</span>
+        <span className="confirmCardTitle">Project Summary</span>
+      </div>
+
+      {summary?.userMessage && (
+        <div className="confirmSection">
+          <div className="confirmLabel">Request</div>
+          <div className="confirmValue">{summary.userMessage}</div>
+        </div>
+      )}
+
+      {badges.length > 0 && (
+        <div className="confirmSection">
+          <div className="confirmLabel">Type & Stack</div>
+          <div className="confirmBadges">
+            {badges.map((b) => (
+              <span key={b.label} className="confirmBadge" style={{ background: b.color }}>
+                {b.label}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {pages.length > 0 && (
+        <div className="confirmSection">
+          <div className="confirmLabel">Pages</div>
+          <div className="confirmBadges">
+            {pages.map((p) => (
+              <span key={p} className="confirmBadge confirmBadgeOutline">{p}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {qaEntries.length > 0 && (
+        <div className="confirmSection">
+          <div className="confirmLabel">Clarifications</div>
+          <div className="confirmQAList">
+            {qaEntries.map(([q, a]) => (
+              <div key={q} className="confirmQAItem">
+                <div className="confirmQ">Q: {q}</div>
+                <div className="confirmA">{typeof a === 'string' ? a.slice(0, 220) + (a.length > 220 ? '…' : '') : String(a)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="confirmPrompt">Reply <strong>yes</strong> to confirm or <strong>no</strong> to cancel.</div>
+    </div>
+  );
+}
+
 function MessageText({ text }) {
   return text.split(/(https?:\/\/[^\s]+)/g).map((part, i) =>
     /^https?:\/\//.test(part) ? (
@@ -127,6 +197,9 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
         return { role: 'assistant', text: e.message || 'Clarification requested.' };
       }
       case 'confirmation_request':
+        if (e.payload?.summary && typeof e.payload.summary === 'object') {
+          return { role: 'confirmation', summary: e.payload.summary };
+        }
         return { role: 'assistant', text: 'Confirmation requested.' };
       case 'stage_start':
         return { role: 'system', text: e.message || `Starting ${e.payload?.stage || ''}...` };
@@ -423,11 +496,11 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
           break;
         }
         case 'confirmation_request': {
-          let summaryText = 'Ready to proceed?';
           if (payload.summary && typeof payload.summary === 'object') {
-            try { summaryText = `Ready to proceed?\n\n${JSON.stringify(payload.summary, null, 2)}`; } catch { /* ignore */ }
+            setMessages((prev) => [...prev, { role: 'confirmation', summary: payload.summary }]);
+          } else {
+            pushMessage('assistant', 'Ready to proceed? Reply "yes" to confirm or "no" to cancel.');
           }
-          pushMessage('assistant', `${summaryText}\n\nReply "yes" to confirm or "no" to cancel.`);
           break;
         }
         case 'done':
@@ -622,6 +695,9 @@ export default function ChatWorkspace({ user, projectId, onLogout, onNewProject,
 
           <div className="activityBox">
             {messages.map((m, idx) => {
+              if (m.role === 'confirmation') {
+                return <ConfirmationSummaryCard key={`confirmation-${idx}`} summary={m.summary} />;
+              }
               const isDetails = m.role === 'details';
               return (
                 <div key={`${m.role}-${idx}`} className={`msg ${m.role}`}>
