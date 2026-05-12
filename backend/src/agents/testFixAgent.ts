@@ -51,6 +51,102 @@ const NODE_BUILTINS = new Set([
 
 type GeneratedFile = { path: string; content: string };
 
+// react-icons uses a per-library prefix (Si = Simple Icons, Fa = Font Awesome, etc.).
+// The LLM frequently invents icon names that don't exist in the installed version.
+
+// Known-bad Si icon names → correct replacement (or null to remove the import entirely).
+const REACT_ICONS_REPLACEMENTS: Record<string, string | null> = {
+  SiHuggingface: 'SiHuggingFace',      // correct capitalisation (v5+)
+  SiHuggingFace: 'SiHuggingFace',      // keep as-is, just ensure it's listed
+  SiOpenai: 'SiOpenai',                // valid in v5+
+  SiAmazonwebservices: 'SiAmazon',     // renamed in react-icons v5
+  SiAws: 'SiAmazon',                   // non-existent alias
+  SiAwsamplify: null,                  // doesn't exist — remove
+  SiGooglecloud: 'SiGooglecloud',      // valid
+  SiVercel: 'SiVercel',                // valid
+  SiNetlify: 'SiNetlify',              // valid
+  SiLangchain: null,                   // doesn't exist in any version — remove
+  SiLangChain: null,
+  SiAnthropic: null,                   // doesn't exist — remove
+  SiChatgpt: null,                     // doesn't exist — remove
+  SiMeta: 'SiMeta',                    // valid in v5
+  SiMicrosoft: 'SiMicrosoft',          // valid
+  SiMicrosoftazure: 'SiMicrosoftazure', // valid
+};
+
+// Extracts icon names reported as missing by Rollup/Vite build errors.
+// Example line: "SiAmazonwebservices" is not exported by "node_modules/react-icons/si/..."
+function parseMissingIconsFromLogs(logs: string): Set<string> {
+  const missing = new Set<string>();
+  const re = /"(Si[A-Za-z0-9]+)"\s+is not exported by/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(logs)) !== null) missing.add(m[1]);
+  return missing;
+}
+
+// Rewrite any react-icons named imports that are known bad → known good (or remove nulls).
+// Also strips any icons surfaced as missing in the provided build log.
+// Returns updated file content or null if no change was needed.
+function fixReactIconsImports(content: string, missingFromLogs?: Set<string>): string | null {
+  const iconImportRe = /import\s+\{([^}]+)\}\s+from\s+['"]react-icons\/([a-z]+)['"]/g;
+  let changed = false;
+  const result = content.replace(iconImportRe, (_match, names: string, lib: string) => {
+    const fixedNames = names.split(',').map((raw) => {
+      const name = raw.trim();
+      if (!name) return raw;
+
+      // Check static replacement map
+      if (Object.prototype.hasOwnProperty.call(REACT_ICONS_REPLACEMENTS, name)) {
+        const replacement = REACT_ICONS_REPLACEMENTS[name];
+        changed = true;
+        if (replacement === null) return ''; // will be filtered out
+        return replacement === name ? raw : raw.replace(name, replacement);
+      }
+
+      // Dynamically strip icons the build reported as missing
+      if (missingFromLogs?.has(name)) {
+        changed = true;
+        return '';
+      }
+
+      return raw;
+    }).filter(s => s.trim()).join(', ');
+
+    if (!fixedNames.trim()) {
+      changed = true;
+      return ''; // entire import line removed
+    }
+    return `import { ${fixedNames} } from 'react-icons/${lib}'`;
+  });
+  // Clean up blank lines left by removed imports
+  const cleaned = result.replace(/^\s*\n/gm, '');
+  return changed ? cleaned : null;
+}
+
+/**
+ * Rewrites react-icons named imports in generated files to fix known bad export names.
+ * Mutates files in-place and writes corrected content to disk when workspaceDir is provided.
+ */
+async function fixReactIconsInFiles(files: GeneratedFile[], workspaceDir?: string, buildLogs?: string): Promise<void> {
+  const missingFromLogs = buildLogs ? parseMissingIconsFromLogs(buildLogs) : undefined;
+  for (const file of files) {
+    const ext = path.extname(file.path).toLowerCase();
+    if (!['.js', '.jsx', '.ts', '.tsx'].includes(ext)) continue;
+    if (!file.content.includes('react-icons')) continue;
+    const fixed = fixReactIconsImports(file.content, missingFromLogs);
+    if (fixed) {
+      file.content = fixed;
+      debug('testFixAgent:react-icons-fix', { path: file.path });
+      if (workspaceDir) {
+        const abs = path.join(workspaceDir, 'frontend', file.path);
+        try {
+          await fs.writeFile(abs, fixed, 'utf8');
+        } catch { /* best-effort */ }
+      }
+    }
+  }
+}
+
 /**
  * Scans all JS/TS files for imports, adds any missing packages to package.json.
  * Returns updated package.json content or null if nothing changed.
@@ -279,6 +375,15 @@ export async function testFixAgent(input: {
     }
   }
 
+  // ── Pre-build: rewrite known-bad react-icons named imports ──────────────
+  if (input.files) {
+    try {
+      await fixReactIconsInFiles(input.files, input.workspaceDir);
+    } catch (err) {
+      logWarn('testFixAgent:react-icons-fix', err);
+    }
+  }
+
   // ── Pre-build: add missing dependencies to frontend package.json ──────────
   if (input.files && input.workspaceDir) {
     try {
@@ -333,12 +438,19 @@ export async function testFixAgent(input: {
         return { ...currentResult, fixed: retries > 0 };
       }
 
-      if (lastResult && currentResult.logs.trim() === lastResult.logs.trim()) {
-        logWarn('testFixAgent:stagnant-failure', { attempt: retries + 1 });
-        break;
+      lastResult = currentResult;
+
+      // ── Post-failure: re-run react-icons fix with build log context ──────────
+      // This catches icons the static map doesn't know about by parsing
+      // "X is not exported" lines directly from the Rollup/Vite error output.
+      if (input.files && lastResult.logs.includes('react-icons')) {
+        try {
+          await fixReactIconsInFiles(input.files, input.workspaceDir, lastResult.logs);
+        } catch (err) {
+          logWarn('testFixAgent:react-icons-refix', err);
+        }
       }
 
-      lastResult = currentResult;
       if (input.fixFn && retries < 2) {
         info(`Build failed — invoking AI self-heal (attempt ${retries + 1})...`);
         debug('testFixAgent:invoking-fixFn', { retry: retries + 1 });

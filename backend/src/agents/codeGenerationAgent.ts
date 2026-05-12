@@ -178,7 +178,9 @@ function isProbablyTruncatedGeneratedFile(filePath: string, content: string): bo
 }
 
 function containsPlaceholderText(value: string): boolean {
-  return /(?:\bTODO\b|\bplaceholder\b|\breplace\b|\bgeneric text\b)/i.test(value);
+  // "\breplace\b" was intentionally removed: it matches legitimate content (CSS replace(),
+  // natural-language sentences) and caused false rejections that silently produced stubs.
+  return /(?:\bTODO\b|\bplaceholder\b|\bgeneric text\b)/i.test(value);
 }
 
 function validateGeneratedFile(file: unknown, expectedPath: string | undefined, scope: 'frontend' | 'backend', label: string): GeneratedFile {
@@ -1166,7 +1168,8 @@ RULES — ALL are mandatory:
 - No TODO comments, no placeholder text, no stub implementations.
 - Real JSX with actual content matching the purpose — not lorem ipsum, not generic examples.
 - All imports at the top. Only import what you use.
-- useState/useEffect only if genuinely needed for THIS component's local behaviour.`;
+- useState/useEffect only if genuinely needed for THIS component's local behaviour.
+- REACT-ICONS: Only use icon names that actually exist in react-icons v5. Safe Si icons: SiPython, SiTypescript, SiJavascript, SiReact, SiNodedotjs, SiDocker, SiKubernetes, SiAmazon, SiGooglecloud, SiMicrosoftazure, SiPostgresql, SiMongodb, SiRedis, SiGit, SiGithub, SiLinux, SiTensorflow, SiPytorch, SiOpenai, SiHuggingFace, SiMeta, SiVercel, SiNetlify, SiFastapi, SiFlask, SiDjango, SiGraphql, SiTailwindcss, SiVite. NEVER invent icon names — if unsure, omit or use a Fa icon instead.`;
 
   const parsed = await generateFile(
     llmProxy,
@@ -1576,15 +1579,18 @@ export async function codeGenerationAgent(input: any) {
         events?.emit({ type: 'FILE_WRITTEN', filePath: file.path, message: `Generated ${file.path}`, payload: { path: file.path, content: file.content } });
       } catch (err) {
         logWarn('codeGenerationAgent:component-fallback', { path: component.path, error: (err as Error).message });
-        // Emit a minimal stub so the import in App.jsx resolves at runtime instead of crashing.
+        // Emit a minimal stub so the import in App.jsx resolves, but mark it as a stub so
+        // the build-fix agent can detect and retry it rather than treating it as valid output.
         const compName = toComponentName(component.name || path.basename(component.path || '', '.jsx'), 'GeneratedSection');
         const safePath = sanitizeComponentPath(component.path || `src/components/${compName}.jsx`, componentFiles.length);
         const stubFile: GeneratedFile = {
           path: safePath,
-          content: `import React from 'react';\nexport default function ${compName}() {\n  return <div className="section">${compName}</div>;\n}\n`,
+          // STUB_COMPONENT marker is intentional — testFixAgent reads it to identify files
+          // that need real generation. Do not remove this comment from the stub.
+          content: `import React from 'react';\n/* STUB_COMPONENT: ${compName} — generation failed, needs real implementation */\nexport default function ${compName}() {\n  return <div className="section">${compName}</div>;\n}\n`,
         };
         componentFiles.push(stubFile);
-        events?.emit({ type: 'FILE_WRITTEN', filePath: stubFile.path, message: `Wrote stub ${stubFile.path}`, payload: { path: stubFile.path, content: stubFile.content } });
+        events?.emit({ type: 'STUB_COMPONENT', filePath: stubFile.path, message: `Stub emitted for ${stubFile.path} — generation failed: ${(err as Error).message}`, payload: { path: stubFile.path, content: stubFile.content, reason: (err as Error).message } });
       }
     }
 
