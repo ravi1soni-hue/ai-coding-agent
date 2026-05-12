@@ -29,6 +29,9 @@ export interface ComponentInterface {
   effects?: string[];
   dependencies: string[];
   renderLogic: string;
+  // Canonical content values (e.g. item names, labels, numeric values, feature lists, CTA text).
+  // Every LLM call that generates this component must use these exact values — no independent invention.
+  contentData?: Record<string, unknown>;
 }
 
 export interface DataFlowNode {
@@ -261,21 +264,26 @@ Generate a JSON array with this exact shape (no markdown fences):
     "state": ["stateVarName1"],
     "effects": ["Description of side effect if any"],
     "dependencies": ["OtherComponentName"],
-    "renderLogic": "Concrete description of JSX output — what the user sees"
+    "renderLogic": "Concrete description of JSX output — what the user sees",
+    "contentData": {
+      "key": "EXACT literal value that must appear verbatim in the rendered output (labels, numeric values, item names, CTA text, etc.)"
+    }
   }
 ]
 
 DECOMPOSITION RULES — these are absolute, non-negotiable:
-1. ONE file = ONE UI responsibility. A component renders ONE thing (a navbar, a hero, a pricing table, a footer).
+1. ONE file = ONE UI responsibility. A component renders ONE thing (a navbar, a hero, a data table, a footer).
 2. App.jsx is the ONLY file allowed to contain BrowserRouter, Routes, Route, or any routing logic. NO component file may import or use react-router routing primitives.
-3. Every distinct page (Home, Pricing, Dashboard, About, etc.) = its own component file: HomePage.jsx, PricingPage.jsx, etc.
-4. Every major section (hero, features list, testimonials, FAQ, footer, nav bar) = its own component file: HeroSection.jsx, FeaturesSection.jsx, NavBar.jsx, Footer.jsx.
+3. Every distinct page = its own component file (e.g. HomePage.jsx, DashboardPage.jsx).
+4. Every major section (hero, feature list, testimonials, FAQ, footer, nav bar) = its own component file.
 5. A component file must be ~80-150 lines of JSX. If you think it needs more, split it further.
-6. NEVER combine multiple pages or sections into one component. NEVER name a component "AppSection" or similar catch-all.
-7. Lists (pricing tiers, feature cards, team members) — the LIST CONTAINER is one component; individual cards are simple inline JSX inside it, not separate components unless they are genuinely reusable.
-8. Navigation state (active page, current route) lives in App.jsx only. Child components receive the current page via props if needed.
-9. Create between 4 and 10 components. More is better than fewer when it means each is focused.
-10. Name components after what they render: NavBar, HeroSection, PricingSection, FeatureCard, Footer — never AppSection, MainComponent, etc.${feedbackBlock}`;
+6. NEVER combine multiple pages or sections into one component. NEVER name a component with a generic catch-all like "AppSection".
+7. Items inside a list or grid (cards, rows, tiles) are inline JSX inside their container component — NOT separate component files, unless the same item type genuinely reappears in multiple unrelated places in the app.
+8. Toggle buttons, tab switchers, and small interactive controls that only exist within one section are inline JSX within that section — NOT separate component files.
+9. Navigation state (active page, current route) lives in App.jsx only. Child components receive the current page via props if needed.
+10. COMPONENT BUDGET: target (number of distinct pages) + 2 to 3 shared layout pieces (e.g. NavBar, Footer). Do NOT create separate components for every interactive element inside a single section.
+11. Name components after what they render: NavBar, HeroSection, ContactForm, Footer — never vague names like AppSection or MainComponent.
+12. contentData MUST list every concrete value a user sees in this component: item names, labels, numeric values, CTA text. These are the canonical source of truth — downstream code generation copies them verbatim and must not invent different values.${feedbackBlock}`;
 
     const componentInterfaceRaw = await callLLMWithRetry(
       llmProxy,
@@ -300,6 +308,7 @@ DECOMPOSITION RULES — these are absolute, non-negotiable:
       effects: Array.isArray(c.effects) ? c.effects : [],
       dependencies: Array.isArray(c.dependencies) ? c.dependencies : [],
       renderLogic: c.renderLogic || 'Renders UI based on props and state',
+      contentData: c.contentData && typeof c.contentData === 'object' && !Array.isArray(c.contentData) ? c.contentData : undefined,
     }));
 
     // Universal stability: ensure every requested requirements.pages entry

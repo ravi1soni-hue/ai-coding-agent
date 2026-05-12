@@ -303,9 +303,15 @@ function fallbackFrontendManifest(requirements: any, uiSpec?: any): FrontendMani
 function filterRootComponents(components: GeneratedFile[], compositionOrder?: string[]): GeneratedFile[] {
   const nameOf = (f: GeneratedFile) => sanitizeIdentifier(path.basename(f.path, '.jsx'), 'GeneratedSection');
   if (compositionOrder && compositionOrder.length > 0) {
-    const ordered = compositionOrder
-      .map((name) => components.find((f) => nameOf(f) === name))
-      .filter((f): f is GeneratedFile => f !== undefined);
+    // Normalize to lowercase so "PricingSection" matches "pricingsection" file basename variants
+    const orderLower = compositionOrder.map((n) => n.toLowerCase());
+    const ordered = components
+      .filter((f) => orderLower.includes(nameOf(f).toLowerCase()))
+      .sort((a, b) => {
+        const ai = orderLower.indexOf(nameOf(a).toLowerCase());
+        const bi = orderLower.indexOf(nameOf(b).toLowerCase());
+        return ai - bi;
+      });
     if (ordered.length > 0) return ordered;
   }
   // Heuristic: a component is a child if it is imported or used as JSX tag in any sibling.
@@ -1134,6 +1140,7 @@ async function generateFrontendComponent(
     ?.map((dep: string) => ({ dep, code: generatedDependencies?.get(dep)?.slice(0, 500) }))
     .filter((d: any) => d.code) || [];
 
+  const contentData = componentSpec?.contentData && typeof componentSpec.contentData === 'object' ? componentSpec.contentData : null;
   const systemPrompt = `Generate one focused React component file for: "${userMessage || manifest.appName}".
 Component: ${componentName}
 Purpose: ${component.purpose || componentName}
@@ -1142,6 +1149,9 @@ ${componentSpec ? `Props interface:
 ${JSON.stringify(componentSpec.props, null, 2)}
 
 Render logic: ${componentSpec.renderLogic}
+` : ''}${contentData ? `CANONICAL CONTENT — use these exact values verbatim in the JSX, do not invent alternatives:
+${JSON.stringify(contentData, null, 2)}
+
 ` : ''}
 
 ${dependencyCode.length > 0 ? `Already-generated child components (import and use these):

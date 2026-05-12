@@ -257,11 +257,14 @@ export function validateStructuredSpec(raw: unknown): StructuredSpec {
   }
 
   // Auto-add any components the LLM omitted from the layout tree as direct children of App.
-  // Throwing here would make the spec fragile against LLM non-determinism across separate calls.
+  // Only promote a component to App's direct children if no other component already claims it
+  // as a child — otherwise sub-components that belong nested inside a parent would render twice.
   const allLayoutNodes = new Set<string>(layoutNames);
+  const claimedAsChild = new Set<string>(componentSchema.flatMap((c) => c.children));
   const unreachableComponents = componentSchema.filter((component) => !allLayoutNodes.has(component.name));
   if (unreachableComponents.length > 0) {
     for (const component of unreachableComponents) {
+      if (claimedAsChild.has(component.name)) continue;
       layoutTree.children.push({
         name: component.name,
         type: 'component',
