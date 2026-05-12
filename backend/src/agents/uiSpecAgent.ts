@@ -405,11 +405,12 @@ RULES:
 - Ensure data flows logically from parent to child
 - No circular dependencies`;
 
+    const dataFlowTokens = Math.min(6000, Math.max(3000, pageCount * 400));
     const dataFlowRaw = await callLLMWithRetry(
       llmProxy,
       [{ role: 'system', content: dataFlowPrompt }, { role: 'user', content: '' }],
       model,
-      3000,
+      dataFlowTokens,
       2,
       'dataFlow'
     );
@@ -458,11 +459,12 @@ RULES:
 - consumedBy must list actual component names that fetch from this endpoint
 - Keep field names and types realistic for the domain`;
 
+    const apiContractTokens = Math.min(5000, Math.max(2500, pageCount * 300));
     const apiContractRaw = await callLLMWithRetry(
       llmProxy,
       [{ role: 'system', content: apiContractPrompt }, { role: 'user', content: '' }],
       model,
-      2500,
+      apiContractTokens,
       2,
       'apiContract'
     );
@@ -510,11 +512,12 @@ RULES:
 - navigationStrategy: describe concretely how App.jsx renders the right page/section (conditional render, react-router Routes, etc)
 - appRoot: describe the actual JSX structure of App (e.g. "<NavBar/> + conditional page render based on activePage state")${feedbackBlock}`;
 
+    const layoutTokens = Math.min(4000, Math.max(2000, pageCount * 300));
     const layoutRaw = await callLLMWithRetry(
       llmProxy,
       [{ role: 'system', content: layoutPrompt }, { role: 'user', content: '' }],
       model,
-      2000,
+      layoutTokens,
       2,
       'layoutStructure'
     );

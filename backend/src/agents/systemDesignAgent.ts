@@ -118,10 +118,12 @@ RULES:
       modification: input.modification || null,
     });
 
+    const pageCount = Array.isArray(input.requirements?.pages) ? input.requirements.pages.length : 4;
+    const systemDesignTokens = Math.min(6000, Math.max(2000, pageCount * 400 + (backendRequired ? 1500 : 0)));
     const completion = await llmProxy.chatCompletion([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userInput }
-    ], model, 0.3, 0.9, 2000);
+    ], model, 0.3, 0.9, systemDesignTokens);
 
     debug('systemDesignAgent:completion', { completion });
     let content: string = completion.choices?.[0]?.message?.content || '{}';
