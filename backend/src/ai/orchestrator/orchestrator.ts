@@ -1101,7 +1101,11 @@ export async function runAIOrchestration(
       memory.pendingFeedback?.targetStage === 'system_design' ? memory.pendingFeedback.issues.slice() : [];
 
     // 5. System design
-    const systemDesignResult = await stageWrap(memory, 'system_design', projectSpec, async () => {
+    // Use only the stable, user-provided fields as the hash input for system_design.
+    // projectSpec also contains memory.systemDesign/uiSpec/blueprint which are undefined
+    // on the first run but populated on resume — causing a permanent hash mismatch.
+    const systemDesignHashInput = { userMessage: command.userMessage, requirements: memory.requirements, clarifications: memory.clarifications };
+    const systemDesignResult = await stageWrap(memory, 'system_design', systemDesignHashInput, async () => {
       const result = isFrontendOnlyRequirements(memory.requirements)
         ? {
             updatedState: {
@@ -1269,6 +1273,7 @@ export async function runAIOrchestration(
   const materializedRevision = await materializeProjectWorkspace({
     projectId: command.projectId,
     codeGen: memory.code,
+    backendRequired: Boolean(memory.requirements?.backend_required),
   });
   appendHistory(memory, 'code_generation', 'workspace_materialized', 'Generated workspace materialized', materializedRevision);
   await persistLastEvent(memory, persistence);

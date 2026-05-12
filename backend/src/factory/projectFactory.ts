@@ -22,6 +22,7 @@ type GeneratedFile = {
 type MaterializeInput = {
   projectId: string;
   codeGen: any;
+  backendRequired?: boolean;
 };
 
 const WORKSPACES_ROOT = path.resolve('/tmp/workspaces');
@@ -248,6 +249,13 @@ export async function materializeProjectWorkspace(input: MaterializeInput): Prom
   await materializeTemplate(workspaceRoot);
   console.log(`[materializeProjectWorkspace] workspaceRoot=${workspaceRoot}`);
 
+  // For frontend-only projects, remove the backend directory that the template copied in.
+  // This prevents the build worker from running npm install + build on an unused backend,
+  // saving 30-60s per build attempt.
+  if (input.backendRequired === false) {
+    await fs.rm(path.join(workspaceRoot, 'backend'), { recursive: true, force: true }).catch(() => {});
+  }
+
   for (const file of extractGeneratedFiles(input.codeGen)) {
     await writeGeneratedFile(workspaceRoot, file);
   }
@@ -257,10 +265,11 @@ export async function materializeProjectWorkspace(input: MaterializeInput): Prom
   // - backend/index.js to NOT exist (TypeScript-only backend)
   // - backend/db/init.sql (or backend/db/schema.sql) to exist
   // Some templates can ship legacy artifacts; normalize them here.
+  // Skip the entire block for frontend-only projects to avoid wasting install/build time.
   const backendDir = path.join(workspaceRoot, 'backend');
   const backendPkgPath = path.join(backendDir, 'package.json');
 
-  if (await exists(backendPkgPath)) {
+  if (input.backendRequired !== false && await exists(backendPkgPath)) {
     // 1) Remove legacy backend/index.js if present
     await fs.rm(path.join(backendDir, 'index.js'), { force: true }).catch(() => {});
 

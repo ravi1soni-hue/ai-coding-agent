@@ -49,7 +49,7 @@ const FRONTEND_REQUIRED = new Set(['package.json', 'index.html', 'vite.config.js
 const FRONTEND_ALLOWED_PREFIXES = ['src/components/', 'src/pages/'];
 const BACKEND_REQUIRED = new Set(['backend/package.json', 'backend/src/index.ts', 'backend/src/db/database.ts', 'backend/db/init.sql']);
 const BACKEND_ALLOWED_PREFIXES = ['backend/src/routes/', 'backend/src/middleware/'];
-const MAX_COMPONENTS = 12;
+const MAX_COMPONENTS = 24;
 const MAX_BACKEND_ROUTES = 8;
 const MAX_BUILD_ATTEMPTS = 2;
 const MAX_LLM_CALLS_PER_PROJECT = 20;
@@ -265,7 +265,6 @@ function fallbackFrontendManifest(requirements: any, uiSpec?: any): FrontendMani
 
   if (Array.isArray(uiSpec?.components) && uiSpec.components.length > 0) {
     const uiSpecComponents = (uiSpec.components as Array<{ name?: string; path?: string; purpose?: string }>)
-      .slice(0, MAX_COMPONENTS)
       .map((c) => {
         const rawName = String(c.name || '').trim() || 'Section';
         const name = deReserveComponentName(rawName);
@@ -1512,9 +1511,11 @@ export async function codeGenerationAgent(input: any) {
     }
 
     const scaffoldFiles = frontendScaffold(manifest);
-    // uiSpec components are authoritative but still bounded; LLM-only lists are capped tighter.
+    // Cap is the maximum of: hardcoded MAX_COMPONENTS, uiSpec component count (authoritative
+    // user intent), and blueprint component file count (single source of truth for what must exist).
     const hasUiSpecComponents = Array.isArray(uiSpec?.components) && uiSpec.components.length > 0;
-    const cap = hasUiSpecComponents ? Math.max(MAX_COMPONENTS, (uiSpec.components as unknown[]).length) : MAX_COMPONENTS;
+    const blueprintComponentCount = blueprint.files.filter((f) => f.kind === 'component' && f.path.startsWith('src/components/')).length;
+    const cap = Math.max(MAX_COMPONENTS, hasUiSpecComponents ? (uiSpec.components as unknown[]).length : 0, blueprintComponentCount);
     const componentSpecs = (manifest.components || []).slice(0, cap);
 
     const generatedDependencies = new Map<string, string>();
