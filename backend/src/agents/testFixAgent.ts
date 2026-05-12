@@ -195,6 +195,41 @@ function fixReactIconsImports(content: string, missingFromLogs?: Set<string>): s
 }
 
 /**
+ * Detects the pattern where a component is declared as `const X = ...` (or `function X`)
+ * and then re-declared as `export default function X`, which causes esbuild to crash with
+ * "symbol already declared". Rewrites the redundant export default to `export { X as default }`.
+ * Mutates files in-place and writes corrected content to disk when workspaceDir is provided.
+ */
+async function fixDuplicateExportDefaultInFiles(files: GeneratedFile[], workspaceDir?: string): Promise<void> {
+  // Matches: export default function Name(...) { ... }
+  // where Name was already declared in the same file.
+  const exportDefaultFnRe = /^export\s+default\s+function\s+(\w+)\s*[(<]/m;
+  for (const file of files) {
+    const ext = path.extname(file.path).toLowerCase();
+    if (!['.js', '.jsx', '.ts', '.tsx'].includes(ext)) continue;
+    const m = exportDefaultFnRe.exec(file.content);
+    if (!m) continue;
+    const name = m[1];
+    // Check if the same name is declared earlier (const X, function X, class X, let X, var X)
+    const priorDeclRe = new RegExp(`(?:const|let|var|function|class)\\s+${name}\\b`);
+    if (!priorDeclRe.test(file.content)) continue;
+
+    // Rename `export default function Name` → `function _NameDefaultExport` and add re-export.
+    const simpleFix = file.content.replace(
+      exportDefaultFnRe,
+      (match) => match.replace(`export default function ${name}`, `function _${name}DefaultExport`)
+    ).replace(/\n?$/, `\nexport default _${name}DefaultExport;\n`);
+
+    file.content = simpleFix;
+    debug('testFixAgent:duplicate-export-default-fix', { path: file.path, name });
+    if (workspaceDir) {
+      const abs = path.join(workspaceDir, 'frontend', file.path);
+      try { await fs.writeFile(abs, simpleFix, 'utf8'); } catch { /* best-effort */ }
+    }
+  }
+}
+
+/**
  * Rewrites react-icons named imports in generated files to fix known bad export names.
  * Mutates files in-place and writes corrected content to disk when workspaceDir is provided.
  */
@@ -446,46 +481,41 @@ export async function testFixAgent(input: {
     }
   }
 
-  // ── Pre-build: rewrite known-bad react-icons named imports ──────────────
-  if (input.files) {
-    try {
-      await fixReactIconsInFiles(input.files, input.workspaceDir);
-    } catch (err) {
-      logWarn('testFixAgent:react-icons-fix', err);
-    }
-  }
-
-  // ── Pre-build: add missing dependencies to frontend package.json ──────────
-  if (input.files && input.workspaceDir) {
-    try {
-      const updatedPkg = validateAndFixPackageJson(input.files, 'package.json');
-      if (updatedPkg) {
-        await fs.mkdir(path.join(input.workspaceDir, 'frontend'), { recursive: true });
-        await fs.writeFile(path.join(input.workspaceDir, 'frontend', 'package.json'), updatedPkg, 'utf8');
-        const inMem = input.files.find(f => f.path === 'package.json');
-        if (inMem) inMem.content = updatedPkg;
-      }
-    } catch (err) {
-      logWarn('testFixAgent:frontend-pkg-fix', err);
-    }
-  }
-
-  // ── Pre-build: add missing dependencies to backend package.json ──────────
-  if (input.files && input.workspaceDir) {
-    const hasBackend = input.files.some(f => f.path === 'backend/package.json');
-    if (hasBackend) {
+  // Helper: runs all deterministic pre-build fixes on the current in-memory files and
+  // writes the results to disk. Called before the first attempt AND after each self-heal
+  // so that package.json always reflects the healed file set.
+  async function applyPreBuildFixes(buildLogs?: string): Promise<void> {
+    if (!input.files) return;
+    // Fix duplicate `export default function X` where X was already declared.
+    try { await fixDuplicateExportDefaultInFiles(input.files, input.workspaceDir); } catch (err) { logWarn('testFixAgent:duplicate-export-fix', err); }
+    // Rewrite known-bad react-icons named imports.
+    try { await fixReactIconsInFiles(input.files, input.workspaceDir, buildLogs); } catch (err) { logWarn('testFixAgent:react-icons-fix', err); }
+    // Add missing frontend dependencies.
+    if (input.workspaceDir) {
       try {
-        const updatedPkg = validateAndFixPackageJson(input.files, 'backend/package.json');
+        const updatedPkg = validateAndFixPackageJson(input.files, 'package.json');
         if (updatedPkg) {
-          await fs.writeFile(path.join(input.workspaceDir, 'backend', 'package.json'), updatedPkg, 'utf8');
-          const inMem = input.files.find(f => f.path === 'backend/package.json');
+          await fs.mkdir(path.join(input.workspaceDir, 'frontend'), { recursive: true });
+          await fs.writeFile(path.join(input.workspaceDir, 'frontend', 'package.json'), updatedPkg, 'utf8');
+          const inMem = input.files.find(f => f.path === 'package.json');
           if (inMem) inMem.content = updatedPkg;
         }
-      } catch (err) {
-        logWarn('testFixAgent:backend-pkg-fix', err);
+      } catch (err) { logWarn('testFixAgent:frontend-pkg-fix', err); }
+      // Add missing backend dependencies.
+      if (input.files.some(f => f.path === 'backend/package.json')) {
+        try {
+          const updatedPkg = validateAndFixPackageJson(input.files, 'backend/package.json');
+          if (updatedPkg) {
+            await fs.writeFile(path.join(input.workspaceDir, 'backend', 'package.json'), updatedPkg, 'utf8');
+            const inMem = input.files.find(f => f.path === 'backend/package.json');
+            if (inMem) inMem.content = updatedPkg;
+          }
+        } catch (err) { logWarn('testFixAgent:backend-pkg-fix', err); }
       }
     }
   }
+
+  await applyPreBuildFixes();
 
   // ── Build loop: up to 3 attempts with AI fix between each ─────────────────
   const MIN_ATTEMPT_BUDGET_MS = 60_000;
@@ -511,17 +541,6 @@ export async function testFixAgent(input: {
 
       lastResult = currentResult;
 
-      // ── Post-failure: re-run react-icons fix with build log context ──────────
-      // This catches icons the static map doesn't know about by parsing
-      // "X is not exported" lines directly from the Rollup/Vite error output.
-      if (input.files && lastResult.logs.includes('react-icons')) {
-        try {
-          await fixReactIconsInFiles(input.files, input.workspaceDir, lastResult.logs);
-        } catch (err) {
-          logWarn('testFixAgent:react-icons-refix', err);
-        }
-      }
-
       if (input.fixFn && retries < 2) {
         info(`Build failed — invoking AI self-heal (attempt ${retries + 1})...`);
         debug('testFixAgent:invoking-fixFn', { retry: retries + 1 });
@@ -538,6 +557,8 @@ export async function testFixAgent(input: {
         } catch (fixErr) {
           logError('testFixAgent:fixFn-error', fixErr);
         }
+        // Re-apply deterministic fixes on the healed files so package.json stays in sync.
+        await applyPreBuildFixes(lastResult.logs);
       }
       retries++;
     } while (retries < 3);
