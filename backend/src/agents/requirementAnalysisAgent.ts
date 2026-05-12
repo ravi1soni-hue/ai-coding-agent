@@ -2,6 +2,7 @@ import { getModelConfigForTask } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { debug, error as logError } from '../utils/logger';
 import type { ProjectBlueprint } from './blueprintContract';
+import { parseJsonResponse } from './llmUtils';
 
 export type BrainState = {
   activeState: string;
@@ -29,65 +30,7 @@ export type RequirementAnalysisOutput = {
   notes?: string;
 };
 
-function escapeControlCharsInJsonStrings(raw: string): string {
-  let out = '';
-  let inString = false;
-  let escaped = false;
-  for (let i = 0; i < raw.length; i++) {
-    const ch = raw[i];
-    const code = raw.charCodeAt(i);
-    if (escaped) {
-      out += ch;
-      escaped = false;
-      continue;
-    }
-    if (ch === '\\' && inString) {
-      out += ch;
-      escaped = true;
-      continue;
-    }
-    if (ch === '"') {
-      inString = !inString;
-      out += ch;
-      continue;
-    }
-    if (inString && code < 0x20) {
-      if (ch === '\n') out += '\\n';
-      else if (ch === '\r') out += '\\r';
-      else if (ch === '\t') out += '\\t';
-      else if (ch === '\b') out += '\\b';
-      else if (ch === '\f') out += '\\f';
-      else out += '\\u' + code.toString(16).padStart(4, '0');
-      continue;
-    }
-    out += ch;
-  }
-  return out;
-}
 
-function repairJsonString(raw: string): string {
-  let out = raw;
-
-  // Normalize common “smart quotes” into normal quotes
-  out = out.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'");
-
-  // Remove trailing commas before } or ]
-  out = out.replace(/,\s*}/g, '}').replace(/,\s*]/g, ']');
-
-  // Escape control chars inside JSON strings
-  out = escapeControlCharsInJsonStrings(out);
-
-  return out;
-}
-
-function parseLlmJson<T>(text: string): T {
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    // Try minimal deterministic repairs for common LLM JSON issues.
-    return JSON.parse(repairJsonString(text)) as T;
-  }
-}
 
 function coercePageName(page: unknown): string {
   if (page == null) return '';
@@ -148,7 +91,7 @@ ${JSON.stringify(input.result, null, 2)}`;
   );
 
   const content = String(completion.choices?.[0]?.message?.content || '{}').replace(/```[a-zA-Z]*\s*|```/g, '').trim();
-  const parsed = parseLlmJson<{ score?: number; reason?: string; forceFrontendOnly?: boolean }>((content.match(/{[\s\S]*}/) || ['{}'])[0]);
+  const parsed = parseJsonResponse((content.match(/{[\s\S]*}/) || ['{}'])[0]);
   return {
     score: typeof parsed.score === 'number' ? Math.max(0, Math.min(1, parsed.score)) : 0.5,
     reason: typeof parsed.reason === 'string' ? parsed.reason : 'semantic-gap-analysis',
@@ -225,7 +168,7 @@ Do NOT include Markdown fences.`;
       }
 
       // Parse with repair attempts
-      return parseLlmJson<RequirementAnalysisOutput>(jsonMatch[0]);
+      return parseJsonResponse(jsonMatch[0]);
     }
 
     let parsed: RequirementAnalysisOutput;

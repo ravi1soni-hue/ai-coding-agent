@@ -6,6 +6,7 @@ import { debug, error as logError, warn as logWarn } from '../utils/logger';
 import { assertBlueprintIntegrationSafety, blueprintMissingFiles, validateProjectBlueprint, type ProjectBlueprint } from './blueprintContract';
 import { validateStructuredSpec, type StructuredSpec } from './structuredSpec';
 import { reviewerAgent } from './reviewerAgent';
+import { parseJsonResponse, type TokenBudget, normalizeBudget } from './llmUtils';
 
 type GeneratedFile = { path: string; content: string };
 
@@ -87,25 +88,6 @@ function assertObject(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function stripMarkdownFences(content: string): string {
-  return content.replace(/```[a-zA-Z]*\s*/g, '').replace(/```/g, '').trim();
-}
-
-function parseJsonSafe(content: string): any {
-  const cleaned = stripMarkdownFences(content);
-  try {
-    return JSON.parse(cleaned);
-  } catch {}
-  const firstBrace = cleaned.indexOf('{');
-  const lastBrace = cleaned.lastIndexOf('}');
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    const slice = cleaned.slice(firstBrace, lastBrace + 1);
-    try {
-      return JSON.parse(slice);
-    } catch {}
-  }
-  throw new Error(`No valid JSON found in LLM response. Snippet: ${cleaned.replace(/\s+/g, ' ').slice(0, 220)}`);
-}
 
 // Delimited-file format: avoids JSON-string escape fragility for code.
 // Model is asked to emit:
@@ -866,17 +848,6 @@ function fallbackBackendManifest(): BackendManifest {
   };
 }
 
-type TokenBudget = { initial: number; ceiling: number };
-
-// Hard cap so a runaway estimator can never blow past provider limits.
-const ABSOLUTE_TOKEN_CEILING = 32000;
-
-function normalizeBudget(budget: number | TokenBudget): TokenBudget {
-  if (typeof budget === 'number') return { initial: budget, ceiling: budget };
-  const initial = Math.max(512, Math.min(ABSOLUTE_TOKEN_CEILING, Math.round(budget.initial)));
-  const ceiling = Math.max(initial, Math.min(ABSOLUTE_TOKEN_CEILING, Math.round(budget.ceiling)));
-  return { initial, ceiling };
-}
 
 // componentSpec shape comes from the UI spec agent — we read only the fields
 // that meaningfully drive output size and ignore the rest.
@@ -946,7 +917,7 @@ async function generateJson(
       const completion = await llmProxy.chatCompletion(messages, model, 0.0, 0.9, currentBudget);
       rawContent = completion.choices?.[0]?.message?.content || '';
       if (!rawContent.trim()) throw new Error(`${label}: LLM returned empty response`);
-      return parseJsonSafe(rawContent);
+      return parseJsonResponse(rawContent);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const looksTruncated = /No valid JSON found|Unexpected end of JSON|Unterminated string/i.test(message);

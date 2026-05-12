@@ -1,6 +1,7 @@
 import { getModelConfigForTask } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { debug, error as logError } from '../utils/logger';
+import { parseJsonResponse, scaledTokenBudget } from './llmUtils';
 
 export type BrainState = {
   activeState: string;
@@ -119,28 +120,22 @@ RULES:
     });
 
     const pageCount = Array.isArray(input.requirements?.pages) ? input.requirements.pages.length : 4;
-    const systemDesignTokens = Math.min(6000, Math.max(2000, pageCount * 400 + (backendRequired ? 1500 : 0)));
+    const backendBonus = backendRequired ? 2000 : 0;
+    const systemDesignTokens = scaledTokenBudget(pageCount, 600, 4000 + backendBonus, 14000).initial;
     const completion = await llmProxy.chatCompletion([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userInput }
     ], model, 0.3, 0.9, systemDesignTokens);
 
     debug('systemDesignAgent:completion', { completion });
-    let content: string = completion.choices?.[0]?.message?.content || '{}';
-    debug('LLM_RAW_CONTENT_SYSTEM_DESIGN', { content });
-
-    content = content.replace(/```[a-zA-Z]*\s*/g, '').replace(/```/g, '').trim();
-    const jsonMatch = content.match(/{[\s\S]*}/);
-    if (!jsonMatch) {
-      logError('systemDesignAgent:no-json', { content });
-      throw new Error('System design: no JSON object in LLM response');
-    }
+    const rawContent: string = completion.choices?.[0]?.message?.content || '{}';
+    debug('LLM_RAW_CONTENT_SYSTEM_DESIGN', { content: rawContent });
 
     let result: any;
     try {
-      result = JSON.parse(jsonMatch[0]);
+      result = parseJsonResponse(rawContent);
     } catch (e) {
-      logError('systemDesignAgent:parse-error', { e, content: jsonMatch[0] });
+      logError('systemDesignAgent:parse-error', { e, snippet: rawContent.slice(0, 200) });
       throw new Error('System design: malformed JSON from LLM');
     }
 

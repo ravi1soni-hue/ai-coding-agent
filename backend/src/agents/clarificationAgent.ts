@@ -2,6 +2,7 @@ import { getModelConfigForTask } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { debug, error as logError } from '../utils/logger';
 import type { ProjectBlueprint } from './blueprintContract';
+import { parseJsonResponse } from './llmUtils';
 
 export type ClarificationContext = {
   clarificationAnswers: Record<string, string>;
@@ -39,23 +40,6 @@ const MAX_QUESTIONS = 3;
 const MAX_ATTEMPTS = 3;
 const MAX_CLARIFICATION_ROUNDS = 5;
 
-function stripCodeFences(content: string): string {
-  return content.replace(/```[a-zA-Z]*\s*/g, '').replace(/```/g, '').trim();
-}
-
-function parseJsonObject(content: string): any {
-  const cleaned = stripCodeFences(content);
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    const start = cleaned.indexOf('{');
-    const end = cleaned.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      return JSON.parse(cleaned.slice(start, end + 1));
-    }
-    throw new Error('Malformed LLM output: no JSON object found');
-  }
-}
 
 function normalizeQuestionList(value: unknown): string[] {
   if (typeof value === 'string' && value.trim()) return [value.trim()];
@@ -232,7 +216,7 @@ export async function clarificationAgent(input: any): Promise<StateAwareAgentRes
       const raw = completion.choices?.[0]?.message?.content || '{}';
       debug('LLM_RAW_CONTENT_CLARIFICATION', { raw });
 
-      const parsed = parseJsonObject(raw);
+      const parsed = parseJsonResponse(raw);
       const confirmed = Boolean(parsed?.confirmed);
       const questions = filterAskedQuestions(normalizeQuestionList(parsed?.questions), askedQuestions, clarificationAnswers);
 

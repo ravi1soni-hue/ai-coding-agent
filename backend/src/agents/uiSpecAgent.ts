@@ -11,8 +11,9 @@
 
 import { getModelConfigForTask } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
-import { compileStructuredSpec, validateStructuredSpec, type StructuredSpec } from './structuredSpec';
+import { compileStructuredSpec, type StructuredSpec } from './structuredSpec';
 import { debug, error as logError } from '../utils/logger';
+import { parseJsonResponse, scaledTokenBudget } from './llmUtils';
 
 export interface ComponentInterface {
   name: string;
@@ -116,26 +117,6 @@ async function callLLMWithRetry(
   throw lastError;
 }
 
-function parseJsonFromResponse(content: string): any {
-  const cleaned = content.replace(/```[a-zA-Z]*\s*/g, '').replace(/```/g, '').trim();
-  let lastParseError: unknown;
-  try {
-    return JSON.parse(cleaned);
-  } catch (e) {
-    lastParseError = e;
-    // Try largest JSON object/array in the response (handles truncated markdown prose around JSON)
-    const jsonMatch = cleaned.match(/\[[\s\S]*\]|{[\s\S]*}/);
-    if (jsonMatch) {
-      try {
-        return JSON.parse(jsonMatch[0]);
-      } catch (e2) {
-        lastParseError = e2;
-      }
-    }
-  }
-  const parseMsg = lastParseError instanceof SyntaxError ? ` Parse error: ${lastParseError.message}.` : '';
-  throw new Error(`No valid JSON found.${parseMsg} Snippet: ${content.replace(/\s+/g, ' ').slice(0, 200)}`);
-}
 
 function calculateComponentDependencies(
   components: ComponentInterface[],
@@ -292,7 +273,7 @@ DECOMPOSITION RULES — these are absolute, non-negotiable:
 12. contentData MUST list every concrete value a user sees in this component: item names, labels, numeric values, CTA text. These are the canonical source of truth — downstream code generation copies them verbatim and must not invent different values.${feedbackBlock}`;
 
     const pageCount = Array.isArray(requirements.pages) ? requirements.pages.length : 4;
-    const componentTokens = Math.min(8000, Math.max(4000, pageCount * 500));
+    const componentTokens = scaledTokenBudget(pageCount, 1200, 8000, 20000).initial;
     const componentInterfaceRaw = await callLLMWithRetry(
       llmProxy,
       [{ role: 'system', content: componentInterfacePrompt }, { role: 'user', content: '' }],
@@ -302,7 +283,7 @@ DECOMPOSITION RULES — these are absolute, non-negotiable:
       'componentInterfaces'
     );
 
-    const componentInterfaces = parseJsonFromResponse(componentInterfaceRaw);
+    const componentInterfaces = parseJsonResponse(componentInterfaceRaw);
     if (!Array.isArray(componentInterfaces)) {
       throw new Error('Component interfaces must be an array');
     }
@@ -405,7 +386,7 @@ RULES:
 - Ensure data flows logically from parent to child
 - No circular dependencies`;
 
-    const dataFlowTokens = Math.min(6000, Math.max(3000, pageCount * 400));
+    const dataFlowTokens = scaledTokenBudget(pageCount, 600, 4000, 12000).initial;
     const dataFlowRaw = await callLLMWithRetry(
       llmProxy,
       [{ role: 'system', content: dataFlowPrompt }, { role: 'user', content: '' }],
@@ -415,7 +396,7 @@ RULES:
       'dataFlow'
     );
 
-    const dataFlowObj = parseJsonFromResponse(dataFlowRaw);
+    const dataFlowObj = parseJsonResponse(dataFlowRaw);
     const dataFlow: DataFlowNode[] = (dataFlowObj.nodes || []).map((n: any) => ({
       componentName: n.componentName || '',
       fetches: Array.isArray(n.fetches) ? n.fetches : [],
@@ -459,7 +440,7 @@ RULES:
 - consumedBy must list actual component names that fetch from this endpoint
 - Keep field names and types realistic for the domain`;
 
-    const apiContractTokens = Math.min(5000, Math.max(2500, pageCount * 300));
+    const apiContractTokens = scaledTokenBudget(pageCount, 400, 3000, 8000).initial;
     const apiContractRaw = await callLLMWithRetry(
       llmProxy,
       [{ role: 'system', content: apiContractPrompt }, { role: 'user', content: '' }],
@@ -469,7 +450,7 @@ RULES:
       'apiContract'
     );
 
-    const apiContractArr = parseJsonFromResponse(apiContractRaw);
+    const apiContractArr = parseJsonResponse(apiContractRaw);
     const apiContract: APIContract[] = (Array.isArray(apiContractArr) ? apiContractArr : []).map((a: any) => ({
       endpoint: a.endpoint || '/api/resource',
       method: (a.method || 'GET').toUpperCase() as any,
@@ -512,7 +493,7 @@ RULES:
 - navigationStrategy: describe concretely how App.jsx renders the right page/section (conditional render, react-router Routes, etc)
 - appRoot: describe the actual JSX structure of App (e.g. "<NavBar/> + conditional page render based on activePage state")${feedbackBlock}`;
 
-    const layoutTokens = Math.min(4000, Math.max(2000, pageCount * 300));
+    const layoutTokens = scaledTokenBudget(pageCount, 400, 2500, 6000).initial;
     const layoutRaw = await callLLMWithRetry(
       llmProxy,
       [{ role: 'system', content: layoutPrompt }, { role: 'user', content: '' }],
@@ -522,7 +503,7 @@ RULES:
       'layoutStructure'
     );
 
-    const layoutObj = parseJsonFromResponse(layoutRaw);
+    const layoutObj = parseJsonResponse(layoutRaw);
 
     // Compile final UI spec
     const componentNames = new Set(components.map((component) => component.name));
