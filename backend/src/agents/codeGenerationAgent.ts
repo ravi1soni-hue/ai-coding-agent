@@ -112,6 +112,52 @@ function sanitizeIdentifier(value: string, fallback: string): string {
   return cleaned && /^[a-zA-Z_$]/.test(cleaned) ? cleaned : fallback;
 }
 
+// Normalize a StructuredSpec (from uiSpecAgent) into the UISpec-like shape that
+// codeGenerationAgent expects. StructuredSpec uses `componentSchema` instead of
+// `components`, and `layoutTree.children` instead of `layoutStructure.compositionOrder`.
+// Without this, uiSpec?.components is always undefined and all context-rich prompting
+// (contentData, renderLogic, props) is silently dropped, producing generic names.
+function normalizeUiSpec(raw: any): any {
+  if (!raw) return raw;
+  // Already in UISpec shape
+  if (Array.isArray(raw.components)) return raw;
+  // StructuredSpec shape
+  if (Array.isArray(raw.componentSchema)) {
+    const components = raw.componentSchema.map((c: any) => {
+      const propsObj: Record<string, { type: string; required: boolean; description: string }> = {};
+      if (Array.isArray(c.props)) {
+        for (const p of c.props) {
+          propsObj[p.name] = { type: p.type || 'string', required: Boolean(p.required), description: p.description || '' };
+        }
+      }
+      return {
+        name: c.name,
+        path: c.filePath,
+        purpose: c.purpose,
+        props: propsObj,
+        state: Array.isArray(c.stateKeys) ? c.stateKeys : [],
+        dependencies: Array.isArray(c.children) ? c.children : [],
+        renderLogic: c.purpose || '',
+        contentData: c.contentData || undefined,
+      };
+    });
+    const compositionOrder: string[] = Array.isArray(raw.layoutTree?.children)
+      ? raw.layoutTree.children.map((n: any) => n.component).filter(Boolean)
+      : components.map((c: any) => c.name);
+    return {
+      ...raw,
+      components,
+      layoutStructure: {
+        appRoot: 'App',
+        compositionOrder,
+        stateManagement: 'props drilling',
+      },
+      appName: raw.appName || '',
+    };
+  }
+  return raw;
+}
+
 function toComponentName(rawName: unknown, fallback: string): string {
   const str = typeof rawName === 'string' ? rawName : fallback;
   const id = sanitizeIdentifier(str, fallback);
@@ -240,6 +286,20 @@ function validateGeneratedFile(file: unknown, expectedPath: string | undefined, 
       }
     }
   }
+  // Reject components that have routing-orchestrator names — routing lives in App.jsx only.
+  if (scope === 'frontend' && filePath.startsWith('src/components/')) {
+    const baseName = path.basename(filePath, '.jsx');
+    if (/Router$|Routes$|RouterView$/i.test(baseName)) {
+      throw new Error(`${label}: component name "${baseName}" implies routing ownership — routing must live in App.jsx only. Rename to a page or layout component.`);
+    }
+    // Detect runtime prop-guard patterns that would crash if a prop is not supplied:
+    //   if (!props.RouteView) throw ...   or   if (!RouteView) throw ...
+    const routingPropGuard = /if\s*\(!(?:props\.)?(?:RouteView|routeView|RouteComponent|routeComponent)\)/.test(content);
+    if (routingPropGuard) {
+      throw new Error(`${label}: component "${baseName}" enforces a routing-related required prop. Routing props are forbidden in components — routing lives in App.jsx.`);
+    }
+  }
+
   if (filePath === 'src/App.jsx') {
     const hasExport = /export\s+default\s+(function|const|class|\w+)/.test(content);
     const hasAppName = /\bfunction\s+App\b|\bconst\s+App\b|\bclass\s+App\b|\bexport\s+default\s+App\b/.test(content);
@@ -1354,6 +1414,19 @@ async function generateFrontendApp(
   const rootFiles = filterRootComponents(componentFiles, compositionOrder);
   const rootNames = rootFiles.map((f) => sanitizeIdentifier(path.basename(f.path, '.jsx'), 'GeneratedSection'));
 
+  // Build a required-props summary for each root component from uiSpec, so App.jsx knows what to pass.
+  const rootPropsHints: string[] = [];
+  if (uiSpec?.components) {
+    for (const name of rootNames) {
+      const spec = uiSpec.components.find((c: any) => String(c.name || '').trim() === name);
+      if (!spec?.props) continue;
+      const required = Object.entries(spec.props as Record<string, { required?: boolean; type?: string }>)
+        .filter(([, v]) => v?.required)
+        .map(([k, v]) => `${k}: ${v.type || 'any'}`);
+      if (required.length > 0) rootPropsHints.push(`${name} requires props: { ${required.join(', ')} }`);
+    }
+  }
+
   const systemPrompt = `Generate src/App.jsx — the composition root for a React + Vite app: "${userMessage || manifest.appName}".
 
 App.jsx is the ONLY file that owns routing and navigation. All child components are already generated.
@@ -1367,6 +1440,7 @@ ${allImports.map((i) => i.importLine).join('\n')}
 
 ROOT components to render in JSX (render ONLY these — do NOT render child components directly, they are already composed inside their parents):
 ${rootNames.join(', ')}
+${rootPropsHints.length > 0 ? `\nRequired props for root components — you MUST pass these when rendering:\n${rootPropsHints.join('\n')}` : ''}
 
 ${backendRequired ? `Backend required — initialize at the top of the file:
 const API_BASE = window.__ENV__?.API_URL || import.meta.env.VITE_API_URL || 'http://localhost:3000';
@@ -1675,7 +1749,7 @@ export async function codeGenerationAgent(input: any) {
 
   const hasBackend = Boolean(input.projectSpec?.requirements?.backend_required ?? input.systemDesign?.backend);
   const projectId: string = input.projectId || 'unknown';
-  const uiSpec = input.uiSpec;
+  const uiSpec = normalizeUiSpec(input.uiSpec);
 
   debug('codeGenerationAgent:parallel-start', { projectId, hasBackend, hasUISpec: !!uiSpec });
 

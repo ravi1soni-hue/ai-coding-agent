@@ -269,8 +269,9 @@ DECOMPOSITION RULES — these are absolute, non-negotiable:
 8. Toggle buttons, tab switchers, and small interactive controls that only exist within one section are inline JSX within that section — NOT separate component files.
 9. Navigation state (active page, current route) lives in App.jsx only. Child components receive the current page via props if needed.
 10. COMPONENT BUDGET: target (number of distinct pages) + 2 to 3 shared layout pieces (e.g. NavBar, Footer). Do NOT create separate components for every interactive element inside a single section.
-11. Name components after what they render: NavBar, HeroSection, ContactForm, Footer — never vague names like AppSection or MainComponent.
-12. contentData MUST list every concrete value a user sees in this component: item names, labels, numeric values, CTA text. These are the canonical source of truth — downstream code generation copies them verbatim and must not invent different values.${feedbackBlock}`;
+11. Name components after what they render: NavBar, HeroSection, ContactForm, Footer — never vague names like AppSection or MainComponent. NEVER name a component AppRouter, AppRoutes, RouterView, or any name ending in Router or Routes — routing lives exclusively in App.jsx, not in a component.
+12. contentData MUST list every concrete value a user sees in this component: item names, labels, numeric values, CTA text. These are the canonical source of truth — downstream code generation copies them verbatim and must not invent different values.
+13. NEVER add a prop named RouteView, routes, routeComponent, or any routing-related prop to a component's props interface. Components are not routers. If a component needs to know the current page, pass a simple string prop like currentPage.${feedbackBlock}`;
 
     const pageCount = Array.isArray(requirements.pages) ? requirements.pages.length : 4;
     const componentTokens = scaledTokenBudget(pageCount, 1200, 8000, 20000).initial;
