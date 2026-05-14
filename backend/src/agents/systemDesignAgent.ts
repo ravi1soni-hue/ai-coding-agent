@@ -30,13 +30,16 @@ function transitionTo(currentState: string, nextState: string): string {
 
 function semanticSystemDesignScore(input: { projectSpec: unknown; result: unknown }): number {
   const text = JSON.stringify(input).toLowerCase();
+  // Score based on design completeness signals, not specific platform names.
+  // High score = frontend defined, backend/db addressed, no stub indicators.
+  const result = (input.result as any) || {};
+  const hasFrontend = Boolean(result.frontend?.framework && result.frontend?.pages?.length > 0);
+  const hasBackendWhenNeeded = !result.backend || Boolean(result.backend?.routes?.length > 0);
   const score =
-    0.52 +
-    (/\breact-vite\b/.test(text) ? 0.08 : 0) +
-    (/\bvercel\b/.test(text) ? 0.05 : 0) +
-    (/\brailway\b/.test(text) ? 0.05 : 0) +
-    (/\bpostgres\b|\bdatabase\b/.test(text) ? 0.08 : 0) +
-    (/\bapi\b|\broute\b/.test(text) ? 0.08 : 0) +
+    0.55 +
+    (hasFrontend ? 0.15 : 0) +
+    (hasBackendWhenNeeded ? 0.10 : 0) +
+    (/\bapi\b|\broute\b|\bendpoint\b/.test(text) ? 0.08 : 0) +
     (/\bplaceholder\b|\btodo\b|\btbd\b/.test(text) ? -0.24 : 0);
   return Math.max(0, Math.min(1, score));
 }

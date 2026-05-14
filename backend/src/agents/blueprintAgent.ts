@@ -248,13 +248,19 @@ function attemptBlueprintSelfHeal(
 }
 
 function semanticBlueprintScore(input: { structuredSpec: StructuredSpec; requirements: any; systemDesign?: any; uiSpec?: any }): number {
+  const { structuredSpec, requirements } = input;
+  // Score based on structural completeness of the spec, not specific file/platform names.
+  const hasComponents = Array.isArray(structuredSpec?.componentSchema) && structuredSpec.componentSchema.length > 0;
+  const hasFilePlan = Array.isArray(structuredSpec?.filePlan) && structuredSpec.filePlan.length > 0;
+  const hasPages = Array.isArray(requirements?.pages) && requirements.pages.length > 0;
+  const hasApiContracts = Array.isArray(structuredSpec?.apiContracts) && structuredSpec.apiContracts.length > 0;
   const text = JSON.stringify(input).toLowerCase();
   const score =
-    0.45 +
-    (/\bproject_id\b/.test(text) ? 0.08 : 0) +
-    (/\bapp\.jsx\b|\bindex\.css\b|\bmain\.jsx\b/.test(text) ? 0.08 : 0) +
-    (/\bapi\b|\broute\b|\bendpoint\b/.test(text) ? 0.08 : 0) +
-    (/\bcomponent\b|\bjsx\b/.test(text) ? 0.08 : 0) +
+    0.50 +
+    (hasComponents ? 0.12 : 0) +
+    (hasFilePlan ? 0.10 : 0) +
+    (hasPages ? 0.08 : 0) +
+    (hasApiContracts ? 0.06 : 0) +
     (/\bplaceholder\b|\btodo\b|\btbd\b/.test(text) ? -0.25 : 0);
   return Math.max(0, Math.min(1, score));
 }

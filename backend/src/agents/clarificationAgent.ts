@@ -40,7 +40,9 @@ export type ClarificationOutput = {
 const MAX_QUESTIONS = 3;
 const MAX_ATTEMPTS = 3;
 const MAX_CLARIFICATION_ROUNDS_FULLSTACK = 5;
-const MAX_CLARIFICATION_ROUNDS_FRONTEND = 2;
+// Frontend projects can be just as complex as fullstack ones (e.g. rich portfolios,
+// dashboards, e-commerce UIs). Allow the same ceiling and let semantic gap decide.
+const MAX_CLARIFICATION_ROUNDS_FRONTEND = 4;
 
 
 function normalizeQuestionList(value: unknown): string[] {
@@ -67,14 +69,17 @@ function normalizeText(value: unknown): string {
 
 function calculateSemanticGap(requirements: any, projectSpec: any): number {
   const text = JSON.stringify({ requirements, projectSpec }).toLowerCase();
+  // Positive signals: structural clarity — pages defined, sections named, purpose clear.
+  // Deliberately avoids specific platform/tech names so any project type scores fairly.
   const positive =
-    (/\bpricing page|landing page|dashboard|admin panel|checkout|portfolio|blog|store|saas|ecommerce|marketing site|single page|multi page\b/.test(text) ? 0.2 : 0) +
-    (/\breact|vite|frontend|backend|api|database|auth|postgres|express\b/.test(text) ? 0.2 : 0) +
-    (/\btitle|pages|components|routes|layout|navigation\b/.test(text) ? 0.15 : 0);
+    (Array.isArray(requirements?.pages) && requirements.pages.length > 0 ? 0.2 : 0) +
+    (/\bpages?\b|\bsections?\b|\bcomponents?\b|\broutes?\b|\blayout\b|\bnavigation\b/.test(text) ? 0.15 : 0) +
+    (/\bpurpose\b|\bfeatures?\b|\bgoal\b|\buser\b|\bcontent\b|\bdesign\b/.test(text) ? 0.15 : 0);
+  // Negative signals: vagueness and explicit deferral markers.
   const negative =
-    (/\bmaybe|some|various|several|etc|and\/or|whatever|something\b/.test(text) ? 0.15 : 0) +
-    (/\btbd|todo|placeholder|unspecified|unknown\b/.test(text) ? 0.2 : 0) +
-    (/\bnot sure|open to suggestions|need help deciding\b/.test(text) ? 0.15 : 0);
+    (/\bmaybe\b|\bvarious\b|\betc\b|\bwhatever\b/.test(text) ? 0.15 : 0) +
+    (/\btbd\b|\btodo\b|\bunspecified\b|\bunknown\b/.test(text) ? 0.2 : 0) +
+    (/\bnot sure\b|\bopen to suggestions\b|\bneed help deciding\b/.test(text) ? 0.15 : 0);
   return Math.max(0, Math.min(1, 0.45 + positive - negative));
 }
 

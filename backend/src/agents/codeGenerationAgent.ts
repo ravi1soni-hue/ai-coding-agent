@@ -63,6 +63,14 @@ const FRONTEND_ALLOWED_PREFIXES = [
   'src/assets/',
   'src/styles/',
   'src/features/',
+  'src/config/',
+  'src/data/',
+  'src/theme/',
+  'src/animations/',
+  'src/providers/',
+  'src/api/',
+  'src/helpers/',
+  'src/sections/',
 ];
 const BACKEND_REQUIRED = new Set(['backend/package.json', 'backend/tsconfig.json', 'backend/src/index.ts', 'backend/src/db/database.ts', 'backend/db/init.sql']);
 const BACKEND_ALLOWED_PREFIXES = [
@@ -254,17 +262,31 @@ function isProbablyTruncatedGeneratedFile(filePath: string, content: string): bo
 }
 
 function containsPlaceholderText(value: string): boolean {
-  // "\breplace\b" was intentionally removed: it matches legitimate content (CSS replace(),
-  // natural-language sentences) and caused false rejections that silently produced stubs.
-  // "placeholder" must NOT match the standard HTML attribute (placeholder="...") — that pattern
-  // caused every component with an <input> or <textarea> to fail validation and become a stub.
-  // Only flag it when it reads like stub prose: as a comment keyword, JSX text, or in patterns
-  // like "placeholder text" / "placeholder content" / "placeholder data".
-  if (/\bTODO\b|\bgeneric text\b/i.test(value)) return true;
-  // Strip all HTML/JSX attribute assignments before scanning for the word "placeholder" so that
-  // legitimate `placeholder="..."` and `placeholder={...}` attribute pairs are ignored.
-  const withoutAttributes = value.replace(/\bplaceholder\s*=\s*(?:"[^"]*"|'[^']*'|`[^`]*`|\{[^}]*\})/gi, '');
-  return /\bplaceholder\b/i.test(withoutAttributes);
+  // Only flag content that is clearly an unfilled stub — not legitimate code that happens
+  // to contain related words. False positives here silently produce empty stub components.
+  //
+  // Rejected patterns (explicitly stub-like):
+  //   - TODO comment/annotation
+  //   - "placeholder text" / "placeholder content" / "placeholder data" as prose
+  //   - "generic text" as literal copy
+  //
+  // NOT rejected:
+  //   - placeholder="..." HTML/JSX attribute (stripped before check)
+  //   - placeholder={...} JSX expression attribute
+  //   - PascalCase component names containing "Placeholder" (e.g. PlaceholderAvatar)
+  //   - CSS/JS identifiers like `placeholderColor`, `--placeholder-color`
+  //   - Any word that merely contains "placeholder" as a substring in code context
+  if (/\bTODO\b/.test(value)) return true;
+  if (/\bgeneric text\b/i.test(value)) return true;
+  // Strip HTML/JSX attribute assignments and PascalCase/camelCase identifiers so only
+  // plain prose occurrences of "placeholder" remain.
+  const stripped = value
+    .replace(/\bplaceholder\s*=\s*(?:"[^"]*"|'[^']*'|`[^`]*`|\{[^}]*\})/gi, '') // placeholder="..." / placeholder={...}
+    .replace(/\b[A-Z][a-zA-Z]*[Pp]laceholder[a-zA-Z]*/g, '')                      // PascalCase: PlaceholderAvatar
+    .replace(/\b[a-z][a-zA-Z]*[Pp]laceholder[a-zA-Z]*/g, '')                      // camelCase: placeholderColor
+    .replace(/--[a-z-]*placeholder[a-z-]*/g, '');                                  // CSS custom props: --placeholder-color
+  // Only flag "placeholder" as a standalone prose word followed by a noun — unambiguously stub copy.
+  return /\bplaceholder\s+(?:text|content|data|image|value|name|title|description)\b/i.test(stripped);
 }
 
 function validateGeneratedFile(file: unknown, expectedPath: string | undefined, scope: 'frontend' | 'backend', label: string): GeneratedFile {
@@ -1406,6 +1428,7 @@ RULES — ALL are mandatory:
 - REACT-ICONS: Only use icon names that actually exist in react-icons v5. Safe Si icons: SiPython, SiTypescript, SiJavascript, SiReact, SiNodedotjs, SiDocker, SiKubernetes, SiAmazon, SiGooglecloud, SiMicrosoftazure, SiPostgresql, SiMongodb, SiRedis, SiGit, SiGithub, SiLinux, SiTensorflow, SiPytorch, SiOpenai, SiHuggingFace, SiMeta, SiVercel, SiNetlify, SiFastapi, SiFlask, SiDjango, SiGraphql, SiTailwindcss, SiVite. Safe Fa icons: FaHome, FaUser, FaSearch, FaCog, FaBell, FaTrash, FaEdit, FaSave, FaPlus, FaMinus, FaTimes, FaCheck, FaChevronDown, FaChevronUp, FaChevronLeft, FaChevronRight, FaArrowLeft, FaArrowRight, FaSignInAlt, FaSignOutAlt, FaLock, FaShieldAlt, FaUsers, FaUserPlus, FaCheckCircle, FaTimesCircle, FaExclamationCircle, FaInfoCircle, FaExclamationTriangle, FaEllipsisH, FaEllipsisV, FaTasks, FaChartBar, FaDatabase, FaServer, FaCode, FaTerminal, FaCloud, FaDownload, FaUpload, FaBalanceScale, FaGavel, FaRocket, FaBug, FaFlag, FaFlagCheckered, FaBolt, FaBookOpen. NEVER invent icon names — if unsure, use FaCircle or omit entirely. CRITICAL: FaScaleBalanced does NOT exist — use FaBalanceScale instead.
 - JSX ATTRIBUTES: NEVER put the same attribute on a JSX element twice. BAD: <div style={base} style={{...base, color:'red'}}>. GOOD: <div style={{...base, color:'red'}}>. Duplicate attributes are a hard esbuild compile error.
 - OBJECT LITERALS: NEVER repeat the same key in a JS object. BAD: { padding: 12, background: '#fff', padding: 8 }. Duplicate keys are a hard esbuild compile error.
+- CSS STRINGS — SINGLE LINE ONLY: NEVER split a CSS string value across multiple lines. String literals containing commas (rgba(), linear-gradient(), transition shorthand) MUST fit entirely on ONE line. BAD (syntax error): \`background: 'linear-gradient(rgba(255,\\n  255,0.03))'\`. GOOD: \`background: 'linear-gradient(rgba(255,255,0.03))'\`. A newline inside a JS string literal is a hard syntax error that will break the build.
 - ${BANNED_IMPORTS_RULE}`;
 
   const budget = estimateComponentBudget(componentSpec, dependencyCode.length, String(component.purpose || ''));

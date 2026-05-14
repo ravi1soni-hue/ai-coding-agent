@@ -51,16 +51,6 @@ function normalizePages(pages: unknown): string[] {
   return Array.from(new Set(pages.map(coercePageName).filter(Boolean).map((page) => page.replace(/\s+page\s*$/i, '').replace(/\s+/g, ' ').trim()).filter(Boolean)));
 }
 
-const FRONTEND_ONLY_KEYWORDS = ['pricing page', 'static site', 'landing page', 'portfolio', 'brochure', 'informational', 'simple website', 'no backend'];
-
-function quickSemanticCheck(userMessage: string): { score: number; reason: string; forceFrontendOnly: boolean } | null {
-  const lower = userMessage.toLowerCase();
-  if (FRONTEND_ONLY_KEYWORDS.some((kw) => lower.includes(kw))) {
-    return { score: 1.0, reason: 'Request contains frontend-only keywords', forceFrontendOnly: true };
-  }
-  return null;
-}
-
 function extractSemanticFields(parsed: any): { score: number; reason: string; forceFrontendOnly: boolean } {
   return {
     score: typeof parsed.semantic_score === 'number' ? Math.max(0, Math.min(1, parsed.semantic_score)) : 0.75,
@@ -168,7 +158,7 @@ Return ONLY JSON. No trailing commas. No extra keys. Do not include any text bef
       notes: parsed.notes,
     };
 
-    const semantic = quickSemanticCheck(input.user_message) ?? extractSemanticFields(parsed);
+    const semantic = extractSemanticFields(parsed);
     const forceFrontendOnly = semantic.forceFrontendOnly;
     const alignedResult: RequirementAnalysisOutput = {
       ...result,

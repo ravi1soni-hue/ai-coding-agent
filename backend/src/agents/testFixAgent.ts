@@ -394,6 +394,68 @@ async function fixDuplicateJsxAttributes(files: GeneratedFile[], workspaceDir?: 
 }
 
 /**
+ * Repairs CSS string literals that the LLM split across multiple lines.
+ * JavaScript string literals cannot span lines — a newline inside a string is a syntax error.
+ * Pattern: a line has an odd number of unescaped quote chars of one kind (string still open),
+ * so we join it with the next line (repeat until closed).
+ * Only touches JS/JSX/TS/TSX files. Mutates files in-place.
+ */
+async function fixBrokenCssStrings(files: GeneratedFile[], workspaceDir?: string): Promise<void> {
+  for (const file of files) {
+    const ext = path.extname(file.path).toLowerCase();
+    if (!['.js', '.jsx', '.ts', '.tsx'].includes(ext)) continue;
+
+    const lines = file.content.split('\n');
+    let changed = false;
+    const out: string[] = [];
+    let i = 0;
+
+    while (i < lines.length) {
+      let line = lines[i];
+      // Count unescaped single and double quotes to detect unclosed string.
+      // Template literals (backtick) are intentionally excluded — they ARE allowed to span lines.
+      let inDouble = false;
+      let inSingle = false;
+      for (let ci = 0; ci < line.length; ci++) {
+        const ch = line[ci];
+        if (ch === '\\') { ci++; continue; } // skip escaped char
+        if (ch === '"' && !inSingle) inDouble = !inDouble;
+        else if (ch === "'" && !inDouble) inSingle = !inSingle;
+      }
+
+      // If we ended the line still inside a string, join with the next line.
+      while ((inDouble || inSingle) && i + 1 < lines.length) {
+        i++;
+        const nextLine = lines[i].replace(/^\s+/, ' '); // collapse leading whitespace to single space
+        line = line + nextLine;
+        changed = true;
+        // Re-scan the joined line to see if string is now closed.
+        inDouble = false;
+        inSingle = false;
+        for (let ci = 0; ci < line.length; ci++) {
+          const ch = line[ci];
+          if (ch === '\\') { ci++; continue; }
+          if (ch === '"' && !inSingle) inDouble = !inDouble;
+          else if (ch === "'" && !inDouble) inSingle = !inSingle;
+        }
+      }
+
+      out.push(line);
+      i++;
+    }
+
+    if (changed) {
+      file.content = out.join('\n');
+      debug('testFixAgent:broken-css-strings-fix', { path: file.path });
+      if (workspaceDir) {
+        const abs = path.join(workspaceDir, 'frontend', file.path);
+        try { await fs.writeFile(abs, file.content, 'utf8'); } catch { /* best-effort */ }
+      }
+    }
+  }
+}
+
+/**
  * Fixes JS object literals that have duplicate keys.
  * esbuild treats these as errors: `Duplicate key "padding" in object literal`.
  * Strategy: for each duplicate key in a const styles = { ... } or similar block,
@@ -401,46 +463,78 @@ async function fixDuplicateJsxAttributes(files: GeneratedFile[], workspaceDir?: 
  * Mutates files in-place and writes corrected content to disk when workspaceDir is provided.
  */
 async function fixDuplicateObjectKeys(files: GeneratedFile[], workspaceDir?: string): Promise<void> {
-  // Match object literals assigned to const/let/var identifiers.
-  // This is a best-effort line-by-line scan: we look for `key: value,` patterns
-  // inside the file and remove duplicate entries within blocks.
-  const styleBlockRe = /\bconst\s+\w+\s*=\s*\{([\s\S]*?)\};/g;
+  // Match top-level object literals: const/let/var X = { ... } or export const X = { ... }
+  // Also handles inline style objects: style={{ key: val, key: val }}
+  // Uses a brace-depth counter to find the matching closing brace rather than a greedy regex,
+  // so nested objects don't confuse the scan.
+  function dedupeObjectBody(body: string): { body: string; changed: boolean } {
+    const keyRe = /^\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*:/gm;
+    const seen = new Set<string>();
+    const dupeKeys = new Set<string>();
+    let m: RegExpExecArray | null;
+    while ((m = keyRe.exec(body)) !== null) {
+      const key = m[1];
+      if (seen.has(key)) dupeKeys.add(key);
+      else seen.add(key);
+    }
+    if (dupeKeys.size === 0) return { body, changed: false };
+
+    let fixedBody = body;
+    for (const key of dupeKeys) {
+      const firstOccRe = new RegExp(`(^|\\n)([ \\t]*)${key}\\s*:[^,\\n}]+(?:,)?`, '');
+      fixedBody = fixedBody.replace(firstOccRe, '$1');
+    }
+    return { body: fixedBody, changed: fixedBody !== body };
+  }
+
+  // Finds object literal body (between { and matching }) starting at `start` in `src`.
+  function extractObjectBody(src: string, start: number): { body: string; end: number } | null {
+    if (src[start] !== '{') return null;
+    let depth = 0;
+    let i = start;
+    while (i < src.length) {
+      if (src[i] === '{') depth++;
+      else if (src[i] === '}') { depth--; if (depth === 0) return { body: src.slice(start + 1, i), end: i }; }
+      i++;
+    }
+    return null;
+  }
+
+  // Pattern: (export )?(const|let|var) <name> = {
+  const varDeclRe = /\b(?:export\s+)?(?:const|let|var)\s+\w[\w$]*\s*=\s*\{/g;
 
   for (const file of files) {
     const ext = path.extname(file.path).toLowerCase();
     if (!['.js', '.jsx', '.ts', '.tsx'].includes(ext)) continue;
 
+    let src = file.content;
     let changed = false;
-    const result = file.content.replace(styleBlockRe, (fullBlock, body) => {
-      // Collect key: value pairs. Match `key: ...value...,` lines.
-      const keyRe = /^\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*:/gm;
-      const seen = new Set<string>();
-      const dupeKeys = new Set<string>();
-      let m: RegExpExecArray | null;
-      while ((m = keyRe.exec(body)) !== null) {
-        const key = m[1];
-        if (seen.has(key)) dupeKeys.add(key);
-        else seen.add(key);
-      }
-      if (dupeKeys.size === 0) return fullBlock;
 
-      // For each duplicate key, remove its FIRST occurrence in the body.
-      let fixedBody = body;
-      for (const key of dupeKeys) {
-        // Match `key: <value-until-comma-or-closing-brace>` including nested braces.
-        const firstOccRe = new RegExp(`(^|\\n)([ \\t]*)${key}\\s*:[^,\\n}]+(?:,)?`, '');
-        fixedBody = fixedBody.replace(firstOccRe, '$1');
-        changed = true;
-      }
-      return fullBlock.replace(body, fixedBody);
-    });
+    let match: RegExpExecArray | null;
+    varDeclRe.lastIndex = 0;
+    // Collect matches in reverse order so we can splice without shifting indices.
+    const matches: Array<{ blockStart: number }> = [];
+    while ((match = varDeclRe.exec(src)) !== null) {
+      matches.push({ blockStart: match.index + match[0].length - 1 });
+    }
+
+    for (let mi = matches.length - 1; mi >= 0; mi--) {
+      const { blockStart } = matches[mi];
+      const extracted = extractObjectBody(src, blockStart);
+      if (!extracted) continue;
+      const { body, end } = extracted;
+      const result = dedupeObjectBody(body);
+      if (!result.changed) continue;
+      src = src.slice(0, blockStart + 1) + result.body + src.slice(end);
+      changed = true;
+    }
 
     if (changed) {
-      file.content = result;
+      file.content = src;
       debug('testFixAgent:duplicate-object-keys-fix', { path: file.path });
       if (workspaceDir) {
         const abs = path.join(workspaceDir, 'frontend', file.path);
-        try { await fs.writeFile(abs, result, 'utf8'); } catch { /* best-effort */ }
+        try { await fs.writeFile(abs, src, 'utf8'); } catch { /* best-effort */ }
       }
     }
   }
@@ -859,6 +953,8 @@ export async function testFixAgent(input: {
   // so that package.json always reflects the healed file set.
   async function applyPreBuildFixes(buildLogs?: string): Promise<void> {
     if (!input.files) return;
+    // Join CSS string literals that were split across lines by the LLM (syntax error).
+    try { await fixBrokenCssStrings(input.files, input.workspaceDir); } catch (err) { logWarn('testFixAgent:broken-css-strings-fix', err); }
     // Fix duplicate `export default function X` where X was already declared.
     try { await fixDuplicateExportDefaultInFiles(input.files, input.workspaceDir); } catch (err) { logWarn('testFixAgent:duplicate-export-fix', err); }
     // Fix duplicate JSX attributes (e.g. style={A} ... style={B} on same element).
