@@ -140,6 +140,9 @@ async function validateGeneratedProject(workspaceRoot: string): Promise<Validati
     if (!(await fileExists(path.join(backendDir, 'src', 'index.ts')))) {
       errors.push('Missing required backend file: backend/src/index.ts');
     }
+    if (!(await fileExists(path.join(backendDir, 'tsconfig.json')))) {
+      errors.push('Missing required backend file: backend/tsconfig.json (required for tsc build)');
+    }
     if (await fileExists(path.join(backendDir, 'index.js'))) {
       errors.push('Legacy backend/index.js detected; backend must be TypeScript-only');
     }

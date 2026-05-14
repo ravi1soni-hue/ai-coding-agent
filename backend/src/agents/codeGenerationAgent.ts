@@ -63,7 +63,7 @@ const FRONTEND_ALLOWED_PREFIXES = [
   'src/styles/',
   'src/features/',
 ];
-const BACKEND_REQUIRED = new Set(['backend/package.json', 'backend/src/index.ts', 'backend/src/db/database.ts', 'backend/db/init.sql']);
+const BACKEND_REQUIRED = new Set(['backend/package.json', 'backend/tsconfig.json', 'backend/src/index.ts', 'backend/src/db/database.ts', 'backend/db/init.sql']);
 const BACKEND_ALLOWED_PREFIXES = [
   'backend/src/routes/',
   'backend/src/middleware/',
@@ -755,7 +755,7 @@ function backendScaffold(): GeneratedFile[] {
     private: true,
     type: 'module',
     scripts: {
-      dev: 'ts-node src/index.ts',
+      dev: 'tsx src/index.ts',
       build: 'tsc',
       start: 'node dist/index.js',
     },
@@ -766,7 +766,7 @@ function backendScaffold(): GeneratedFile[] {
       dotenv: '^17.4.2',
     },
     devDependencies: {
-      'ts-node': '^10.9.2',
+      tsx: '^4.7.0',
       typescript: '^5.4.0',
       '@types/express': '^5.0.0',
       '@types/node': '^22.0.0',
@@ -774,10 +774,28 @@ function backendScaffold(): GeneratedFile[] {
     },
   };
 
+  const tsconfig = {
+    compilerOptions: {
+      target: 'ES2022',
+      module: 'Node16',
+      moduleResolution: 'Node16',
+      outDir: 'dist',
+      rootDir: 'src',
+      strict: true,
+      esModuleInterop: true,
+      skipLibCheck: true,
+    },
+    include: ['src/**/*'],
+  };
+
   return [
     {
       path: 'backend/package.json',
       content: JSON.stringify(packageJson, null, 2),
+    },
+    {
+      path: 'backend/tsconfig.json',
+      content: JSON.stringify(tsconfig, null, 2),
     },
     {
       path: 'backend/src/db/database.ts',
@@ -804,10 +822,10 @@ export function query<T = unknown>(sql: string, params: unknown[] = []): Promise
       content: `import dotenv from 'dotenv';
 import express from 'express';
 import cors from 'cors';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync, existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { query } from './db/database.ts';
+import { query } from './db/database.js';
 
 dotenv.config();
 
@@ -828,6 +846,24 @@ async function initDb() {
   }
 }
 
+async function registerRoutes() {
+  // Auto-register all route files from the routes directory.
+  // Route files export a default Express Router; the filename sets the /api/<name> path.
+  const routesDir = path.join(__dirname, 'routes');
+  if (!existsSync(routesDir)) return;
+  const files = readdirSync(routesDir).filter(f => f.endsWith('.js'));
+  for (const file of files) {
+    try {
+      const routePath = \`/api/\${path.basename(file, '.js')}\`;
+      const mod = await import(new URL(\`./routes/\${file}\`, import.meta.url).href);
+      app.use(routePath, mod.default);
+      console.log(\`[routes] registered \${routePath}\`);
+    } catch (err) {
+      console.warn(\`[routes] failed to load \${file}:\`, err instanceof Error ? err.message : String(err));
+    }
+  }
+}
+
 app.get('/api/health', async (_req, res) => {
   try {
     await query('SELECT 1');
@@ -841,7 +877,13 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
   res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
 });
 
-initDb().then(() => app.listen(port, () => console.log(\`Backend on port \${port}\`)));
+async function start() {
+  await initDb();
+  await registerRoutes();
+  app.listen(port, () => console.log(\`Backend on port \${port}\`));
+}
+
+start().catch((err) => { console.error('Startup error:', err); process.exit(1); });
 `,
     },
     {
@@ -949,7 +991,7 @@ ${updateFields.map((f) => `    const ${f} = req.body?.${f};`).join('\n')}
     path: routeFile,
     content: `import express from 'express';
 import { randomUUID } from 'crypto';
-import { query } from '../db/database.ts';
+import { query } from '../db/database.js';
 
 const router = express.Router();
 
@@ -984,7 +1026,7 @@ RULES:
 - For GET: ORDER BY created_at DESC LIMIT 100
 - For PUT/PATCH: WHERE id = $1 AND project_id = $N, return 404 if not found
 - For DELETE: WHERE id = $1 AND project_id = $2, return 404 if not found
-- Import { query } from '../db/database.ts'
+- Import { query } from '../db/database.js' (MUST use .js extension — NOT .ts — for Node16 module resolution)
 - Import { randomUUID } from 'crypto' (only if POST/PUT is implemented)
 - Export as: export default router
 - ${BANNED_IMPORTS_RULE}`;
@@ -1166,7 +1208,7 @@ Rules:
       const message = err instanceof Error ? err.message : String(err);
       // Budget exhausted for this project — retrying won't help, fail immediately.
       if (/Budget Exceeded/i.test(message)) throw err;
-      const looksTruncated = /Truncated file block|No <<<FILE/i.test(message);
+      const looksTruncated = /Truncated file block|No <<<FILE|too-short file content/i.test(message);
       const nextBudget = looksTruncated && currentBudget < ceiling
         ? Math.min(ceiling, Math.max(currentBudget + 4000, Math.ceil(currentBudget * 2.0)))
         : currentBudget;
@@ -1326,6 +1368,7 @@ async function generateFrontendComponent(
   const expectedPath = sanitizeComponentPath(component.path, 0);
   const componentName = toComponentName(component.name || path.basename(expectedPath, '.jsx'), path.basename(expectedPath, '.jsx'));
   const userMessage = String(requirements?.userMessage || '').slice(0, 400);
+  const backendRequired = Boolean(requirements?.backend_required || requirements?.auth_required);
   const componentSpec = uiSpec?.components?.find((c: any) => c.name === componentName);
   const dependencyCode = componentSpec?.dependencies
     ?.map((dep: string) => ({ dep, code: generatedDependencies?.get(dep)?.slice(0, 500) }))
@@ -1352,13 +1395,16 @@ ${dependencyCode.map((d: any) => `${d.dep}: ${d.code}`).join('\n---\n')}
 RULES — ALL are mandatory:
 - Export: export default function ${componentName}(props) { ... }
 - ONE responsibility: this component renders ONLY "${component.purpose || componentName}". Nothing else.
-- SIZE LIMIT: target 80-150 lines. Hard max 200 lines. If you need more, you are doing it wrong — reduce scope.
+- SIZE LIMIT: target 100-200 lines. Hard max 350 lines. Keep it focused — one responsibility.
 - ROUTING PROHIBITION: NEVER import or use BrowserRouter, Router, Routes, Route, Switch, useNavigate, useLocation, Link from react-router in this file. Routing lives ONLY in App.jsx. This component receives its data via props.
+- ${backendRequired ? 'API CALLS: If this component fetches data, declare at the top of the function body: const API_BASE = window.__ENV__?.API_URL || import.meta.env.VITE_API_URL || \'http://localhost:3000\'; const PROJECT_ID = window.__ENV__?.PROJECT_ID || import.meta.env.VITE_PROJECT_ID || \'\'; — Always include project_id: PROJECT_ID in all GET/DELETE query params and POST/PUT/PATCH request bodies. Never hardcode URLs.' : 'No backend calls in this component.'}
 - No TODO comments, no placeholder text, no stub implementations.
 - Real JSX with actual content matching the purpose — not lorem ipsum, not generic examples.
 - All imports at the top. Only import what you use.
 - useState/useEffect only if genuinely needed for THIS component's local behaviour.
-- REACT-ICONS: Only use icon names that actually exist in react-icons v5. Safe Si icons: SiPython, SiTypescript, SiJavascript, SiReact, SiNodedotjs, SiDocker, SiKubernetes, SiAmazon, SiGooglecloud, SiMicrosoftazure, SiPostgresql, SiMongodb, SiRedis, SiGit, SiGithub, SiLinux, SiTensorflow, SiPytorch, SiOpenai, SiHuggingFace, SiMeta, SiVercel, SiNetlify, SiFastapi, SiFlask, SiDjango, SiGraphql, SiTailwindcss, SiVite. NEVER invent icon names — if unsure, omit or use a Fa icon instead.
+- REACT-ICONS: Only use icon names that actually exist in react-icons v5. Safe Si icons: SiPython, SiTypescript, SiJavascript, SiReact, SiNodedotjs, SiDocker, SiKubernetes, SiAmazon, SiGooglecloud, SiMicrosoftazure, SiPostgresql, SiMongodb, SiRedis, SiGit, SiGithub, SiLinux, SiTensorflow, SiPytorch, SiOpenai, SiHuggingFace, SiMeta, SiVercel, SiNetlify, SiFastapi, SiFlask, SiDjango, SiGraphql, SiTailwindcss, SiVite. Safe Fa icons: FaHome, FaUser, FaSearch, FaCog, FaBell, FaTrash, FaEdit, FaSave, FaPlus, FaMinus, FaTimes, FaCheck, FaChevronDown, FaChevronUp, FaChevronLeft, FaChevronRight, FaArrowLeft, FaArrowRight, FaSignInAlt, FaSignOutAlt, FaLock, FaShieldAlt, FaUsers, FaUserPlus, FaCheckCircle, FaTimesCircle, FaExclamationCircle, FaInfoCircle, FaExclamationTriangle, FaEllipsisH, FaEllipsisV, FaTasks, FaChartBar, FaDatabase, FaServer, FaCode, FaTerminal, FaCloud, FaDownload, FaUpload, FaBalanceScale, FaGavel, FaRocket, FaBug, FaFlag, FaFlagCheckered, FaBolt, FaBookOpen. NEVER invent icon names — if unsure, use FaCircle or omit entirely. CRITICAL: FaScaleBalanced does NOT exist — use FaBalanceScale instead.
+- JSX ATTRIBUTES: NEVER put the same attribute on a JSX element twice. BAD: <div style={base} style={{...base, color:'red'}}>. GOOD: <div style={{...base, color:'red'}}>. Duplicate attributes are a hard esbuild compile error.
+- OBJECT LITERALS: NEVER repeat the same key in a JS object. BAD: { padding: 12, background: '#fff', padding: 8 }. Duplicate keys are a hard esbuild compile error.
 - ${BANNED_IMPORTS_RULE}`;
 
   const budget = estimateComponentBudget(componentSpec, dependencyCode.length, String(component.purpose || ''));

@@ -1,0 +1,36 @@
+{
+  "ok": false,
+  "phase": "finished",
+  "finishedAt": "2026-05-12T11:45:15.279Z",
+  "status": "ws_closed",
+  "userMessage": "Create a landing page with a Pricing page (include pricing tiers, responsive layout, and a clear call-to-action).",
+  "timeoutMs": 1500000,
+  "stagesSeen": [],
+  "missingStages": [
+    "requirements",
+    "clarification",
+    "confirmation",
+    "system_design",
+    "ui_spec",
+    "blueprint",
+    "code_generation",
+    "testing",
+    "deployment"
+  ],
+  "clarificationRequests": 0,
+  "confirmationRequests": 0,
+  "fileGeneratedCount": 0,
+  "snapshot": {
+    "status": "active"
+  },
+  "snapshotRaw": {
+    "projectId": "58159edc-a4e0-4e3b-9ba4-dedc66dd0ab5",
+    "status": "active",
+    "currentStep": null,
+    "progress": 0,
+    "activeAgent": null,
+    "files": [],
+    "lastEventId": null
+  },
+  "currentEventBufferSize": 1
+}

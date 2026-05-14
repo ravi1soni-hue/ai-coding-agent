@@ -175,13 +175,15 @@ async function persistMemory(memory: ProjectMemory, persistence?: PersistenceAda
   try {
     await persistence.saveSnapshot(memory);
   } catch (err) {
-    // best-effort persistence; never fail the pipeline on snapshot errors,
-    // but log so silent persistence regressions don't go unnoticed.
+    // persistenceAdapter.writeSnapshot() is responsible for best-effort heavy artifact fields.
+    // Any error that escapes here indicates cursor-phase durability failure (status/current_step/progress).
+    // That MUST NOT be swallowed: otherwise resume scanners can see NULL cursor fields and treat pipelines as stuck.
     logError('orchestrator:persist_snapshot_failed', {
       projectId: memory.projectId,
       stage: memory.currentState,
-      error: err,
+      error: err instanceof Error ? err.message : String(err),
     });
+    throw err;
   }
 }
 
@@ -443,6 +445,33 @@ async function runFinalAudit(projectSpec: any, memory: ProjectMemory): Promise<v
   }
 }
 
+// Extract the most actionable error lines from build logs.
+// Build errors appear early (TypeScript/Vite diagnostics) and at the end (summary).
+// We keep both ends plus any "error TS" / "error:" lines in between.
+function extractBuildErrors(logs: string): string {
+  const raw = String(logs);
+  const lines = raw.split('\n');
+
+  // Collect lines that look like actual errors (TypeScript, Vite, esbuild, Node)
+  const errorLines = lines.filter((l) =>
+    /error TS\d+|error:|\bERROR\b|✘|✗|failed|Cannot find|is not exported|Duplicate|Expected|Unexpected|SyntaxError/i.test(l)
+  );
+
+  // Skip npm install noise (lines before "npm run build" or "> vite build") for the head section.
+  // npm install output is not actionable for code-gen self-heal — only the actual build errors are.
+  const buildStartIdx = lines.findIndex((l) => /vite build|tsc --build|esbuild|> build|npm run build/i.test(l));
+  const buildLines = buildStartIdx >= 0 ? lines.slice(buildStartIdx) : lines;
+  const buildHead = buildLines.slice(0, 60).join('\n');
+
+  // Always include the last 2000 chars (summary / exit status section)
+  const tail = raw.slice(-2000);
+  const middle = errorLines.slice(0, 80).join('\n');
+
+  const combined = [buildHead, middle, tail].join('\n---\n');
+  // Deduplicate adjacent identical lines and cap total length
+  return combined.replace(/(.+\n)\1+/g, '$1').slice(0, 8000);
+}
+
 async function selfHealWithCodeGeneration(
   memory: ProjectMemory,
   command: OrchestrationCommand,
@@ -470,7 +499,7 @@ async function selfHealWithCodeGeneration(
     structuredSpec: memory.uiSpec?.structuredSpec,
     blueprint: memory.blueprint?.blueprint,
     requirements: memory.requirements,
-    modification: `Fix the build errors below and regenerate complete files:${stubContext}\n\nBuild errors:\n${String(logs).slice(-4000)}`,
+    modification: `Fix the build errors below and regenerate complete files:${stubContext}\n\nBuild errors:\n${extractBuildErrors(logs)}`,
     projectSpec,
     projectId,
     user_id: command.sessionId,
@@ -728,8 +757,9 @@ async function refineRequirementsFromClarifications(
     appendHistory(memory, 'clarification', 'requirements_refined', 'Requirements refined from clarification answers', memory.requirements);
     await persistMemory(memory, options.persistence);
     options.adapter?.emit?.({ type: 'progress', stage: 'clarification', percent: options.percent || 16, message: 'requirements refined from clarifications' });
-  } catch {
+  } catch (err) {
     // Refinement is best-effort; downstream defensive fallback covers empty pages.
+    logError('orchestrator:refine-requirements-failed', { error: err instanceof Error ? err.message : String(err), projectId: memory.projectId });
   }
 }
 
@@ -852,16 +882,18 @@ function repairSystemDesign(memory: ProjectMemory, issues: ConsistencyIssue[]): 
   return repairs;
 }
 
-function repairUiSpec(memory: ProjectMemory, issues: ConsistencyIssue[]): string[] {
+function repairUiSpec(_memory: ProjectMemory, issues: ConsistencyIssue[]): string[] {
   const repairs: string[] = [];
-  // Symmetry hook: ui_spec stage's only current check is presence after systemDesign,
-  // which the agent itself handles. If future invariants land here, repair patterns
-  // for them go in this function. Keeping the shape identical to other repairers
-  // means new patterns can be plugged in without re-plumbing the call sites.
   for (const issue of issues) {
-    if (/UI spec is missing/i.test(issue.message) && memory.systemDesign && !memory.uiSpec) {
-      // Cannot synthesize a uiSpec deterministically here; fall through to throw.
-      continue;
+    // UI spec missing: cannot synthesize deterministically — surface as a hard failure
+    // rather than the misleading "no repair pattern matched" generic message.
+    if (/UI spec is missing/i.test(issue.message)) {
+      throw new Error(`ui_spec consistency failure: ${issue.message}. The UI spec agent must be re-run.`);
+    }
+    // System design page-coverage mismatches reported at this stage are already handled
+    // by repairSystemDesign on the previous stage boundary; they cannot be fixed here.
+    if (/missing page from requirements/i.test(issue.message)) {
+      repairs.push(`deferred page-coverage issue to upstream system_design repair: ${issue.message}`);
     }
   }
   return repairs;
@@ -877,11 +909,34 @@ function repairCode(memory: ProjectMemory, issues: ConsistencyIssue[]): string[]
     return base.replace(/\.[^./]+$/, '').replace(/[^a-zA-Z0-9]/g, '') || 'Component';
   };
 
+  // Normalize a component file path so "Foo.jsx" and "FooPage.jsx" / "FooSection.jsx"
+  // are treated as equivalent when checking whether a page already has coverage.
+  const normalizeComponentPath = (p: string) =>
+    p.replace(/\\/g, '/').replace(/^\/+/, '')
+     .replace(/src\/components\//, '')
+     .replace(/\.(jsx|tsx)$/, '')
+     .replace(/(Page|Section|View|Screen|Panel|Container|Layout|Wrapper)$/i, '')
+     .toLowerCase();
+
   for (const issue of issues) {
     const missingFile = /missing generated file for expected path:\s*(.+)$/i.exec(issue.message);
     if (missingFile) {
-      const path = missingFile[1].trim();
-      if (memory.code.files.some((f) => String(f.path).replace(/\\/g, '/').replace(/^\/+/, '') === path)) continue;
+      const filePath = missingFile[1].trim();
+      const normalizedMissing = normalizeComponentPath(filePath);
+
+      // Exact match — already generated.
+      if (memory.code.files.some((f) => String(f.path).replace(/\\/g, '/').replace(/^\/+/, '') === filePath)) continue;
+
+      // Fuzzy match — a variant like FooPage.jsx already covers Foo.jsx; skip the stub.
+      if (
+        filePath.startsWith('src/components/') &&
+        memory.code.files.some((f) => {
+          const fp = String(f.path).replace(/\\/g, '/').replace(/^\/+/, '');
+          return fp.startsWith('src/components/') && normalizeComponentPath(fp) === normalizedMissing;
+        })
+      ) continue;
+
+      const path = filePath;
 
       let content = '';
       if (path === 'src/App.jsx') {
@@ -1324,6 +1379,9 @@ export async function runAIOrchestration(
         // Write healed files to disk so testFixAgent's fingerprint check detects a real change.
         const healedFiles = memory.code?.files ?? [];
         await Promise.all(healedFiles.map((f) => writeGeneratedFile(materializedRevision.workspaceDir, f).catch(() => {})));
+        // Return healed files so testFixAgent can update its internal reference and
+        // re-scan imports when applying pre-build fixes (package.json dep detection).
+        return healedFiles;
       },
       emitInfo: (message: string) => adapter.emit?.({ type: 'info', stage: 'testing', message }),
     });

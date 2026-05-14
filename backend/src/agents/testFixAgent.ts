@@ -88,6 +88,9 @@ const KNOWN_LIBRARY_VERSIONS: Record<string, string> = {
   'react-virtualized': '^9.22.5',
   'react-window': '^1.8.10',
   'react-markdown': '^9.0.1',
+  // Backend — dev tooling
+  'tsx': '^4.7.0',
+  'ts-node': '^10.9.2',
   // Backend — safe, no external credentials needed
   'express': '^4.19.0',
   'cors': '^2.8.5',
@@ -125,10 +128,12 @@ type GeneratedFile = { path: string; content: string };
 // react-icons uses a per-library prefix (Si = Simple Icons, Fa = Font Awesome, etc.).
 // The LLM frequently invents icon names that don't exist in the installed version.
 
-// Known-bad Si icon names → correct replacement (or null to remove the import entirely).
+// Known-bad icon names → correct replacement (or null to remove the import entirely).
+// Covers Si (Simple Icons) and Fa (Font Awesome) prefixes; add others as they surface.
 const REACT_ICONS_REPLACEMENTS: Record<string, string | null> = {
+  // Si replacements
   SiHuggingface: 'SiHuggingFace',      // correct capitalisation (v5+)
-  SiHuggingFace: 'SiHuggingFace',      // keep as-is, just ensure it's listed
+  SiHuggingFace: 'SiHuggingFace',      // keep as-is
   SiOpenai: 'SiOpenai',                // valid in v5+
   SiAmazonwebservices: 'SiAmazon',     // renamed in react-icons v5
   SiAws: 'SiAmazon',                   // non-existent alias
@@ -136,20 +141,143 @@ const REACT_ICONS_REPLACEMENTS: Record<string, string | null> = {
   SiGooglecloud: 'SiGooglecloud',      // valid
   SiVercel: 'SiVercel',                // valid
   SiNetlify: 'SiNetlify',              // valid
-  SiLangchain: null,                   // doesn't exist in any version — remove
+  SiLangchain: null,                   // doesn't exist — remove
   SiLangChain: null,
   SiAnthropic: null,                   // doesn't exist — remove
   SiChatgpt: null,                     // doesn't exist — remove
   SiMeta: 'SiMeta',                    // valid in v5
   SiMicrosoft: 'SiMicrosoft',          // valid
   SiMicrosoftazure: 'SiMicrosoftazure', // valid
+  // Fa replacements — icons that were removed or renamed between FA4/FA5/FA6
+  FaScaleBalanced: 'FaBalanceScale',   // renamed; FaScaleBalanced doesn't exist in fa v4
+  FaScaleUnbalanced: 'FaBalanceScaleLeft', // same family
+  FaScaleUnbalancedFlip: 'FaBalanceScaleRight',
+  FaGavel: 'FaGavel',                  // valid, just confirm
+  FaPersonWalking: 'FaWalking',        // fa5 name
+  FaPersonRunning: 'FaRunning',
+  FaPersonBiking: 'FaBiking',
+  FaPersonSwimming: 'FaSwimmer',
+  FaPersonSkiing: 'FaSkiing',
+  FaFaceSmile: 'FaSmile',
+  FaFaceFrown: 'FaFrown',
+  FaFaceMeh: 'FaMeh',
+  FaFaceGrin: 'FaGrin',
+  FaFaceLaugh: 'FaLaugh',
+  FaCircleCheck: 'FaCheckCircle',
+  FaCircleXmark: 'FaTimesCircle',
+  FaCircleExclamation: 'FaExclamationCircle',
+  FaCircleInfo: 'FaInfoCircle',
+  FaCircleQuestion: 'FaQuestionCircle',
+  FaTriangleExclamation: 'FaExclamationTriangle',
+  FaSquareCheck: 'FaCheckSquare',
+  FaFileLines: 'FaFileAlt',
+  FaFilePen: 'FaFileEdit',
+  FaSquarePlus: 'FaPlusSquare',
+  FaSquareMinus: 'FaMinusSquare',
+  FaPenToSquare: 'FaEdit',
+  FaRightFromBracket: 'FaSignOutAlt',
+  FaRightToBracket: 'FaSignInAlt',
+  FaArrowRightFromBracket: 'FaSignOutAlt',
+  FaArrowRightToBracket: 'FaSignInAlt',
+  FaBarsStaggered: 'FaBars',
+  FaEllipsis: 'FaEllipsisH',
+  FaEllipsisVertical: 'FaEllipsisV',
+  FaMagnifyingGlass: 'FaSearch',
+  FaMagnifyingGlassPlus: 'FaSearchPlus',
+  FaMagnifyingGlassMinus: 'FaSearchMinus',
+  FaGear: 'FaCog',
+  FaGears: 'FaCogs',
+  FaXmark: 'FaTimes',
+  FaX: 'FaTimes',
+  FaCheck: 'FaCheck',
+  FaPlus: 'FaPlus',
+  FaMinus: 'FaMinus',
+  FaUpload: 'FaUpload',
+  FaDownload: 'FaDownload',
+  FaShare: 'FaShare',
+  FaShareNodes: 'FaShareAlt',
+  FaArrowUp: 'FaArrowUp',
+  FaArrowDown: 'FaArrowDown',
+  FaArrowLeft: 'FaArrowLeft',
+  FaArrowRight: 'FaArrowRight',
+  FaChevronUp: 'FaChevronUp',
+  FaChevronDown: 'FaChevronDown',
+  FaChevronLeft: 'FaChevronLeft',
+  FaChevronRight: 'FaChevronRight',
+  FaBell: 'FaBell',
+  FaBellSlash: 'FaBellSlash',
+  FaTrashCan: 'FaTrash',
+  FaFloppyDisk: 'FaSave',
+  FaPaperclip: 'FaPaperclip',
+  FaPaperPlane: 'FaPaperPlane',
+  FaEnvelopeOpen: 'FaEnvelopeOpen',
+  FaAddressCard: 'FaAddressCard',
+  FaIdCard: 'FaIdCard',
+  FaBuildingColumns: 'FaUniversity',
+  FaHouseChimney: 'FaHome',
+  FaHouse: 'FaHome',
+  FaRectangleList: 'FaListAlt',
+  FaTableList: 'FaList',
+  FaTableCells: 'FaTable',
+  FaTableCellsLarge: 'FaTh',
+  FaChartSimple: 'FaChartBar',
+  FaChartColumn: 'FaChartBar',
+  FaMaximize: 'FaExpand',
+  FaMinimize: 'FaCompress',
+  FaLock: 'FaLock',
+  FaLockOpen: 'FaLockOpen',
+  FaShield: 'FaShield',
+  FaShieldHalved: 'FaShieldAlt',
+  FaUserShield: 'FaUserShield',
+  FaUserLock: 'FaUserLock',
+  FaUserGroup: 'FaUsers',
+  FaUserPlus: 'FaUserPlus',
+  FaUserMinus: 'FaUserMinus',
+  FaUserPen: 'FaUserEdit',
+  FaUserCheck: 'FaUserCheck',
+  FaUserClock: 'FaUserClock',
+  FaUserTag: 'FaUserTag',
+  FaUserTie: 'FaUserTie',
+  FaHandshake: 'FaHandshake',
+  FaClipboardList: 'FaClipboardList',
+  FaClipboardCheck: 'FaClipboardCheck',
+  FaListCheck: 'FaTasks',
+  FaCirclePlay: 'FaPlayCircle',
+  FaCirclePause: 'FaPauseCircle',
+  FaCircleStop: 'FaStopCircle',
+  FaBolt: 'FaBolt',
+  FaBoltLightning: 'FaBolt',
+  FaFlag: 'FaFlag',
+  FaFlagCheckered: 'FaFlagCheckered',
+  FaRocket: 'FaRocket',
+  FaBug: 'FaBug',
+  FaCode: 'FaCode',
+  FaTerminal: 'FaTerminal',
+  FaDatabase: 'FaDatabase',
+  FaServer: 'FaServer',
+  FaNetworkWired: 'FaNetworkWired',
+  FaCloud: 'FaCloud',
+  FaCloudArrowUp: 'FaCloudUploadAlt',
+  FaCloudArrowDown: 'FaCloudDownloadAlt',
+  FaMobileScreen: 'FaMobileAlt',
+  FaMobileScreenButton: 'FaMobileAlt',
+  FaDesktop: 'FaDesktop',
+  FaLaptop: 'FaLaptop',
+  FaKeyboard: 'FaKeyboard',
+  FaPrint: 'FaPrint',
+  FaPlugCirclePlus: null,
+  FaPlugCircleMinus: null,
+  FaPlugCircleCheck: null,
+  FaPlugCircleXmark: null,
 };
 
 // Extracts icon names reported as missing by Rollup/Vite build errors.
-// Example line: "SiAmazonwebservices" is not exported by "node_modules/react-icons/si/..."
+// Example line: "FaScaleBalanced" is not exported by "node_modules/react-icons/fa/..."
+// Covers all react-icons library prefixes: Fa, Si, Bs, Ai, Bi, Ci, Di, Fi, Gi, Gr, Hi, Im,
+// Io, Lu, Md, Pi, Ri, Rx, Sl, Tb, Ti, Vsc, Wi, Fc, Cg, Go, Lia, Tb, Tfi.
 function parseMissingIconsFromLogs(logs: string): Set<string> {
   const missing = new Set<string>();
-  const re = /"(Si[A-Za-z0-9]+)"\s+is not exported by/g;
+  const re = /"((?:Fa|Si|Bs|Ai|Bi|Ci|Di|Fi|Gi|Gr|Hi|Im|Io|Lu|Md|Pi|Ri|Rx|Sl|Tb|Ti|Vsc|Wi|Fc|Cg|Go|Lia|Tfi)[A-Za-z0-9]+)"\s+is not exported by/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(logs)) !== null) missing.add(m[1]);
   return missing;
@@ -192,6 +320,127 @@ function fixReactIconsImports(content: string, missingFromLogs?: Set<string>): s
   // Clean up blank lines left by removed imports
   const cleaned = result.replace(/^\s*\n/gm, '');
   return changed ? cleaned : null;
+}
+
+/**
+ * Fixes JSX elements that have the same attribute declared twice.
+ * esbuild rejects these at build time: `Duplicate "style" attribute in JSX element`.
+ * The LLM occasionally writes: style={styles.foo} aria-hidden="true" style={{ ...styles.foo, color: 'red' }}
+ * We remove the first occurrence so only the more-specific (usually inline) one survives.
+ * Mutates files in-place and writes corrected content to disk when workspaceDir is provided.
+ */
+async function fixDuplicateJsxAttributes(files: GeneratedFile[], workspaceDir?: string): Promise<void> {
+  // Matches an opening JSX tag spanning multiple tokens (no nested < or >).
+  // We look for any tag that contains the same attribute name twice.
+  const jsxTagRe = /<([A-Za-z][A-Za-z0-9.]*)\s([^<>]*?)>/g;
+
+  for (const file of files) {
+    const ext = path.extname(file.path).toLowerCase();
+    if (!['.js', '.jsx', '.ts', '.tsx'].includes(ext)) continue;
+
+    let changed = false;
+    const result = file.content.replace(jsxTagRe, (fullTag, _tagName, attrs) => {
+      // Extract individual attribute names from the attr string.
+      // Match: name= or name (boolean) patterns.
+      const attrNameRe = /([a-zA-Z_][a-zA-Z0-9_-]*)(?:\s*=\s*(?:"[^"]*"|'[^']*'|\{[^}]*\}))?/g;
+      const seen = new Map<string, number>(); // name → count
+      let m: RegExpExecArray | null;
+      while ((m = attrNameRe.exec(attrs)) !== null) {
+        const name = m[1];
+        seen.set(name, (seen.get(name) ?? 0) + 1);
+      }
+      const dupes = new Set([...seen.entries()].filter(([, c]) => c > 1).map(([n]) => n));
+      if (dupes.size === 0) return fullTag;
+
+      // For each duplicated attribute, remove all but the LAST occurrence.
+      let fixedAttrs = attrs;
+      for (const attrName of dupes) {
+        // Remove all occurrences of `attrName=...` except the last.
+        // Three forms: attrName={expr}, attrName="str", attrName='str', bare attrName.
+        const singleAttrRe = new RegExp(
+          `\\b${attrName}\\s*=\\s*(?:"[^"]*"|'[^']*'|\\{(?:[^{}]|\\{[^{}]*\\})*\\})|\\b${attrName}\\b(?!\\s*=)`,
+          'g'
+        );
+        const allMatches: Array<{ index: number; length: number }> = [];
+        let am: RegExpExecArray | null;
+        singleAttrRe.lastIndex = 0;
+        while ((am = singleAttrRe.exec(fixedAttrs)) !== null) {
+          allMatches.push({ index: am.index, length: am[0].length });
+        }
+        // Remove all but the last match (keep highest-index one = most-specific inline style).
+        const toRemove = allMatches.slice(0, -1);
+        // Apply removals in reverse order to preserve indices.
+        for (const rem of toRemove.reverse()) {
+          fixedAttrs = fixedAttrs.slice(0, rem.index) + fixedAttrs.slice(rem.index + rem.length);
+          changed = true;
+        }
+      }
+      if (!changed) return fullTag;
+      return fullTag.replace(attrs, fixedAttrs);
+    });
+
+    if (changed) {
+      file.content = result;
+      debug('testFixAgent:duplicate-jsx-attr-fix', { path: file.path });
+      if (workspaceDir) {
+        const abs = path.join(workspaceDir, 'frontend', file.path);
+        try { await fs.writeFile(abs, result, 'utf8'); } catch { /* best-effort */ }
+      }
+    }
+  }
+}
+
+/**
+ * Fixes JS object literals that have duplicate keys.
+ * esbuild treats these as errors: `Duplicate key "padding" in object literal`.
+ * Strategy: for each duplicate key in a const styles = { ... } or similar block,
+ * keep only the first definition (later ones usually have the same value).
+ * Mutates files in-place and writes corrected content to disk when workspaceDir is provided.
+ */
+async function fixDuplicateObjectKeys(files: GeneratedFile[], workspaceDir?: string): Promise<void> {
+  // Match object literals assigned to const/let/var identifiers.
+  // This is a best-effort line-by-line scan: we look for `key: value,` patterns
+  // inside the file and remove duplicate entries within blocks.
+  const styleBlockRe = /\bconst\s+\w+\s*=\s*\{([\s\S]*?)\};/g;
+
+  for (const file of files) {
+    const ext = path.extname(file.path).toLowerCase();
+    if (!['.js', '.jsx', '.ts', '.tsx'].includes(ext)) continue;
+
+    let changed = false;
+    const result = file.content.replace(styleBlockRe, (fullBlock, body) => {
+      // Collect key: value pairs. Match `key: ...value...,` lines.
+      const keyRe = /^\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*:/gm;
+      const seen = new Set<string>();
+      const dupeKeys = new Set<string>();
+      let m: RegExpExecArray | null;
+      while ((m = keyRe.exec(body)) !== null) {
+        const key = m[1];
+        if (seen.has(key)) dupeKeys.add(key);
+        else seen.add(key);
+      }
+      if (dupeKeys.size === 0) return fullBlock;
+
+      // For each duplicate key, remove its FIRST occurrence in the body.
+      let fixedBody = body;
+      for (const key of dupeKeys) {
+        // Match `key: <value-until-comma-or-closing-brace>` including nested braces.
+        const firstOccRe = new RegExp(`(^|\\n)([ \\t]*)${key}\\s*:[^,\\n}]+(?:,)?`, '');
+        fixedBody = fixedBody.replace(firstOccRe, '$1');
+        changed = true;
+      }
+      return fullBlock.replace(body, fixedBody);
+    });
+
+    if (changed) {
+      file.content = result;
+      debug('testFixAgent:duplicate-object-keys-fix', { path: file.path });
+      if (workspaceDir) {
+        const abs = path.join(workspaceDir, 'frontend', file.path);
+        try { await fs.writeFile(abs, result, 'utf8'); } catch { /* best-effort */ }
+      }
+    }
+  }
 }
 
 /**
@@ -442,7 +691,8 @@ async function ensureDbInitSql(files: GeneratedFile[], workspaceDir: string): Pr
 
 export async function testFixAgent(input: {
   buildFn: () => Promise<{ success: boolean; logs: string }>;
-  fixFn?: (logs: string) => Promise<void>;
+  /** Return the updated file set so testFixAgent can re-scan imports after healing. */
+  fixFn?: (logs: string) => Promise<GeneratedFile[] | void>;
   files?: GeneratedFile[];
   workspaceDir?: string;
   projectId?: string;
@@ -488,6 +738,10 @@ export async function testFixAgent(input: {
     if (!input.files) return;
     // Fix duplicate `export default function X` where X was already declared.
     try { await fixDuplicateExportDefaultInFiles(input.files, input.workspaceDir); } catch (err) { logWarn('testFixAgent:duplicate-export-fix', err); }
+    // Fix duplicate JSX attributes (e.g. style={A} ... style={B} on same element).
+    try { await fixDuplicateJsxAttributes(input.files, input.workspaceDir); } catch (err) { logWarn('testFixAgent:duplicate-jsx-attr-fix', err); }
+    // Fix duplicate keys in JS object literals (e.g. const styles = { padding:12, ..., padding:8 }).
+    try { await fixDuplicateObjectKeys(input.files, input.workspaceDir); } catch (err) { logWarn('testFixAgent:duplicate-object-keys-fix', err); }
     // Rewrite known-bad react-icons named imports.
     try { await fixReactIconsInFiles(input.files, input.workspaceDir, buildLogs); } catch (err) { logWarn('testFixAgent:react-icons-fix', err); }
     // Add missing frontend dependencies.
@@ -546,7 +800,13 @@ export async function testFixAgent(input: {
         debug('testFixAgent:invoking-fixFn', { retry: retries + 1 });
         try {
           const preSnapshot = input.workspaceDir ? await fingerprintWorkspace(input.workspaceDir) : undefined;
-          await input.fixFn(lastResult.logs);
+          const healedFiles = await input.fixFn(lastResult.logs);
+          // Sync input.files to the healed set so applyPreBuildFixes scans the right imports.
+          // Without this, package.json is updated against stale imports and new deps (e.g.
+          // react-router-dom) added by the healed code are silently missing from the build.
+          if (healedFiles && healedFiles.length > 0) {
+            input.files = healedFiles;
+          }
           if (input.workspaceDir && preSnapshot) {
             const postSnapshot = await fingerprintWorkspace(input.workspaceDir);
             if (preSnapshot === postSnapshot) {
@@ -557,7 +817,7 @@ export async function testFixAgent(input: {
         } catch (fixErr) {
           logError('testFixAgent:fixFn-error', { error: fixErr instanceof Error ? fixErr.message : String(fixErr), stage: 'fixFn', retries });
         }
-        // Re-apply deterministic fixes on the healed files so package.json stays in sync.
+        // Re-apply deterministic fixes on the (possibly healed) files so package.json stays in sync.
         await applyPreBuildFixes(lastResult.logs);
       }
       retries++;
