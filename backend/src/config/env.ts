@@ -62,24 +62,24 @@ function validateConfig() {
   }
 
   if (config.NODE_ENV === 'production' && !config.DATABASE_URL) {
-    errors.push('DATABASE_URL is required in production');
+    console.warn('[WARNING] DATABASE_URL is not set in production — database features will be unavailable');
   }
 
   if (config.NODE_ENV === 'production') {
     if (!config.RAILWAY_TOKEN) {
-      errors.push('RAILWAY_TOKEN is required in production');
+      console.warn('[WARNING] RAILWAY_TOKEN is not set — Railway deploy features will be unavailable');
     }
     if (!config.VERCEL_ACCESS_TOKEN) {
-      errors.push('VERCEL_ACCESS_TOKEN is required in production');
+      console.warn('[WARNING] VERCEL_ACCESS_TOKEN is not set — Vercel deploy features will be unavailable');
     }
-    // Require at least one usable model API key in production
+    // Warn (not crash) if no model API key — server can still start
     const hasAnyModelKey = [
       config.GPT5_2_API_KEY, config.GPT5_MINI_API_KEY,
       config.GPT4O_API_KEY, config.GPT4O_MINI_API_KEY,
       config.CLAUDE4_API_KEY, config.KIMI_K2_API_KEY,
     ].some((k) => k.trim().length > 0);
     if (!hasAnyModelKey) {
-      errors.push('At least one model API key is required in production (e.g. GPT5_2_API_KEY, CLAUDE4_API_KEY)');
+      console.warn('[WARNING] No model API key is set — LLM pipeline calls will fail until at least one is configured');
     }
   }
 

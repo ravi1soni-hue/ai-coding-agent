@@ -18,7 +18,9 @@ export interface ModelConfig {
   apiKey: string;
 }
 
-/** Build a deduped, non-empty list of {model, apiKey} pairs from parallel arrays. */
+const FALLBACK_MODEL: ModelConfig = { model: 'gpt-4o-mini', apiKey: config.GPT4O_MINI_API_KEY || config.GPT4O_API_KEY || '' };
+
+/** Build a deduped, non-empty list of {model, apiKey} pairs from parallel arrays. Always has ≥1 entry. */
 function buildChain(models: Array<string | undefined>, keys: Array<string | undefined>): ModelConfig[] {
   const seen = new Set<string>();
   const chain: ModelConfig[] = [];
@@ -30,6 +32,8 @@ function buildChain(models: Array<string | undefined>, keys: Array<string | unde
     seen.add(model);
     chain.push({ model, apiKey });
   }
+  // Guarantee at least one entry so callers can safely destructure chain[0]
+  if (chain.length === 0) chain.push(FALLBACK_MODEL);
   return chain;
 }
 
