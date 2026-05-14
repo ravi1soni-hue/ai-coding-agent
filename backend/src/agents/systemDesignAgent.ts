@@ -1,7 +1,8 @@
-import { getModelConfigForTask } from './modelRouter';
+import { getModelPriorityChain } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { debug, error as logError } from '../utils/logger';
 import { parseJsonResponse, scaledTokenBudget } from './llmUtils';
+import { AgentState } from './agentStates';
 
 export type BrainState = {
   activeState: string;
@@ -22,7 +23,7 @@ export type StateAwareAgentResult<T> = {
 function transitionTo(currentState: string, nextState: string): string {
   const normalizedCurrent = String(currentState || '').trim();
   const normalizedNext = String(nextState || '').trim();
-  if (!normalizedNext) return 'CLARIFICATION_REQUIRED';
+  if (!normalizedNext) return AgentState.NEXT_CLARIFICATION;
   if (!normalizedCurrent) return normalizedNext;
   return normalizedNext;
 }
@@ -44,8 +45,8 @@ export async function systemDesignAgent(input: any): Promise<StateAwareAgentResu
   debug('systemDesignAgent', { input });
   try {
     if (!input) throw new Error('Input required');
-    const { model, apiKey } = getModelConfigForTask('core_reasoning');
-    const llmProxy = new LLMProxyClient({ apiKey, projectId: input?.projectId });
+    const [{ model, apiKey }, ...fallbacks] = getModelPriorityChain('system_design');
+    const llmProxy = new LLMProxyClient({ apiKey, projectId: input?.projectId, fallbacks });
 
     const projectSpec = input.projectSpec || null;
     const backendRequired = Boolean(input?.requirements?.backend_required ?? input?.backend_required ?? projectSpec?.requirements?.backend_required);
@@ -166,13 +167,13 @@ RULES:
     debug('systemDesignAgent:result', { result, consistencyScore });
     return {
       updatedState: {
-        activeState: consistencyScore < 0.58 ? transitionTo(input.activeState || input.globalState?.activeState || 'system_design', 'CLARIFICATION_REQUIRED') : transitionTo(input.activeState || input.globalState?.activeState || 'system_design', 'UI_SPEC'),
+        activeState: consistencyScore < 0.58 ? transitionTo(input.activeState || input.globalState?.activeState || AgentState.SYSTEM_DESIGN, AgentState.NEXT_CLARIFICATION) : transitionTo(input.activeState || input.globalState?.activeState || AgentState.SYSTEM_DESIGN, AgentState.NEXT_UI_SPEC),
         domain: 'system_design',
         consistencyScore,
-        transitions: [...(input.globalState?.transitions || []), `systemDesign:${String(input.activeState || input.globalState?.activeState || 'system_design')}`],
+        transitions: [...(input.globalState?.transitions || []), `systemDesign:${String(input.activeState || input.globalState?.activeState || AgentState.SYSTEM_DESIGN)}`],
         metadata: { backendRequired, authRequired },
       },
-      nextStateProposal: consistencyScore < 0.58 ? 'CLARIFICATION_REQUIRED' : 'UI_SPEC',
+      nextStateProposal: consistencyScore < 0.58 ? AgentState.NEXT_CLARIFICATION : AgentState.NEXT_UI_SPEC,
       consistencyScore,
       output: result,
     };

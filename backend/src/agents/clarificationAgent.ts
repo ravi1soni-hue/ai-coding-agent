@@ -1,8 +1,9 @@
-import { getModelConfigForTask } from './modelRouter';
+import { getModelPriorityChain } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { debug, error as logError } from '../utils/logger';
 import type { ProjectBlueprint } from './blueprintContract';
 import { parseJsonResponse } from './llmUtils';
+import { AgentState } from './agentStates';
 
 export type ClarificationContext = {
   clarificationAnswers: Record<string, string>;
@@ -38,7 +39,8 @@ export type ClarificationOutput = {
 
 const MAX_QUESTIONS = 3;
 const MAX_ATTEMPTS = 3;
-const MAX_CLARIFICATION_ROUNDS = 5;
+const MAX_CLARIFICATION_ROUNDS_FULLSTACK = 5;
+const MAX_CLARIFICATION_ROUNDS_FRONTEND = 2;
 
 
 function normalizeQuestionList(value: unknown): string[] {
@@ -96,11 +98,12 @@ function shouldAskMoreQuestions(
   // Total questions already asked (best-effort, since spec/state may disagree).
   const totalAsked = Math.max(askedFromSpec, askedQuestionsList.length);
 
-  // Hard cap on clarification rounds to avoid infinite loops.
-  if (totalAsked >= MAX_CLARIFICATION_ROUNDS) return false;
+  const isFrontendOnly = !requirements?.backend_required;
+  const maxRounds = isFrontendOnly ? MAX_CLARIFICATION_ROUNDS_FRONTEND : MAX_CLARIFICATION_ROUNDS_FULLSTACK;
+  if (totalAsked >= maxRounds) return false;
 
   const semanticGap = calculateSemanticGap(requirements, projectSpec);
-  const targetCount = targetClarificationCount(semanticGap);
+  const targetCount = Math.min(targetClarificationCount(semanticGap), maxRounds);
 
   // If we haven't reached the target questions yet, keep asking.
   return totalAsked < targetCount;
@@ -109,7 +112,7 @@ function shouldAskMoreQuestions(
 function transitionTo(currentState: string, nextState: string): string {
   const normalizedCurrent = normalizeText(currentState);
   const normalizedNext = normalizeText(nextState);
-  if (!normalizedNext) return 'clarification_required';
+  if (!normalizedNext) return AgentState.NEXT_CLARIFICATION;
   if (!normalizedCurrent) return normalizedNext;
   return normalizedNext;
 }
@@ -151,7 +154,7 @@ export async function clarificationAgent(input: any): Promise<StateAwareAgentRes
 
   const clarificationAnswers: Record<string, string> = input.clarificationAnswers || {};
   const askedQuestions: string[] = Array.isArray(input.askedQuestions) ? input.askedQuestions : [];
-  const activeState = String(input.activeState || input.globalState?.activeState || 'clarification');
+  const activeState = String(input.activeState || input.globalState?.activeState || AgentState.CLARIFICATION);
   const projectSpec = input.projectSpec || null;
   const context: ClarificationContext = {
     clarificationAnswers,
@@ -161,7 +164,7 @@ export async function clarificationAgent(input: any): Promise<StateAwareAgentRes
     lastAnswer: input.lastAnswer,
   };
 
-  if (!['clarification', 'requirements'].includes(activeState)) {
+  if (![AgentState.CLARIFICATION, AgentState.REQUIREMENTS].includes(activeState as any)) {
     const output: ClarificationOutput = {
       questions: [],
       confirmed: false,
@@ -176,14 +179,14 @@ export async function clarificationAgent(input: any): Promise<StateAwareAgentRes
         transitions: [...(input.globalState?.transitions || []), `blocked:${activeState}`],
         metadata: { reason: 'gate_closed' },
       },
-      nextStateProposal: transitionTo(activeState, 'clarification_required'),
+      nextStateProposal: transitionTo(activeState, AgentState.NEXT_CLARIFICATION),
       consistencyScore: 0,
       output,
     };
   }
 
-  const { model, apiKey } = getModelConfigForTask('clarification');
-  const llmProxy = new LLMProxyClient({ apiKey, projectId: input.projectId });
+  const [{ model, apiKey }, ...fallbacks] = getModelPriorityChain('clarification');
+  const llmProxy = new LLMProxyClient({ apiKey, projectId: input.projectId, fallbacks });
   const systemPrompt = buildClarificationPrompt(input, projectSpec);
 
   const userPrompt = JSON.stringify({
@@ -210,7 +213,7 @@ export async function clarificationAgent(input: any): Promise<StateAwareAgentRes
         model,
         0.4,
         0.9,
-        1400
+        400
       );
 
       const raw = completion.choices?.[0]?.message?.content || '{}';
@@ -243,7 +246,7 @@ export async function clarificationAgent(input: any): Promise<StateAwareAgentRes
         context,
       };
 
-      const nextStateProposal = resolvedConfirmed ? transitionTo(activeState, 'system_design') : transitionTo(activeState, 'clarification_required');
+      const nextStateProposal = resolvedConfirmed ? transitionTo(activeState, AgentState.NEXT_SYSTEM_DESIGN) : transitionTo(activeState, AgentState.NEXT_CLARIFICATION);
 
       return {
         updatedState: {

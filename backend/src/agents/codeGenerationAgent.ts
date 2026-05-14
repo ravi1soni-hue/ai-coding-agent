@@ -1,12 +1,13 @@
 import path from 'path';
 import ts from 'typescript';
-import { getModelConfigForTask } from './modelRouter';
+import { getModelPriorityChain } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { debug, error as logError, warn as logWarn } from '../utils/logger';
 import { assertBlueprintIntegrationSafety, blueprintMissingFiles, validateProjectBlueprint, type ProjectBlueprint } from './blueprintContract';
 import { validateStructuredSpec, type StructuredSpec } from './structuredSpec';
 import { reviewerAgent } from './reviewerAgent';
 import { parseJsonResponse, type TokenBudget, normalizeBudget } from './llmUtils';
+import { AgentState } from './agentStates';
 
 type GeneratedFile = { path: string; content: string };
 
@@ -1734,8 +1735,8 @@ function normalizeStateName(value: unknown): string {
 function transitionTo(currentState: string, nextState: string): string {
   const normalizedCurrent = normalizeStateName(currentState);
   const normalizedNext = normalizeStateName(nextState);
-  if (!normalizedCurrent) return normalizedNext || 'CLARIFICATION_REQUIRED';
-  if (!normalizedNext) return 'CLARIFICATION_REQUIRED';
+  if (!normalizedCurrent) return normalizedNext || AgentState.NEXT_CLARIFICATION;
+  if (!normalizedNext) return AgentState.NEXT_CLARIFICATION;
   return normalizedNext;
 }
 
@@ -1787,8 +1788,8 @@ export async function codeGenerationAgent(input: any) {
   }
   const blueprint = assertBlueprintIntegrationSafety(reviewedBlueprint);
 
-  const { model, apiKey } = getModelConfigForTask('code_generation');
-  const llmProxy = new LLMProxyClient({ apiKey, projectId: input?.projectId });
+  const [{ model, apiKey }, ...fallbacks] = getModelPriorityChain('code_generation');
+  const llmProxy = new LLMProxyClient({ apiKey, projectId: input?.projectId, fallbacks });
   const events: EventSink | undefined = typeof input.emitEvent === 'function' ? { emit: input.emitEvent } : undefined;
 
   const retrievedPatches: string[] = [];

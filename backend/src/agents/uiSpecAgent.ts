@@ -9,11 +9,12 @@
  * - Component dependencies (for ordered generation)
  */
 
-import { getModelConfigForTask } from './modelRouter';
+import { getModelPriorityChain } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { compileStructuredSpec, type StructuredSpec } from './structuredSpec';
 import { debug, error as logError } from '../utils/logger';
 import { parseJsonResponse, scaledTokenBudget } from './llmUtils';
+import { AgentState } from './agentStates';
 
 export interface ComponentInterface {
   name: string;
@@ -205,8 +206,8 @@ export async function uiSpecAgent(input: any): Promise<StateAwareAgentResult<Str
       }
     }
 
-    const { model, apiKey } = getModelConfigForTask('code_generation');
-    const llmProxy = new LLMProxyClient({ apiKey, projectId: input.projectId });
+    const [{ model, apiKey }, ...fallbacks] = getModelPriorityChain('ui_spec');
+    const llmProxy = new LLMProxyClient({ apiKey, projectId: input.projectId, fallbacks });
 
     const systemDesign = input.systemDesign;
     const requirements = input.requirements || {};
@@ -565,13 +566,13 @@ RULES:
 
     return {
       updatedState: {
-        activeState: consistencyScore < 0.55 ? 'BLUEPRINT_REQUIRED' : 'UI_SPEC',
+        activeState: consistencyScore < 0.55 ? AgentState.NEXT_BLUEPRINT : AgentState.NEXT_UI_SPEC,
         domain: 'ui_spec',
         consistencyScore,
-        transitions: [String(input.globalState?.activeState || 'system_design'), 'ui_spec'],
+        transitions: [String(input.globalState?.activeState || AgentState.SYSTEM_DESIGN), AgentState.UI_SPEC],
         metadata: { projectId: input.projectId },
       },
-      nextStateProposal: consistencyScore < 0.55 ? 'BLUEPRINT_REQUIRED' : 'UI_SPEC',
+      nextStateProposal: consistencyScore < 0.55 ? AgentState.NEXT_BLUEPRINT : AgentState.NEXT_UI_SPEC,
       consistencyScore,
       output: structuredSpec,
     };

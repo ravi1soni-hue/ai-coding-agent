@@ -4,6 +4,9 @@ import fs from 'fs/promises';
 import path from 'path';
 import { debug, warn as logWarn, error as logError } from '../utils/logger';
 import { config as envConfig } from '../config/env';
+import { getModelPriorityChain } from './modelRouter';
+import { LLMProxyClient } from './llmProxyClient';
+import { parseJsonResponse } from './llmUtils';
 
 // Known third-party library versions for auto-remediation
 const KNOWN_LIBRARY_VERSIONS: Record<string, string> = {
@@ -689,6 +692,126 @@ async function ensureDbInitSql(files: GeneratedFile[], workspaceDir: string): Pr
   }
 }
 
+/**
+ * Extracts the most actionable error lines from build logs.
+ * Returns at most ~3000 chars so it fits in the LLM prompt budget.
+ */
+function extractBuildErrors(logs: string): string {
+  const lines = logs.split('\n');
+  const errorLines = lines.filter((l) =>
+    /error|failed|cannot find|is not exported|unexpected token|does not exist/i.test(l)
+  );
+  const relevant = errorLines.length > 0 ? errorLines : lines.filter((l) => l.trim());
+  return relevant.slice(0, 60).join('\n').slice(0, 3000);
+}
+
+/**
+ * Identifies which generated file paths are referenced in the build errors.
+ */
+function findErrorFiles(errors: string, files: GeneratedFile[]): GeneratedFile[] {
+  return files.filter((f) => {
+    const base = path.basename(f.path);
+    return errors.includes(f.path) || errors.includes(base);
+  }).slice(0, 6); // cap to avoid oversized prompts
+}
+
+/**
+ * Uses the test_generation model chain (GPT5_MINI > DEEPSEEK_R1) to analyse
+ * build errors and return targeted file patches. Cheaper and faster than a full
+ * code-generation regen — only fixes the files that are actually broken.
+ *
+ * Returns true if at least one file was patched.
+ */
+async function llmFixBuildErrors(
+  files: GeneratedFile[],
+  buildLogs: string,
+  workspaceDir?: string,
+  projectId?: string
+): Promise<boolean> {
+  const errors = extractBuildErrors(buildLogs);
+  if (!errors.trim()) return false;
+
+  const errorFiles = findErrorFiles(errors, files);
+  if (errorFiles.length === 0) {
+    debug('llmFixBuildErrors:no-error-files', { errors: errors.slice(0, 200) });
+    return false;
+  }
+
+  try {
+    const [{ model, apiKey }, ...fallbacks] = getModelPriorityChain('test_generation');
+    const llmProxy = new LLMProxyClient({ apiKey, projectId, fallbacks });
+
+    const systemPrompt = `You are a build-error repair specialist for React/Vite/TypeScript projects.
+You are given build error logs and the source files that caused them.
+Return ONLY valid JSON — no markdown, no prose — in this exact shape:
+{
+  "patches": [
+    { "path": "relative/file/path", "content": "complete fixed file content" }
+  ]
+}
+Rules:
+- Only include files you actually changed.
+- Return the COMPLETE file content, not a diff.
+- Fix ALL errors you can identify in the file; do not introduce new ones.
+- Do not add packages that are not in package.json.
+- If you cannot fix a file confidently, omit it from patches.`;
+
+    const userPrompt = JSON.stringify({
+      errors,
+      files: errorFiles.map((f) => ({ path: f.path, content: f.content.slice(0, 6000) })),
+    });
+
+    const completion = await llmProxy.chatCompletion(
+      [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      model,
+      0.2,
+      0.9,
+      4096
+    );
+
+    const raw = completion.choices?.[0]?.message?.content || '{}';
+    debug('llmFixBuildErrors:raw', { snippet: raw.slice(0, 300) });
+
+    const parsed = parseJsonResponse(raw);
+    const patches: Array<{ path: string; content: string }> = Array.isArray(parsed?.patches)
+      ? parsed.patches.filter(
+          (p: unknown): p is { path: string; content: string } =>
+            typeof (p as any)?.path === 'string' && typeof (p as any)?.content === 'string'
+        )
+      : [];
+
+    if (patches.length === 0) return false;
+
+    let changed = false;
+    for (const patch of patches) {
+      const target = files.find((f) => f.path === patch.path);
+      if (!target) continue;
+      target.content = patch.content;
+      changed = true;
+      debug('llmFixBuildErrors:patched', { path: patch.path });
+      if (workspaceDir) {
+        const subdir = patch.path.startsWith('backend/') ? 'backend' : 'frontend';
+        const relPath = patch.path.startsWith('backend/')
+          ? patch.path.slice('backend/'.length)
+          : patch.path;
+        const abs = path.join(workspaceDir, subdir, relPath);
+        try {
+          await fs.mkdir(path.dirname(abs), { recursive: true });
+          await fs.writeFile(abs, patch.content, 'utf8');
+        } catch { /* best-effort */ }
+      }
+    }
+
+    return changed;
+  } catch (err) {
+    logWarn('llmFixBuildErrors:error', err);
+    return false;
+  }
+}
+
 export async function testFixAgent(input: {
   buildFn: () => Promise<{ success: boolean; logs: string }>;
   /** Return the updated file set so testFixAgent can re-scan imports after healing. */
@@ -794,6 +917,21 @@ export async function testFixAgent(input: {
       }
 
       lastResult = currentResult;
+
+      // Lightweight LLM patch pass before the expensive full-regen fixFn.
+      if (input.files && retries < 2) {
+        try {
+          const patched = await llmFixBuildErrors(input.files, lastResult.logs, input.workspaceDir, input.projectId);
+          if (patched) {
+            info(`LLM targeted patch applied (attempt ${retries + 1}) — retrying build...`);
+            debug('testFixAgent:llm-patch-applied', { retry: retries + 1 });
+            retries++;
+            continue;
+          }
+        } catch (llmErr) {
+          logWarn('testFixAgent:llm-patch-error', llmErr);
+        }
+      }
 
       if (input.fixFn && retries < 2) {
         info(`Build failed — invoking AI self-heal (attempt ${retries + 1})...`);
