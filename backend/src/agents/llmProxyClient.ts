@@ -66,19 +66,26 @@ export class LLMProxyClient {
    * callers that haven't adopted the new priority-chain API yet.
    */
   private buildModelChain(primaryModel: string): ModelFallback[] {
-    if (this.fallbacks.length > 0) {
-      // Deduplicate while preserving order; skip entries whose key matches primary
-      // only if they are truly the same entry (avoid double-calling same model).
-      const seen = new Set<string>();
-      return this.fallbacks.filter((f) => {
-        if (!f.model || !f.apiKey || f.apiKey.length < 3) return false;
-        if (seen.has(f.model)) return false;
-        seen.add(f.model);
-        return true;
-      });
+    const seen = new Set<string>();
+    const chain: ModelFallback[] = [];
+
+    // Always try the primary model + its key first
+    if (primaryModel && this.apiKey && this.apiKey.trim().length >= 3) {
+      seen.add(primaryModel);
+      chain.push({ model: primaryModel, apiKey: this.apiKey });
     }
-    // Legacy: single model + primary key only (no cross-key fallback risk)
-    return [{ model: primaryModel, apiKey: this.apiKey }];
+
+    // Append fallbacks (rest of priority chain) deduped
+    for (const f of this.fallbacks) {
+      if (!f.model || !f.apiKey || f.apiKey.trim().length < 3) continue;
+      if (seen.has(f.model)) continue;
+      seen.add(f.model);
+      chain.push(f);
+    }
+
+    // Guarantee at least one entry so callers can always check chain[0]
+    if (chain.length === 0) chain.push({ model: primaryModel, apiKey: this.apiKey });
+    return chain;
   }
 
   private isModelNotFoundError(err: any): boolean {
