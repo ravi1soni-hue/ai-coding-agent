@@ -426,3 +426,38 @@ Output:
 Rules:
 - Be strict
 - Ensure production-level quality
+
+
+
+
+
+
+- GPT_5_2 =  model name : “gpt-5.2"
+Model API : “f552909f-c179-49b7-90de-dd2f85c9276d”
+- GPT_5_MINI = model name : "gpt-5-mini"
+Model API : “c1784bdf-29e9-4eac-828c-841794c3b2c5”
+- GPT_4O = 
+model name : "gpt-4o"
+Model API : “12b54ef1-afb5-4a78-a6b6-785335eeb1f5”
+- GPT_4O_MINI = 
+model name : "gpt-4o-mini"
+Model API : “2134d5e7-2ce9-4025-96da-8d1afc078914”
+- CLAUDE_4 =
+model name :  "claude-sonnet-4"
+Model API : “907c9105-e310-42ca-a95a-f5a30d924bae”
+- KIMI_K2 = 
+model name : "kimi-k2-thinking"
+Model API : “aaf392ae-78ad-4067-80c3-18c082e91026”
+- GROK_3 = 
+model name : "grok-3"
+Model API : “e669dc6a-469d-4347-a45a-f7bba8c7bc10”
+- DEEPSEEK_R1 = 
+model name : "deepseek-r1"
+Model API : “13bd2557-a80e-41ed-96b9-c829da9d4424”
+- GEMINI_FLASH = 
+model name : "gemini-2.5-flash"
+Model API : “4ceebcc2-a6dd-45e5-a204-5e51f928a298”
+- EMBEDDING = 
+model name : "text-embedding"
+Model API : “671e8d5b-c3bd-441f-9245-0a6ce8e7ad4b”
+
