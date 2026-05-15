@@ -250,9 +250,10 @@ export async function clarificationAgent(input: any): Promise<StateAwareAgentRes
       const semanticGap = calculateSemanticGap(input.requirements, projectSpec);
       const shouldContinue = shouldAskMoreQuestions(input.requirements, projectSpec, askedQuestions, clarificationAnswers);
 
-      // Hard guardrail: if we still believe we need clarifications, we must not
-      // "confirm/done" with an empty question set (otherwise the orchestration loop skips).
-      if (shouldContinue && questions.length === 0) {
+      // Hard guardrail: if we still believe we need clarifications and the LLM
+      // neither confirmed nor produced questions, force a retry.
+      // But if the LLM explicitly confirmed, trust it — the user gave enough detail.
+      if (shouldContinue && questions.length === 0 && !confirmed) {
         throw new Error('clarificationAgent:shouldContinue=true but LLM returned no questions');
       }
 
