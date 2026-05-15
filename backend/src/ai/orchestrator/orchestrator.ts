@@ -7,6 +7,10 @@ import { codeGenerationAgent } from '../../agents/codeGenerationAgent';
 import { testFixAgent } from '../../agents/testFixAgent';
 import { deploymentAgent } from '../../agents/deploymentAgent';
 import { reviewerAgent } from '../../agents/reviewerAgent';
+import { reviewStage } from '../../agents/stageReviewer';
+import { fixStage } from '../../agents/stageFixer';
+import { getModelPriorityChain } from '../../agents/modelRouter';
+import { LLMProxyClient } from '../../agents/llmProxyClient';
 import { materializeProjectWorkspace, writeGeneratedFile } from '../../factory/projectFactory';
 import { runBuildWorker, cleanupWorkspace } from '../../workers/buildWorker';
 import { consolidateProjectSpec, validateProjectSpec } from '../../agents/projectSpec';
@@ -168,6 +172,13 @@ type StageOptions = {
   percent?: number;
   /** Global wall-clock deadline for automated orchestration work. */
   deadlineAt?: number;
+  /**
+   * Called before each retry attempt (attempt >= 1) with the error from the
+   * previous attempt. Handlers can mutate their captured input to inject error
+   * context (e.g. previousIssues) so that the LLM sees what went wrong and
+   * corrects it, rather than re-running with identical inputs blindly.
+   */
+  onRetry?: (attempt: number, lastError: unknown) => void;
 };
 
 async function persistMemory(memory: ProjectMemory, persistence?: PersistenceAdapter): Promise<void> {
@@ -175,13 +186,15 @@ async function persistMemory(memory: ProjectMemory, persistence?: PersistenceAda
   try {
     await persistence.saveSnapshot(memory);
   } catch (err) {
-    // best-effort persistence; never fail the pipeline on snapshot errors,
-    // but log so silent persistence regressions don't go unnoticed.
+    // persistenceAdapter.writeSnapshot() is responsible for best-effort heavy artifact fields.
+    // Any error that escapes here indicates cursor-phase durability failure (status/current_step/progress).
+    // That MUST NOT be swallowed: otherwise resume scanners can see NULL cursor fields and treat pipelines as stuck.
     logError('orchestrator:persist_snapshot_failed', {
       projectId: memory.projectId,
       stage: memory.currentState,
-      error: err,
+      error: err instanceof Error ? err.message : String(err),
     });
+    throw err;
   }
 }
 
@@ -203,7 +216,7 @@ async function stageWrap<T>(
   handler: () => Promise<T>,
   options: StageOptions = {}
 ): Promise<StageResult<T>> {
-  const { adapter, persistence, percent, deadlineAt } = options;
+  const { adapter, persistence, percent, deadlineAt, onRetry } = options;
   const policy = currentPolicy(memory);
   // NOTE: sessionId is intentionally excluded from inputHash — sessionId changes on every
   // server restart, which would cause all prior checkpoints to be cache-misses, breaking
@@ -249,6 +262,11 @@ async function stageWrap<T>(
 
   while (shouldRetryStage(attempt, policy)) {
     try {
+      // Give the caller a chance to mutate its captured input (e.g. inject
+      // previousIssues) before each retry so the handler sees what failed.
+      if (attempt > 0 && lastError !== null && onRetry) {
+        try { onRetry(attempt, lastError); } catch { /* best-effort */ }
+      }
       markStage(memory, stage);
 
       // Persist immediately on stage entry so REST snapshot readers see
@@ -435,12 +453,40 @@ async function runFinalAudit(projectSpec: any, memory: ProjectMemory): Promise<v
   const reviewed = await reviewerAgent({
     projectId: memory.projectId,
     blueprint: memory.blueprint?.blueprint,
+    files: memory.code?.files,
     reviewerName: 'Final Audit Reviewer',
   } as any);
 
   if (!reviewed.approved || !reviewed.approved.approved) {
     throw new Error(`Final audit reviewer rejected blueprint: ${(reviewed.approved?.notes || []).join('; ')}`);
   }
+}
+
+// Extract the most actionable error lines from build logs.
+// Build errors appear early (TypeScript/Vite diagnostics) and at the end (summary).
+// We keep both ends plus any "error TS" / "error:" lines in between.
+function extractBuildErrors(logs: string): string {
+  const raw = String(logs);
+  const lines = raw.split('\n');
+
+  // Collect lines that look like actual errors (TypeScript, Vite, esbuild, Node)
+  const errorLines = lines.filter((l) =>
+    /error TS\d+|error:|\bERROR\b|✘|✗|failed|Cannot find|is not exported|Duplicate|Expected|Unexpected|SyntaxError/i.test(l)
+  );
+
+  // Skip npm install noise (lines before "npm run build" or "> vite build") for the head section.
+  // npm install output is not actionable for code-gen self-heal — only the actual build errors are.
+  const buildStartIdx = lines.findIndex((l) => /vite build|tsc --build|esbuild|> build|npm run build/i.test(l));
+  const buildLines = buildStartIdx >= 0 ? lines.slice(buildStartIdx) : lines;
+  const buildHead = buildLines.slice(0, 60).join('\n');
+
+  // Always include the last 2000 chars (summary / exit status section)
+  const tail = raw.slice(-2000);
+  const middle = errorLines.slice(0, 80).join('\n');
+
+  const combined = [buildHead, middle, tail].join('\n---\n');
+  // Deduplicate adjacent identical lines and cap total length
+  return combined.replace(/(.+\n)\1+/g, '$1').slice(0, 8000);
 }
 
 async function selfHealWithCodeGeneration(
@@ -470,7 +516,7 @@ async function selfHealWithCodeGeneration(
     structuredSpec: memory.uiSpec?.structuredSpec,
     blueprint: memory.blueprint?.blueprint,
     requirements: memory.requirements,
-    modification: `Fix the build errors below and regenerate complete files:${stubContext}\n\nBuild errors:\n${String(logs).slice(-4000)}`,
+    modification: `Fix the build errors below and regenerate complete files:${stubContext}\n\nBuild errors:\n${extractBuildErrors(logs)}`,
     projectSpec,
     projectId,
     user_id: command.sessionId,
@@ -645,7 +691,12 @@ async function runClarificationLoop(
         },
         clarificationAnswers: incomingAnswers,
         askedQuestions: priorAsked,
-        projectSpec: undefined,
+        projectSpec: {
+          userMessage: command.userMessage,
+          requirements: memory.requirements,
+          askedQuestions: priorAsked,
+          clarificationAnswers: incomingAnswers,
+        },
         modification: command.modification,
       });
       const clarification = toClarificationOutput(agentResult.output, incomingAnswers);
@@ -716,20 +767,34 @@ async function refineRequirementsFromClarifications(
     );
     const existingPages = Array.isArray(memory.requirements?.pages) ? memory.requirements!.pages : [];
     const mergedPages = Array.from(new Set([...existingPages, ...refined.pages].filter((p) => typeof p === 'string' && p.trim())));
+
+    // Detect explicit backend/auth signals in the clarification answers. These
+    // must NEVER be silently downgraded by a re-run of requirementAnalysis
+    // (the "portfolio" semantic override historically did this).
+    const answersBlob = answerEntries.map(([, a]) => String(a)).join(' \n ').toLowerCase();
+    const backendSignals = /\b(admin\s*panel|dashboard|cms|login|sign[-\s]?in|sign[-\s]?up|auth|account|user\s+(account|profile|management)|database|postgres|sql|crud|api|endpoint|server|backend|payment|stripe|checkout|order|booking|reservation|submit\s+(a\s+)?form|contact\s+form|store\s+submissions?|save\s+to|persist|upload|chat|message|notification|role[-\s]?based)\b/.test(answersBlob);
+    const authSignals = /\b(login|sign[-\s]?in|sign[-\s]?up|auth|account|password|role[-\s]?based|admin|protected\s+route)\b/.test(answersBlob);
+
+    const prevBackend = Boolean(memory.requirements?.backend_required);
+    const prevAuth = Boolean(memory.requirements?.auth_required);
+    const refinedBackend = typeof refined.backend_required === 'boolean' ? refined.backend_required : prevBackend;
+    const refinedAuth = typeof refined.auth_required === 'boolean' ? refined.auth_required : prevAuth;
+
     setRequirements(memory, {
       userMessage: command.userMessage,
       website_type: refined.website_type || memory.requirements?.website_type || 'business',
       pages: mergedPages.length > 0 ? mergedPages : (existingPages.length > 0 ? existingPages : ['home']),
-      backend_required: typeof refined.backend_required === 'boolean' ? refined.backend_required : Boolean(memory.requirements?.backend_required),
-      auth_required: typeof refined.auth_required === 'boolean' ? refined.auth_required : Boolean(memory.requirements?.auth_required),
+      backend_required: refinedBackend || prevBackend || backendSignals,
+      auth_required: refinedAuth || prevAuth || authSignals,
       deployment_pref: refined.deployment_pref || memory.requirements?.deployment_pref || 'auto',
       notes: [memory.requirements?.notes, refined.notes].filter(Boolean).join(' ') || undefined,
     });
     appendHistory(memory, 'clarification', 'requirements_refined', 'Requirements refined from clarification answers', memory.requirements);
     await persistMemory(memory, options.persistence);
     options.adapter?.emit?.({ type: 'progress', stage: 'clarification', percent: options.percent || 16, message: 'requirements refined from clarifications' });
-  } catch {
+  } catch (err) {
     // Refinement is best-effort; downstream defensive fallback covers empty pages.
+    logError('orchestrator:refine-requirements-failed', { error: err instanceof Error ? err.message : String(err), projectId: memory.projectId });
   }
 }
 
@@ -852,16 +917,18 @@ function repairSystemDesign(memory: ProjectMemory, issues: ConsistencyIssue[]): 
   return repairs;
 }
 
-function repairUiSpec(memory: ProjectMemory, issues: ConsistencyIssue[]): string[] {
+function repairUiSpec(_memory: ProjectMemory, issues: ConsistencyIssue[]): string[] {
   const repairs: string[] = [];
-  // Symmetry hook: ui_spec stage's only current check is presence after systemDesign,
-  // which the agent itself handles. If future invariants land here, repair patterns
-  // for them go in this function. Keeping the shape identical to other repairers
-  // means new patterns can be plugged in without re-plumbing the call sites.
   for (const issue of issues) {
-    if (/UI spec is missing/i.test(issue.message) && memory.systemDesign && !memory.uiSpec) {
-      // Cannot synthesize a uiSpec deterministically here; fall through to throw.
-      continue;
+    // UI spec missing: cannot synthesize deterministically — surface as a hard failure
+    // rather than the misleading "no repair pattern matched" generic message.
+    if (/UI spec is missing/i.test(issue.message)) {
+      throw new Error(`ui_spec consistency failure: ${issue.message}. The UI spec agent must be re-run.`);
+    }
+    // System design page-coverage mismatches reported at this stage are already handled
+    // by repairSystemDesign on the previous stage boundary; they cannot be fixed here.
+    if (/missing page from requirements/i.test(issue.message)) {
+      repairs.push(`deferred page-coverage issue to upstream system_design repair: ${issue.message}`);
     }
   }
   return repairs;
@@ -877,11 +944,34 @@ function repairCode(memory: ProjectMemory, issues: ConsistencyIssue[]): string[]
     return base.replace(/\.[^./]+$/, '').replace(/[^a-zA-Z0-9]/g, '') || 'Component';
   };
 
+  // Normalize a component file path so "Foo.jsx" and "FooPage.jsx" / "FooSection.jsx"
+  // are treated as equivalent when checking whether a page already has coverage.
+  const normalizeComponentPath = (p: string) =>
+    p.replace(/\\/g, '/').replace(/^\/+/, '')
+     .replace(/src\/components\//, '')
+     .replace(/\.(jsx|tsx)$/, '')
+     .replace(/(Page|Section|View|Screen|Panel|Container|Layout|Wrapper)$/i, '')
+     .toLowerCase();
+
   for (const issue of issues) {
     const missingFile = /missing generated file for expected path:\s*(.+)$/i.exec(issue.message);
     if (missingFile) {
-      const path = missingFile[1].trim();
-      if (memory.code.files.some((f) => String(f.path).replace(/\\/g, '/').replace(/^\/+/, '') === path)) continue;
+      const filePath = missingFile[1].trim();
+      const normalizedMissing = normalizeComponentPath(filePath);
+
+      // Exact match — already generated.
+      if (memory.code.files.some((f) => String(f.path).replace(/\\/g, '/').replace(/^\/+/, '') === filePath)) continue;
+
+      // Fuzzy match — a variant like FooPage.jsx already covers Foo.jsx; skip the stub.
+      if (
+        filePath.startsWith('src/components/') &&
+        memory.code.files.some((f) => {
+          const fp = String(f.path).replace(/\\/g, '/').replace(/^\/+/, '');
+          return fp.startsWith('src/components/') && normalizeComponentPath(fp) === normalizedMissing;
+        })
+      ) continue;
+
+      const path = filePath;
 
       let content = '';
       if (path === 'src/App.jsx') {
@@ -932,6 +1022,68 @@ function assertConsistency(memory: ProjectMemory, command: OrchestrationCommand,
  * messages are the same strings produced by validateProjectConsistency, so we
  * have a single source of truth for what each pattern means.
  */
+/**
+ * LLM-assisted fallback for upstream triage. Only invoked when the rule-based
+ * classifier cannot map any issue to an upstream stage but issues remain —
+ * those would otherwise terminate the pipeline as a dead-end. The LLM is asked
+ * to pick the single upstream stage (ui_spec or system_design) most likely to
+ * unblock the run when re-entered with hints. Failures degrade silently to "no
+ * route" so a flaky proxy can never make routing worse than the deterministic
+ * baseline.
+ */
+async function llmTriageUpstreamFeedback(
+  issues: import('../contracts/orchestration').OrchestrationIssue[],
+  projectId: string,
+): Promise<{ targetStage: OrchestrationState | ''; issues: string[] }> {
+  const chain = getModelPriorityChain('orchestration');
+  const [primary, ...fallbacks] = chain;
+  if (!primary?.apiKey) return { targetStage: '', issues: [] };
+
+  const client = new LLMProxyClient({ apiKey: primary.apiKey, projectId, fallbacks });
+  const issueLines = issues
+    .map((i) => `- [${i.type}] ${String(i.message || '').slice(0, 240)}`)
+    .slice(0, 25)
+    .join('\n');
+
+  const system = [
+    'You triage blueprint-stage failures in a multi-agent code generation pipeline.',
+    'Decide which upstream stage to re-enter with hints. Allowed stages: "ui_spec", "system_design", or "" (none / not actionable upstream).',
+    'Respond with strict JSON: {"targetStage": "ui_spec"|"system_design"|"", "issues": string[]}.',
+    'Each entry in "issues" is a concrete hint the upstream agent can act on. If no upstream re-entry would help, return targetStage="" and issues=[].',
+  ].join(' ');
+  const user = `Blueprint-stage issues:\n${issueLines}\n\nReturn JSON only.`;
+
+  try {
+    const response = await client.chatCompletion(
+      [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      primary.model,
+      0.1,
+      0.9,
+      400,
+    );
+    const text = String(response?.choices?.[0]?.message?.content ?? response?.content ?? '').trim();
+    if (!text) return { targetStage: '', issues: [] };
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start < 0 || end <= start) return { targetStage: '', issues: [] };
+    const parsed = JSON.parse(text.slice(start, end + 1));
+    const target = parsed?.targetStage;
+    const hints = Array.isArray(parsed?.issues)
+      ? parsed.issues.map((s: unknown) => String(s)).filter((s: string) => s.trim().length > 0)
+      : [];
+    if ((target === 'ui_spec' || target === 'system_design') && hints.length > 0) {
+      return { targetStage: target, issues: hints };
+    }
+    return { targetStage: '', issues: [] };
+  } catch (err: any) {
+    logError('orchestrator:llm_triage_failed', { error: err?.message || String(err), projectId });
+    return { targetStage: '', issues: [] };
+  }
+}
+
 function extractUpstreamFeedback(issues: import('../contracts/orchestration').OrchestrationIssue[]): { targetStage: OrchestrationState | ''; issues: string[] } {
   const uiSpecHints: string[] = [];
   const systemDesignHints: string[] = [];
@@ -971,6 +1123,71 @@ function extractUpstreamFeedback(issues: import('../contracts/orchestration').Or
   if (uiSpecHints.length > 0) return { targetStage: 'ui_spec', issues: uiSpecHints };
   if (systemDesignHints.length > 0) return { targetStage: 'system_design', issues: systemDesignHints };
   return { targetStage: '', issues: [] };
+}
+
+/**
+ * Stage-scoped review + fix loop. Returns when approved or when the fix
+ * budget is exhausted; caller handles non-approval (typically regenerate).
+ *
+ * Fails safe: a null fixer result (LLM error or schema-invalid patch) ends
+ * the loop so the caller can fall back to regeneration. The fixer enforces
+ * the stage's schema, so a malformed patch can never reach memory.
+ */
+async function runStageReviewFixLoop(args: {
+  stage: import('../../agents/stageReviewer').ReviewableStage;
+  projectId: string;
+  memory: ProjectMemory;
+  getArtifact: () => unknown;
+  installFix: (patched: unknown) => void;
+  maxFixLoops?: number;
+}): Promise<{ approved: boolean; notes: string[]; hints: string[] }> {
+  const maxFixLoops = args.maxFixLoops ?? 2;
+  let fixLoops = 0;
+  while (true) {
+    const review = await reviewStage({
+      stage: args.stage,
+      projectId: args.projectId,
+      requirements: args.memory.requirements,
+      clarifications: args.memory.clarifications,
+      artifact: args.getArtifact(),
+    });
+    if (review.approved) return { approved: true, notes: [], hints: [] };
+    if (fixLoops >= maxFixLoops) return { approved: false, notes: review.notes, hints: review.hints };
+
+    const fixed = await fixStage({
+      stage: args.stage,
+      projectId: args.projectId,
+      artifact: args.getArtifact(),
+      notes: review.hints,
+      requirements: args.memory.requirements,
+      clarifications: args.memory.clarifications,
+    });
+    if (!fixed) return { approved: false, notes: review.notes, hints: review.hints };
+
+    args.installFix(fixed.artifact);
+    appendHistory(
+      args.memory,
+      args.stage,
+      'stage_fix_applied',
+      `fixer applied ${fixed.applied.length}, rejected ${fixed.rejected.length}`,
+      { applied: fixed.applied, rejected: fixed.rejected },
+    );
+
+    // Fixer pushed back on every note — re-reviewing produces the same notes,
+    // so accept the fixer's judgement and stop looping.
+    if (fixed.allRejected) {
+      appendHistory(
+        args.memory,
+        args.stage,
+        'stage_review_overridden',
+        `fixer rejected all ${fixed.rejected.length} note(s) as false positives — accepting`,
+        fixed.rejected,
+      );
+      return { approved: true, notes: [], hints: [] };
+    }
+
+    fixLoops += 1;
+  }
 }
 
 function invalidateDownstream(memory: ProjectMemory, fromStage: OrchestrationState): void {
@@ -1103,61 +1320,164 @@ export async function runAIOrchestration(
     const feedbackForSystemDesign =
       memory.pendingFeedback?.targetStage === 'system_design' ? memory.pendingFeedback.issues.slice() : [];
 
-    // 5. System design
-    // Use only the stable, user-provided fields as the hash input for system_design.
-    // projectSpec also contains memory.systemDesign/uiSpec/blueprint which are undefined
-    // on the first run but populated on resume — causing a permanent hash mismatch.
-    const systemDesignHashInput = { userMessage: command.userMessage, requirements: memory.requirements, clarifications: memory.clarifications };
-    const systemDesignResult = await stageWrap(memory, 'system_design', systemDesignHashInput, async () => {
-      // Always run the real systemDesignAgent so it can produce a rich component tree,
-      // proper styling choices, and page-specific sub-components from the actual requirements.
-      // For frontend-only projects we strip backend/database/auth after the fact rather than
-      // skipping the agent entirely — the old shortcut returned a hardcoded react-vite+css
-      // shell with components == pages, which starved the blueprint and UI-spec of the detail
-      // they need to generate real code.
-      const result = await systemDesignAgent({
-        projectId: command.projectId,
+    // 5. System design — generate → (review → fix)* → regenerate on fix failure.
+    const maxSystemDesignRegenLoops = 2;
+    const maxSystemDesignFixLoops = 2;
+    let systemDesignRegenLoops = 0;
+    let systemDesignResult: StageResult<unknown>;
+    while (true) {
+      // Use only the stable, user-provided fields as the hash input for system_design.
+      // projectSpec also contains memory.systemDesign/uiSpec/blueprint which are undefined
+      // on the first run but populated on resume — causing a permanent hash mismatch.
+      const systemDesignHashInput = {
+        userMessage: command.userMessage,
         requirements: memory.requirements,
-        projectSpec,
-        previousIssues: feedbackForSystemDesign,
-      });
-      // For frontend-only projects, zero out backend artifacts so downstream stages
-      // (blueprint, codeGen) never try to wire a server that won't exist.
-      if (isFrontendOnlyRequirements(memory.requirements) && result.output) {
-        (result.output as any).backend = null;
-        (result.output as any).database = null;
-        (result.output as any).auth = null;
-        if ((result.output as any).hosting) {
-          (result.output as any).hosting.backend = null;
+        clarifications: memory.clarifications,
+        feedback: feedbackForSystemDesign.slice(),
+      };
+      systemDesignResult = await stageWrap(memory, 'system_design', systemDesignHashInput, async () => {
+        const result = await systemDesignAgent({
+          projectId: command.projectId,
+          requirements: memory.requirements,
+          projectSpec,
+          previousIssues: feedbackForSystemDesign,
+        });
+        if (isFrontendOnlyRequirements(memory.requirements) && result.output) {
+          (result.output as any).backend = null;
+          (result.output as any).database = null;
+          (result.output as any).auth = null;
+          if ((result.output as any).hosting) {
+            (result.output as any).hosting.backend = null;
+          }
         }
+        setSystemDesign(memory, result.output);
+        assertConsistencyWithSelfHeal(memory, command, 'system_design', repairSystemDesign);
+        return result.output;
+      }, {
+        ...opts,
+        percent: 25,
+        onRetry: (_attempt, err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg) feedbackForSystemDesign.push(msg);
+        },
+      });
+
+      if (systemDesignResult.status !== 'success') break;
+
+      const reviewOutcome = await runStageReviewFixLoop({
+        stage: 'system_design',
+        projectId: command.projectId,
+        memory,
+        getArtifact: () => memory.systemDesign,
+        installFix: (patched) => setSystemDesign(memory, patched as any),
+        maxFixLoops: maxSystemDesignFixLoops,
+      });
+      if (reviewOutcome.approved) break;
+
+      if (systemDesignRegenLoops >= maxSystemDesignRegenLoops) {
+        appendHistory(
+          memory,
+          'system_design',
+          'stage_review_unresolved',
+          `proceeding with ${reviewOutcome.notes.length} unresolved reviewer note(s)`,
+          reviewOutcome.notes,
+        );
+        break;
       }
-      setSystemDesign(memory, result.output);
-      assertConsistencyWithSelfHeal(memory, command, 'system_design', repairSystemDesign);
-      return result.output;
-    }, { ...opts, percent: 25 });
+
+      appendHistory(
+        memory,
+        'system_design',
+        'stage_review_regenerate',
+        `${reviewOutcome.notes.length} note(s) after fix loop; regenerating system_design`,
+        reviewOutcome.notes,
+      );
+      for (const hint of reviewOutcome.hints) {
+        if (!feedbackForSystemDesign.includes(hint)) feedbackForSystemDesign.push(hint);
+      }
+      invalidateDownstream(memory, 'system_design');
+      memory.systemDesign = undefined;
+      systemDesignRegenLoops += 1;
+    }
 
     if (systemDesignResult.status !== 'success') return finalizeResult(memory, systemDesignResult, null, null);
 
-    // 6. UI spec
-    const uiSpecResult = await stageWrap(memory, 'ui_spec', memory.systemDesign, async () => {
-      const result = await uiSpecAgent({
-        projectId: command.projectId,
-        requirements: memory.requirements,
-        systemDesign: memory.systemDesign,
-        projectSpec,
-        previousIssues: feedbackForUiSpec,
-        globalState: {
-          activeState: memory.currentState,
+    // 6. UI spec — generate → (review → fix)* → regenerate on fix failure.
+    // On both caps exhausted, the existing blueprint-feedback loop is the
+    // safety net.
+    const maxUiSpecRegenLoops = 2;
+    const maxUiSpecFixLoops = 2;
+    let uiSpecRegenLoops = 0;
+    let uiSpecResult: StageResult<unknown>;
+    while (true) {
+      // Vary the stageWrap input hash by feedback length so the checkpoint
+      // cache does not short-circuit a forced re-run with new hints.
+      const uiSpecHashInput = { systemDesign: memory.systemDesign, feedback: feedbackForUiSpec.slice() };
+      uiSpecResult = await stageWrap(memory, 'ui_spec', uiSpecHashInput, async () => {
+        const result = await uiSpecAgent({
+          projectId: command.projectId,
+          requirements: memory.requirements,
+          systemDesign: memory.systemDesign,
           projectSpec,
-          consistencyScore: memory.uiSpec?.structuredSpec ? 1 : 0,
-          domain: 'ui_spec',
-          transitions: [],
+          previousIssues: feedbackForUiSpec,
+          globalState: {
+            activeState: memory.currentState,
+            projectSpec,
+            consistencyScore: memory.uiSpec?.structuredSpec ? 1 : 0,
+            domain: 'ui_spec',
+            transitions: [],
+          },
+        });
+        setUISpec(memory, { uiSpec: result.output, structuredSpec: result.output });
+        assertConsistencyWithSelfHeal(memory, command, 'ui_spec', repairUiSpec);
+        return result.output;
+      }, {
+        ...opts,
+        percent: 35,
+        onRetry: (_attempt, err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg) feedbackForUiSpec.push(msg);
         },
       });
-      setUISpec(memory, { uiSpec: result.output, structuredSpec: result.output });
-      assertConsistencyWithSelfHeal(memory, command, 'ui_spec', repairUiSpec);
-      return result.output;
-    }, { ...opts, percent: 35 });
+
+      if (uiSpecResult.status !== 'success') break;
+
+      const reviewOutcome = await runStageReviewFixLoop({
+        stage: 'ui_spec',
+        projectId: command.projectId,
+        memory,
+        getArtifact: () => memory.uiSpec?.structuredSpec,
+        installFix: (patched) => setUISpec(memory, { uiSpec: patched, structuredSpec: patched }),
+        maxFixLoops: maxUiSpecFixLoops,
+      });
+      if (reviewOutcome.approved) break;
+
+      if (uiSpecRegenLoops >= maxUiSpecRegenLoops) {
+        appendHistory(
+          memory,
+          'ui_spec',
+          'stage_review_unresolved',
+          `proceeding with ${reviewOutcome.notes.length} unresolved reviewer note(s)`,
+          reviewOutcome.notes,
+        );
+        break;
+      }
+
+      // Fix loop exhausted without approval — regenerate from scratch with hints.
+      appendHistory(
+        memory,
+        'ui_spec',
+        'stage_review_regenerate',
+        `${reviewOutcome.notes.length} note(s) after fix loop; regenerating ui_spec`,
+        reviewOutcome.notes,
+      );
+      for (const hint of reviewOutcome.hints) {
+        if (!feedbackForUiSpec.includes(hint)) feedbackForUiSpec.push(hint);
+      }
+      invalidateDownstream(memory, 'ui_spec');
+      memory.uiSpec = undefined;
+      uiSpecRegenLoops += 1;
+    }
 
     if (uiSpecResult.status !== 'success') return finalizeResult(memory, uiSpecResult, null, null);
 
@@ -1178,17 +1498,64 @@ export async function runAIOrchestration(
 
     lastBlueprintResult = blueprintResult;
 
+    // Track whether we're routing because of review rejection (synthetic issues
+    // tuned for LLM triage) vs blueprint-generation failure (real issues with
+    // patterns the deterministic classifier can match). Lets us skip the rule
+    // pass when we already know it won't match.
+    let routingFromReview = false;
+    let reviewIssues: import('../contracts/orchestration').OrchestrationIssue[] = [];
+
     if (blueprintResult.status === 'success') {
-      // Feedback consumed successfully; clear it so subsequent stages don't see stale hints.
-      memory.pendingFeedback = undefined;
-      designResolved = true;
-      break;
+      // Stage-scoped review + fix pass on the blueprint before accepting it.
+      const reviewOutcome = await runStageReviewFixLoop({
+        stage: 'blueprint',
+        projectId: command.projectId,
+        memory,
+        getArtifact: () => memory.blueprint?.blueprint,
+        installFix: (patched) => setBlueprint(memory, { blueprint: patched }),
+        maxFixLoops: 2,
+      });
+
+      if (reviewOutcome.approved) {
+        memory.pendingFeedback = undefined;
+        designResolved = true;
+        break;
+      }
+
+      // Fix loop exhausted — route upstream via llmTriageUpstreamFeedback.
+      // The deterministic extractUpstreamFeedback uses regex patterns tuned for
+      // blueprint-generation error messages; reviewer notes are written in
+      // different language and won't match, so skip it and save the call.
+      routingFromReview = true;
+      reviewIssues = reviewOutcome.hints.map((hint, idx) => ({
+        id: `blueprint_review_${designLoop}_${idx}`,
+        projectId: memory.projectId,
+        sessionId: memory.sessionId,
+        stage: 'blueprint' as OrchestrationState,
+        type: 'semantic_inconsistency' as const,
+        severity: 'medium' as const,
+        message: hint,
+        recoverable: true,
+      }));
+      appendHistory(
+        memory,
+        'blueprint',
+        'stage_review_rejected',
+        `${reviewOutcome.notes.length} unresolved blueprint note(s); routing upstream`,
+        reviewOutcome.notes,
+      );
     }
 
-    // Blueprint failed. Decide whether the failure points upstream (vocabulary or
-    // structural divergence the upstream agent could plausibly fix on rerun) or
-    // is a genuine dead-end.
-    const upstreamHints = extractUpstreamFeedback(blueprintResult.issues);
+    // Decide which upstream stage to re-enter:
+    //  - blueprint-generation failure: try deterministic rules first, fall back to LLM triage.
+    //  - blueprint-review rejection:   skip rules (won't match reviewer prose), go straight to LLM triage.
+    const issuesForTriage = routingFromReview ? reviewIssues : blueprintResult.issues;
+    let upstreamHints = routingFromReview
+      ? { targetStage: '' as OrchestrationState | '', issues: [] as string[] }
+      : extractUpstreamFeedback(blueprintResult.issues);
+    if (!upstreamHints.targetStage && issuesForTriage.length > 0) {
+      upstreamHints = await llmTriageUpstreamFeedback(issuesForTriage, memory.projectId);
+    }
     const canFeedback = designLoop < maxDesignFeedbackLoops && upstreamHints.targetStage && upstreamHints.issues.length > 0;
     if (!canFeedback) {
       return finalizeResult(memory, blueprintResult, null, null);
@@ -1319,11 +1686,15 @@ export async function runAIOrchestration(
       workspaceDir: materializedRevision.workspaceDir,
       projectId: command.projectId,
       deadlineAt: testDeadlineAt,
+      blueprint: memory.blueprint?.blueprint,
       fixFn: async (logs: string) => {
         await selfHealWithCodeGeneration(memory, command, projectSpec, logs, command.projectId, testDeadlineAt);
         // Write healed files to disk so testFixAgent's fingerprint check detects a real change.
         const healedFiles = memory.code?.files ?? [];
         await Promise.all(healedFiles.map((f) => writeGeneratedFile(materializedRevision.workspaceDir, f).catch(() => {})));
+        // Return healed files so testFixAgent can update its internal reference and
+        // re-scan imports when applying pre-build fixes (package.json dep detection).
+        return healedFiles;
       },
       emitInfo: (message: string) => adapter.emit?.({ type: 'info', stage: 'testing', message }),
     });

@@ -3,12 +3,23 @@
 import { config } from '../config/env';
 import { enforceBudgetOrThrow } from '../utils/tokenBudget';
 
+export interface ModelFallback {
+  model: string;
+  apiKey: string;
+}
+
 export interface LLMProxyOptions {
   apiKey: string;
   chatUrl?: string;
   embeddingUrl?: string;
   /** Phase 3 budget controller context (optional). */
   projectId?: string;
+  /**
+   * Ordered fallback chain of {model, apiKey} pairs from modelRouter.getModelPriorityChain().
+   * Each entry carries its own API key so the proxy receives the correct auth per model.
+   * When provided, these replace the hardcoded model fallback list inside chatCompletion.
+   */
+  fallbacks?: ModelFallback[];
 }
 
 export class LLMProxyClient {
@@ -16,13 +27,18 @@ export class LLMProxyClient {
   private chatUrls: string[];
   private embeddingUrls: string[];
   private projectId?: string;
+  private fallbacks: ModelFallback[];
 
   constructor(options: LLMProxyOptions) {
     this.apiKey = options.apiKey;
     this.chatUrls = this.buildUrlCandidates(options.chatUrl, config.LLM_PROXY_CHAT_URL);
     this.embeddingUrls = this.buildUrlCandidates(options.embeddingUrl, config.LLM_PROXY_EMBEDDING_URL);
     this.projectId = options.projectId;
-    this.log('LLMProxyClient initialized', { apiKey: !!this.apiKey, projectId: this.projectId, chatUrls: this.chatUrls, embeddingUrls: this.embeddingUrls });
+    this.fallbacks = options.fallbacks ?? [];
+    if (!options.projectId) {
+      this.log('LLMProxyClient WARNING: projectId not set — per-project token budget guard is disabled for this client instance');
+    }
+    this.log('LLMProxyClient initialized', { apiKey: !!this.apiKey, projectId: this.projectId, chatUrls: this.chatUrls, embeddingUrls: this.embeddingUrls, fallbackCount: this.fallbacks.length });
   }
 
   private log(message: string, data?: any) {
@@ -42,21 +58,59 @@ export class LLMProxyClient {
     await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  private buildModelCandidates(primaryModel: string): string[] {
-    const candidates = [
-      primaryModel,
-      config.GPT4O_MINI_MODEL,
-      config.GPT4O_MODEL,
-      config.GPT5_MINI_MODEL,
-      config.GPT5_2_MODEL,
-    ].filter((m): m is string => typeof m === 'string' && m.trim().length > 0);
+  /**
+   * Compute backoff delay for a retryable HTTP error.
+   * Honors the proxy's Retry-After header (seconds or HTTP-date) when present;
+   * otherwise uses exponential backoff with jitter. Capped at 30s so a single
+   * stuck attempt cannot stall the whole pipeline.
+   */
+  private computeRetryDelayMs(response: Response, attempt: number): number {
+    const cap = 30_000;
+    const retryAfter = response.headers.get('retry-after');
+    if (retryAfter) {
+      const asSeconds = Number(retryAfter);
+      if (Number.isFinite(asSeconds) && asSeconds >= 0) {
+        return Math.min(cap, Math.ceil(asSeconds * 1000));
+      }
+      const asDate = Date.parse(retryAfter);
+      if (!Number.isNaN(asDate)) {
+        const diff = asDate - Date.now();
+        if (diff > 0) return Math.min(cap, diff);
+      }
+    }
+    const base = 1000 * Math.pow(2, attempt);
+    const jitter = Math.floor(Math.random() * 500);
+    return Math.min(cap, base + jitter);
+  }
 
+  /**
+   * Returns the ordered {model, apiKey} chain to attempt for a chatCompletion call.
+   * If fallbacks were provided via the constructor (from modelRouter.getModelPriorityChain),
+   * those are used — each with their own correct API key.
+   * Otherwise falls back to just the primary model+key so behaviour is unchanged for
+   * callers that haven't adopted the new priority-chain API yet.
+   */
+  private buildModelChain(primaryModel: string): ModelFallback[] {
     const seen = new Set<string>();
-    return candidates.filter((m) => {
-      if (seen.has(m)) return false;
-      seen.add(m);
-      return true;
-    });
+    const chain: ModelFallback[] = [];
+
+    // Always try the primary model + its key first
+    if (primaryModel && this.apiKey && this.apiKey.trim().length >= 3) {
+      seen.add(primaryModel);
+      chain.push({ model: primaryModel, apiKey: this.apiKey });
+    }
+
+    // Append fallbacks (rest of priority chain) deduped
+    for (const f of this.fallbacks) {
+      if (!f.model || !f.apiKey || f.apiKey.trim().length < 3) continue;
+      if (seen.has(f.model)) continue;
+      seen.add(f.model);
+      chain.push(f);
+    }
+
+    // Guarantee at least one entry so callers can always check chain[0]
+    if (chain.length === 0) chain.push({ model: primaryModel, apiKey: this.apiKey });
+    return chain;
   }
 
   private isModelNotFoundError(err: any): boolean {
@@ -137,8 +191,10 @@ export class LLMProxyClient {
 
   async chatCompletion(messages: any[], model: string, temperature = 0.8, top_p = 0.9, max_tokens = 1000, timeoutMs?: number): Promise<any> {
     const selectedModel = model || 'gpt-4o-mini';
-    if (!this.apiKey || this.apiKey.trim().length < 3) {
-      this.log('chatCompletion called without valid API key', { model: selectedModel, apiKeyLength: this.apiKey?.length || 0 });
+
+    const modelChain = this.buildModelChain(selectedModel);
+    if (modelChain.length === 0 || !modelChain[0].apiKey || modelChain[0].apiKey.trim().length < 3) {
+      this.log('chatCompletion called without valid API key', { model: selectedModel });
       throw new Error(`LLM Proxy chatCompletion failed: No valid API key configured for model "${selectedModel}". Check your environment variables for API_KEY settings.`);
     }
 
@@ -151,14 +207,13 @@ export class LLMProxyClient {
     const defaultTimeout = Math.min(420_000, Math.max(45_000, estimatedWorkMs));
     const requestTimeoutMs = timeoutMs ?? defaultTimeout;
 
-    const modelCandidates = this.buildModelCandidates(selectedModel);
     if (this.chatUrls.length === 0) {
       throw new Error('LLM Proxy chatCompletion failed: No chat URL configured. Set LLM_PROXY_CHAT_URL or pass chatUrl to LLMProxyClient.');
     }
     const urlCandidates = this.chatUrls;
     this.log('chatCompletion called', {
       model: selectedModel,
-      modelCandidates,
+      modelChain: modelChain.map((c) => c.model),
       urlCandidates,
       messageCount: messages.length,
       temperature,
@@ -169,21 +224,32 @@ export class LLMProxyClient {
 
     let lastError: any;
     for (const chatUrl of urlCandidates) {
-      for (let i = 0; i < modelCandidates.length; i += 1) {
-        const modelCandidate = modelCandidates[i];
+      for (let i = 0; i < modelChain.length; i += 1) {
+        const { model: modelCandidate, apiKey: candidateApiKey } = modelChain[i];
         for (let attempt = 0; attempt < 3; attempt += 1) {
           try {
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
 
-            const requestPayload = { model: modelCandidate, messages, temperature, top_p, max_tokens };
+            const normalizedMessages = Array.isArray(messages) ? messages : [];
+            const hasUserOrAssistant = normalizedMessages.some(
+              (m: any) =>
+                (m?.role === 'user' || m?.role === 'assistant') &&
+                typeof m?.content === 'string' &&
+                m.content.trim().length > 0,
+            );
+            const safeMessages = hasUserOrAssistant
+              ? normalizedMessages
+              : [{ role: 'user', content: ' ' }, ...normalizedMessages];
+
+            const requestPayload = { model: modelCandidate, messages: safeMessages, temperature, top_p, max_tokens };
             this.log('chatCompletion making request', {
               attempt: attempt + 1,
               modelCandidate,
               selectedModel,
               chatUrl,
               messageCount: messages.length,
-              apiKeyLength: this.apiKey?.length || 0,
+              apiKeyLength: candidateApiKey?.length || 0,
               timeoutMs: requestTimeoutMs,
             });
 
@@ -192,8 +258,8 @@ export class LLMProxyClient {
               headers: {
                 'Content-Type': 'application/json',
                 Accept: 'application/json',
-                Authorization: `Bearer ${this.apiKey}`,
-                'X-API-KEY': this.apiKey,
+                Authorization: `Bearer ${candidateApiKey}`,
+                'X-API-KEY': candidateApiKey,
               },
               body: JSON.stringify(requestPayload),
               signal: controller.signal,
@@ -221,7 +287,7 @@ export class LLMProxyClient {
                 // broken for this model right now). Break immediately to try the next model.
                 if (isHtmlResponse) break;
                 if (attempt < 2) {
-                  await this.sleep(750 * (attempt + 1));
+                  await this.sleep(this.computeRetryDelayMs(response, attempt));
                   continue;
                 }
                 break;
@@ -233,7 +299,16 @@ export class LLMProxyClient {
             if (!response.ok) {
               this.log('chatCompletion error', { status: response.status, model: modelCandidate, chatUrl, data });
               if (this.shouldRetryStatus(response.status) && attempt < 2) {
-                await this.sleep(750 * (attempt + 1));
+                const delay = this.computeRetryDelayMs(response, attempt);
+                this.log('chatCompletion retrying after retryable status', {
+                  status: response.status,
+                  retryAfter: response.headers.get('retry-after'),
+                  attempt,
+                  delay,
+                  modelCandidate,
+                  chatUrl,
+                });
+                await this.sleep(delay);
                 continue;
               }
               throw new Error(this.formatHttpError('chatCompletion', response.status, response.statusText, data?.error?.message || data?.message || JSON.stringify(data).slice(0, 240)));
@@ -262,10 +337,10 @@ export class LLMProxyClient {
               await this.sleep(delay);
               continue;
             }
-            if (this.isModelNotFoundError(err) && i < modelCandidates.length - 1) {
+            if (this.isModelNotFoundError(err) && i < modelChain.length - 1) {
               this.log('chatCompletion retrying with next model candidate', {
                 failedModel: modelCandidate,
-                nextModel: modelCandidates[i + 1],
+                nextModel: modelChain[i + 1].model,
                 chatUrl,
                 reason: err?.message,
               });
@@ -281,8 +356,8 @@ export class LLMProxyClient {
     throw lastError || new Error('LLM Proxy chatCompletion failed without an explicit error.');
   }
 
-  async embedding(texts: string[], dimensions = 746): Promise<number[][]> {
-    this.log('embedding called', { texts, dimensions });
+  async embedding(texts: string[], dimensions = 746, model?: string): Promise<number[][]> {
+    this.log('embedding called', { texts, dimensions, model });
     let lastError: any;
 
     if (this.embeddingUrls.length === 0) {
@@ -299,7 +374,7 @@ export class LLMProxyClient {
             Authorization: `Bearer ${this.apiKey}`,
             'X-API-KEY': this.apiKey,
           },
-          body: JSON.stringify({ texts, dimensions }),
+          body: JSON.stringify({ texts, dimensions, ...(model ? { model } : {}) }),
         });
         const raw = await response.text();
         let data: any;

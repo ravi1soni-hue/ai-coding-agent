@@ -1,12 +1,13 @@
 import path from 'path';
 import ts from 'typescript';
-import { getModelConfigForTask } from './modelRouter';
+import { getModelPriorityChain } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { debug, error as logError, warn as logWarn } from '../utils/logger';
 import { assertBlueprintIntegrationSafety, blueprintMissingFiles, validateProjectBlueprint, type ProjectBlueprint } from './blueprintContract';
 import { validateStructuredSpec, type StructuredSpec } from './structuredSpec';
 import { reviewerAgent } from './reviewerAgent';
 import { parseJsonResponse, type TokenBudget, normalizeBudget } from './llmUtils';
+import { AgentState } from './agentStates';
 
 type GeneratedFile = { path: string; content: string };
 
@@ -62,8 +63,16 @@ const FRONTEND_ALLOWED_PREFIXES = [
   'src/assets/',
   'src/styles/',
   'src/features/',
+  'src/config/',
+  'src/data/',
+  'src/theme/',
+  'src/animations/',
+  'src/providers/',
+  'src/api/',
+  'src/helpers/',
+  'src/sections/',
 ];
-const BACKEND_REQUIRED = new Set(['backend/package.json', 'backend/src/index.ts', 'backend/src/db/database.ts', 'backend/db/init.sql']);
+const BACKEND_REQUIRED = new Set(['backend/package.json', 'backend/tsconfig.json', 'backend/src/index.ts', 'backend/src/db/database.ts', 'backend/db/init.sql']);
 const BACKEND_ALLOWED_PREFIXES = [
   'backend/src/routes/',
   'backend/src/middleware/',
@@ -253,17 +262,31 @@ function isProbablyTruncatedGeneratedFile(filePath: string, content: string): bo
 }
 
 function containsPlaceholderText(value: string): boolean {
-  // "\breplace\b" was intentionally removed: it matches legitimate content (CSS replace(),
-  // natural-language sentences) and caused false rejections that silently produced stubs.
-  // "placeholder" must NOT match the standard HTML attribute (placeholder="...") — that pattern
-  // caused every component with an <input> or <textarea> to fail validation and become a stub.
-  // Only flag it when it reads like stub prose: as a comment keyword, JSX text, or in patterns
-  // like "placeholder text" / "placeholder content" / "placeholder data".
-  if (/\bTODO\b|\bgeneric text\b/i.test(value)) return true;
-  // Strip all HTML/JSX attribute assignments before scanning for the word "placeholder" so that
-  // legitimate `placeholder="..."` and `placeholder={...}` attribute pairs are ignored.
-  const withoutAttributes = value.replace(/\bplaceholder\s*=\s*(?:"[^"]*"|'[^']*'|`[^`]*`|\{[^}]*\})/gi, '');
-  return /\bplaceholder\b/i.test(withoutAttributes);
+  // Only flag content that is clearly an unfilled stub — not legitimate code that happens
+  // to contain related words. False positives here silently produce empty stub components.
+  //
+  // Rejected patterns (explicitly stub-like):
+  //   - TODO comment/annotation
+  //   - "placeholder text" / "placeholder content" / "placeholder data" as prose
+  //   - "generic text" as literal copy
+  //
+  // NOT rejected:
+  //   - placeholder="..." HTML/JSX attribute (stripped before check)
+  //   - placeholder={...} JSX expression attribute
+  //   - PascalCase component names containing "Placeholder" (e.g. PlaceholderAvatar)
+  //   - CSS/JS identifiers like `placeholderColor`, `--placeholder-color`
+  //   - Any word that merely contains "placeholder" as a substring in code context
+  if (/\bTODO\b/.test(value)) return true;
+  if (/\bgeneric text\b/i.test(value)) return true;
+  // Strip HTML/JSX attribute assignments and PascalCase/camelCase identifiers so only
+  // plain prose occurrences of "placeholder" remain.
+  const stripped = value
+    .replace(/\bplaceholder\s*=\s*(?:"[^"]*"|'[^']*'|`[^`]*`|\{[^}]*\})/gi, '') // placeholder="..." / placeholder={...}
+    .replace(/\b[A-Z][a-zA-Z]*[Pp]laceholder[a-zA-Z]*/g, '')                      // PascalCase: PlaceholderAvatar
+    .replace(/\b[a-z][a-zA-Z]*[Pp]laceholder[a-zA-Z]*/g, '')                      // camelCase: placeholderColor
+    .replace(/--[a-z-]*placeholder[a-z-]*/g, '');                                  // CSS custom props: --placeholder-color
+  // Only flag "placeholder" as a standalone prose word followed by a noun — unambiguously stub copy.
+  return /\bplaceholder\s+(?:text|content|data|image|value|name|title|description)\b/i.test(stripped);
 }
 
 function validateGeneratedFile(file: unknown, expectedPath: string | undefined, scope: 'frontend' | 'backend', label: string): GeneratedFile {
@@ -321,6 +344,45 @@ function validateGeneratedFile(file: unknown, expectedPath: string | undefined, 
     const diagnostics = transpile.diagnostics || [];
     if (diagnostics.some((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error)) {
       throw new Error(`${label}: generated ${filePath} contains syntax or parse errors`);
+    }
+
+    // ts.transpileModule misses two LLM-specific patterns that esbuild rejects at build:
+    //   1. Bare English sentences inside a function body (no `//` prefix).
+    //   2. Single/double-quoted CSS strings split across lines (unterminated literal).
+    // Catch them here so we retry at generation time, not after a wasted build cycle.
+    const lines = content.split('\n');
+    for (let li = 0; li < lines.length; li++) {
+      const trimmed = lines[li].trim();
+      if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('*')) continue;
+      // Bare-prose detector: starts with capital letter, ends in '.', no JS syntax tokens,
+      // ≥3 alphabetic words. Mirrors fixBareProseComments in testFixAgent.
+      if (
+        /^[A-Z]/.test(trimmed) &&
+        trimmed.endsWith('.') &&
+        !/[=(){};:<>\[\]+*&|?!`]/.test(trimmed) &&
+        (trimmed.match(/[A-Za-z]+/g) || []).length >= 3
+      ) {
+        throw new Error(`${label}: generated ${filePath} contains a bare English sentence at line ${li + 1} (LLM forgot the // prefix): "${trimmed.slice(0, 80)}"`);
+      }
+    }
+    // Unterminated-string detector: scan line-by-line for unbalanced single/double quotes
+    // (template literals with backticks are legal multi-line, so ignored).
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li];
+      let inDouble = false;
+      let inSingle = false;
+      let inBacktick = false;
+      for (let ci = 0; ci < line.length; ci++) {
+        const ch = line[ci];
+        if (ch === '\\') { ci++; continue; }
+        if (ch === '`' && !inDouble && !inSingle) inBacktick = !inBacktick;
+        else if (inBacktick) continue;
+        else if (ch === '"' && !inSingle) inDouble = !inDouble;
+        else if (ch === "'" && !inDouble) inSingle = !inSingle;
+      }
+      if (inDouble || inSingle) {
+        throw new Error(`${label}: generated ${filePath} has an unterminated string literal at line ${li + 1} (likely a CSS value split across lines): "${line.trim().slice(0, 80)}"`);
+      }
     }
 
     // ts.transpileModule suppresses duplicate-identifier errors that esbuild catches at build time.
@@ -423,40 +485,36 @@ function fallbackFrontendManifest(requirements: any, uiSpec?: any): FrontendMani
 }
 
 // Returns components that should be rendered directly in App.jsx (root-level only).
-// Uses compositionOrder from uiSpec when available; otherwise infers from import analysis.
-function filterRootComponents(components: GeneratedFile[], compositionOrder?: string[]): GeneratedFile[] {
+// Priority: (1) compositionOrder from uiSpec, (2) last 40% of generationOrder (page-level roots),
+// (3) all components as fallback.
+// The old sibling-import heuristic is removed — with dependency-ordered parallel generation,
+// leaf components don't import siblings, so the heuristic misclassified everything as a root.
+function filterRootComponents(components: GeneratedFile[], compositionOrder?: string[], uiGenOrder?: string[]): GeneratedFile[] {
   const nameOf = (f: GeneratedFile) => sanitizeIdentifier(path.basename(f.path, '.jsx'), 'GeneratedSection');
+
   if (compositionOrder && compositionOrder.length > 0) {
-    // Normalize to lowercase so "PricingSection" matches "pricingsection" file basename variants
     const orderLower = compositionOrder.map((n) => n.toLowerCase());
     const ordered = components
       .filter((f) => orderLower.includes(nameOf(f).toLowerCase()))
-      .sort((a, b) => {
-        const ai = orderLower.indexOf(nameOf(a).toLowerCase());
-        const bi = orderLower.indexOf(nameOf(b).toLowerCase());
-        return ai - bi;
-      });
+      .sort((a, b) => orderLower.indexOf(nameOf(a).toLowerCase()) - orderLower.indexOf(nameOf(b).toLowerCase()));
     if (ordered.length > 0) return ordered;
   }
-  // Heuristic: a component is a child if it is imported or used as JSX tag in any sibling.
-  const childNames = new Set<string>();
-  for (const file of components) {
-    for (const other of components) {
-      if (other === file) continue;
-      const n = nameOf(other);
-      if (file.content.includes(`import ${n}`) || file.content.includes(`<${n}`)) {
-        childNames.add(n);
-      }
-    }
+
+  // uiSpec generationOrder is leaf-first (children before parents).
+  // The last 40% of the order are page-level compositors — those are the roots App.jsx renders.
+  if (uiGenOrder && uiGenOrder.length > 0) {
+    const cutoff = Math.floor(uiGenOrder.length * 0.6);
+    const rootNames = new Set(uiGenOrder.slice(cutoff).map((n) => n.toLowerCase()));
+    const roots = components.filter((f) => rootNames.has(nameOf(f).toLowerCase()));
+    if (roots.length > 0) return roots;
   }
-  const roots = components.filter((f) => !childNames.has(nameOf(f)));
-  return roots.length > 0 ? roots : components;
+
+  return components;
 }
 
 function fallbackFrontendApp(_manifest: FrontendManifest, components: GeneratedFile[], hasBackend = false, compositionOrder?: string[]): GeneratedFile {
   const rootComponents = filterRootComponents(components, compositionOrder);
   const imports = components.map((file) => `import ${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} from './${file.path.replace(/^src\//, '')}';`).join('\n');
-  const componentTags = rootComponents.map((file) => `        <${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} />`).join('\n');
   const apiInit = hasBackend ? `
   const API_BASE = window.__ENV__?.API_URL || import.meta.env.VITE_API_URL || 'http://localhost:3000';
   const PROJECT_ID = window.__ENV__?.PROJECT_ID || import.meta.env.VITE_PROJECT_ID || '';
@@ -473,16 +531,33 @@ function fallbackFrontendApp(_manifest: FrontendManifest, components: GeneratedF
   const apiStatus = hasBackend ? `
   {!apiReady && <div className="warning">Backend not connected. Using offline mode.</div>}` : '';
 
+  const wrappedTags = rootComponents
+    .map((file) => {
+      const name = sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection');
+      return `        <ErrorBoundary name="${name}"><${name} /></ErrorBoundary>`;
+    })
+    .join('\n');
+
   return {
     path: 'src/App.jsx',
     content: `import React from 'react';
 ${imports}
 
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(e) { return { error: e }; }
+  componentDidCatch(e, info) { console.error('[ErrorBoundary] ' + this.props.name + ':', e.message, info.componentStack); }
+  render() {
+    if (this.state.error) return <div style={{padding:'16px',background:'#fee2e2',color:'#991b1b',borderRadius:'8px',margin:'8px'}}>[{this.props.name}] {this.state.error.message}</div>;
+    return this.props.children;
+  }
+}
+
 export default function App() {
 ${apiInit}
   return (
     <main className="app-shell">
-${componentTags || '        <div className="content-grid" />'}
+${wrappedTags || '        <div className="content-grid" />'}
 ${apiStatus}
     </main>
   );
@@ -703,7 +778,7 @@ function sanitizeComponentName(rawName: string, index: number): string {
 }
 
 function frontendScaffold(manifest: FrontendManifest): GeneratedFile[] {
-  const dependencies = { react: '^18.3.1', 'react-dom': '^18.3.1', ...(manifest.dependencies || {}) };
+  const dependencies = { react: '^18.3.1', 'react-dom': '^18.3.1', 'prop-types': '^15.8.1', ...(manifest.dependencies || {}) };
   delete (dependencies as Record<string, string>).vite;
   delete (dependencies as Record<string, string>)['@vitejs/plugin-react'];
   return [
@@ -755,7 +830,7 @@ function backendScaffold(): GeneratedFile[] {
     private: true,
     type: 'module',
     scripts: {
-      dev: 'ts-node src/index.ts',
+      dev: 'tsx src/index.ts',
       build: 'tsc',
       start: 'node dist/index.js',
     },
@@ -766,7 +841,7 @@ function backendScaffold(): GeneratedFile[] {
       dotenv: '^17.4.2',
     },
     devDependencies: {
-      'ts-node': '^10.9.2',
+      tsx: '^4.7.0',
       typescript: '^5.4.0',
       '@types/express': '^5.0.0',
       '@types/node': '^22.0.0',
@@ -774,10 +849,28 @@ function backendScaffold(): GeneratedFile[] {
     },
   };
 
+  const tsconfig = {
+    compilerOptions: {
+      target: 'ES2022',
+      module: 'Node16',
+      moduleResolution: 'Node16',
+      outDir: 'dist',
+      rootDir: 'src',
+      strict: true,
+      esModuleInterop: true,
+      skipLibCheck: true,
+    },
+    include: ['src/**/*'],
+  };
+
   return [
     {
       path: 'backend/package.json',
       content: JSON.stringify(packageJson, null, 2),
+    },
+    {
+      path: 'backend/tsconfig.json',
+      content: JSON.stringify(tsconfig, null, 2),
     },
     {
       path: 'backend/src/db/database.ts',
@@ -804,10 +897,10 @@ export function query<T = unknown>(sql: string, params: unknown[] = []): Promise
       content: `import dotenv from 'dotenv';
 import express from 'express';
 import cors from 'cors';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync, existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { query } from './db/database.ts';
+import { query } from './db/database.js';
 
 dotenv.config();
 
@@ -828,6 +921,24 @@ async function initDb() {
   }
 }
 
+async function registerRoutes() {
+  // Auto-register all route files from the routes directory.
+  // Route files export a default Express Router; the filename sets the /api/<name> path.
+  const routesDir = path.join(__dirname, 'routes');
+  if (!existsSync(routesDir)) return;
+  const files = readdirSync(routesDir).filter(f => f.endsWith('.js'));
+  for (const file of files) {
+    try {
+      const routePath = \`/api/\${path.basename(file, '.js')}\`;
+      const mod = await import(new URL(\`./routes/\${file}\`, import.meta.url).href);
+      app.use(routePath, mod.default);
+      console.log(\`[routes] registered \${routePath}\`);
+    } catch (err) {
+      console.warn(\`[routes] failed to load \${file}:\`, err instanceof Error ? err.message : String(err));
+    }
+  }
+}
+
 app.get('/api/health', async (_req, res) => {
   try {
     await query('SELECT 1');
@@ -841,7 +952,13 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
   res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
 });
 
-initDb().then(() => app.listen(port, () => console.log(\`Backend on port \${port}\`)));
+async function start() {
+  await initDb();
+  await registerRoutes();
+  app.listen(port, () => console.log(\`Backend on port \${port}\`));
+}
+
+start().catch((err) => { console.error('Startup error:', err); process.exit(1); });
 `,
     },
     {
@@ -949,7 +1066,7 @@ ${updateFields.map((f) => `    const ${f} = req.body?.${f};`).join('\n')}
     path: routeFile,
     content: `import express from 'express';
 import { randomUUID } from 'crypto';
-import { query } from '../db/database.ts';
+import { query } from '../db/database.js';
 
 const router = express.Router();
 
@@ -984,7 +1101,7 @@ RULES:
 - For GET: ORDER BY created_at DESC LIMIT 100
 - For PUT/PATCH: WHERE id = $1 AND project_id = $N, return 404 if not found
 - For DELETE: WHERE id = $1 AND project_id = $2, return 404 if not found
-- Import { query } from '../db/database.ts'
+- Import { query } from '../db/database.js' (MUST use .js extension — NOT .ts — for Node16 module resolution)
 - Import { randomUUID } from 'crypto' (only if POST/PUT is implemented)
 - Export as: export default router
 - ${BANNED_IMPORTS_RULE}`;
@@ -1059,8 +1176,9 @@ function estimateComponentBudget(
 function estimateAppBudget(importsCount: number, backendRequired: boolean): TokenBudget {
   const initial = 1800 + importsCount * 120 + (backendRequired ? 500 : 0);
   return normalizeBudget({
-    initial: Math.max(2000, Math.min(6000, initial)),
-    ceiling: 20000,
+    // No cap: 100 components needs ~14k tokens; capping at 6k guaranteed truncation.
+    initial: Math.max(2000, initial),
+    ceiling: 32000,
   });
 }
 
@@ -1166,7 +1284,7 @@ Rules:
       const message = err instanceof Error ? err.message : String(err);
       // Budget exhausted for this project — retrying won't help, fail immediately.
       if (/Budget Exceeded/i.test(message)) throw err;
-      const looksTruncated = /Truncated file block|No <<<FILE/i.test(message);
+      const looksTruncated = /Truncated file block|No <<<FILE|too-short file content/i.test(message);
       const nextBudget = looksTruncated && currentBudget < ceiling
         ? Math.min(ceiling, Math.max(currentBudget + 4000, Math.ceil(currentBudget * 2.0)))
         : currentBudget;
@@ -1326,9 +1444,19 @@ async function generateFrontendComponent(
   const expectedPath = sanitizeComponentPath(component.path, 0);
   const componentName = toComponentName(component.name || path.basename(expectedPath, '.jsx'), path.basename(expectedPath, '.jsx'));
   const userMessage = String(requirements?.userMessage || '').slice(0, 400);
+  const backendRequired = Boolean(requirements?.backend_required || requirements?.auth_required);
   const componentSpec = uiSpec?.components?.find((c: any) => c.name === componentName);
   const dependencyCode = componentSpec?.dependencies
-    ?.map((dep: string) => ({ dep, code: generatedDependencies?.get(dep)?.slice(0, 500) }))
+    ?.map((dep: string) => {
+      const content = generatedDependencies?.get(dep);
+      if (!content) return { dep, code: undefined };
+      // Extract only the exported function signature + props destructuring instead of
+      // truncating raw content to 500 chars. This gives the parent LLM the exact prop
+      // names without wasting tokens on implementation details.
+      const sigMatch = content.match(/export\s+default\s+function\s+\w+\s*\(([^)]*)\)/);
+      const sig = sigMatch ? `export default function ${dep}(${sigMatch[1]}) { /* ... */ }` : `export default function ${dep}(props) { /* ... */ }`;
+      return { dep, code: sig.slice(0, 400) };
+    })
     .filter((d: any) => d.code) || [];
 
   const contentData = componentSpec?.contentData && typeof componentSpec.contentData === 'object' ? componentSpec.contentData : null;
@@ -1352,13 +1480,31 @@ ${dependencyCode.map((d: any) => `${d.dep}: ${d.code}`).join('\n---\n')}
 RULES — ALL are mandatory:
 - Export: export default function ${componentName}(props) { ... }
 - ONE responsibility: this component renders ONLY "${component.purpose || componentName}". Nothing else.
-- SIZE LIMIT: target 80-150 lines. Hard max 200 lines. If you need more, you are doing it wrong — reduce scope.
+- SIZE LIMIT: target 100-200 lines. Hard max 350 lines. Keep it focused — one responsibility.
 - ROUTING PROHIBITION: NEVER import or use BrowserRouter, Router, Routes, Route, Switch, useNavigate, useLocation, Link from react-router in this file. Routing lives ONLY in App.jsx. This component receives its data via props.
+- ${backendRequired ? 'API CALLS: If this component fetches data, declare at the top of the function body: const API_BASE = window.__ENV__?.API_URL || import.meta.env.VITE_API_URL || \'http://localhost:3000\'; const PROJECT_ID = window.__ENV__?.PROJECT_ID || import.meta.env.VITE_PROJECT_ID || \'\'; — Always include project_id: PROJECT_ID in all GET/DELETE query params and POST/PUT/PATCH request bodies. Never hardcode URLs.' : 'No backend calls in this component.'}
 - No TODO comments, no placeholder text, no stub implementations.
+- COMMENTS MUST USE // SYNTAX: NEVER write plain English sentences inside a function body without a // prefix. Every comment line MUST start with //. BAD (syntax error): \`Validate required prop at runtime to help catch incorrect usage early.\` GOOD: \`// Validate required prop at runtime to help catch incorrect usage early.\` — A bare English sentence inside a function is a hard syntax error.
 - Real JSX with actual content matching the purpose — not lorem ipsum, not generic examples.
 - All imports at the top. Only import what you use.
 - useState/useEffect only if genuinely needed for THIS component's local behaviour.
-- REACT-ICONS: Only use icon names that actually exist in react-icons v5. Safe Si icons: SiPython, SiTypescript, SiJavascript, SiReact, SiNodedotjs, SiDocker, SiKubernetes, SiAmazon, SiGooglecloud, SiMicrosoftazure, SiPostgresql, SiMongodb, SiRedis, SiGit, SiGithub, SiLinux, SiTensorflow, SiPytorch, SiOpenai, SiHuggingFace, SiMeta, SiVercel, SiNetlify, SiFastapi, SiFlask, SiDjango, SiGraphql, SiTailwindcss, SiVite. NEVER invent icon names — if unsure, omit or use a Fa icon instead.
+- REACT-ICONS: Only use icon names that actually exist in react-icons v5. Pick icons that match the app's domain — do NOT default to dev-tools icons unless the app is dev-tools.
+  Safe Si (brand) icons: SiPython, SiTypescript, SiJavascript, SiReact, SiNodedotjs, SiDocker, SiKubernetes, SiAmazon, SiGooglecloud, SiMicrosoftazure, SiPostgresql, SiMongodb, SiRedis, SiGit, SiGithub, SiLinux, SiTensorflow, SiPytorch, SiOpenai, SiHuggingFace, SiMeta, SiVercel, SiNetlify, SiFastapi, SiFlask, SiDjango, SiGraphql, SiTailwindcss, SiVite, SiStripe, SiPaypal, SiVisa, SiMastercard, SiGoogle, SiApple, SiFacebook, SiInstagram, SiX, SiLinkedin, SiYoutube, SiTiktok, SiWhatsapp, SiSlack, SiDiscord, SiTelegram, SiSpotify, SiNetflix, SiAirbnb, SiUber, SiShopify.
+  Safe Fa (generic) icons — navigation/UI: FaHome, FaUser, FaSearch, FaCog, FaBell, FaTrash, FaEdit, FaSave, FaPlus, FaMinus, FaTimes, FaCheck, FaChevronDown, FaChevronUp, FaChevronLeft, FaChevronRight, FaArrowLeft, FaArrowRight, FaEllipsisH, FaEllipsisV, FaFilter, FaSort, FaBars, FaCircle.
+  Auth/security: FaSignInAlt, FaSignOutAlt, FaLock, FaUnlock, FaShieldAlt, FaKey, FaUserPlus, FaUsers, FaUserShield.
+  Status/feedback: FaCheckCircle, FaTimesCircle, FaExclamationCircle, FaInfoCircle, FaExclamationTriangle, FaQuestionCircle, FaSpinner.
+  Data/admin: FaTasks, FaChartBar, FaChartLine, FaChartPie, FaDatabase, FaServer, FaCode, FaTerminal, FaCloud, FaDownload, FaUpload, FaFile, FaFileAlt, FaFolder, FaPaperclip, FaTable, FaList.
+  Commerce/payments: FaShoppingCart, FaShoppingBag, FaCreditCard, FaMoneyBillAlt, FaDollarSign, FaTag, FaPercent, FaReceipt, FaBoxOpen, FaTruck, FaStore.
+  Communication: FaEnvelope, FaPhone, FaComments, FaCommentDots, FaPaperPlane, FaInbox, FaHeadset.
+  Social/engagement: FaHeart, FaStar, FaThumbsUp, FaThumbsDown, FaShare, FaBookmark, FaEye, FaEyeSlash.
+  Media: FaImage, FaImages, FaCamera, FaVideo, FaPlay, FaPause, FaMusic, FaMicrophone.
+  Calendar/time: FaCalendar, FaCalendarAlt, FaClock, FaHistory, FaStopwatch.
+  Location/travel: FaMapMarkerAlt, FaMap, FaPlane, FaCar, FaHotel, FaUtensils.
+  Misc generic: FaBalanceScale, FaGavel, FaRocket, FaBug, FaFlag, FaFlagCheckered, FaBolt, FaBookOpen, FaGraduationCap, FaBriefcase, FaBuilding, FaIndustry, FaHeartbeat, FaStethoscope.
+  NEVER invent icon names — if unsure, use FaCircle or omit entirely. CRITICAL: FaScaleBalanced does NOT exist — use FaBalanceScale instead.
+- JSX ATTRIBUTES: NEVER put the same attribute on a JSX element twice. BAD: <div style={base} style={{...base, color:'red'}}>. GOOD: <div style={{...base, color:'red'}}>. Duplicate attributes are a hard esbuild compile error.
+- OBJECT LITERALS: NEVER repeat the same key in a JS object. BAD: { padding: 12, background: '#fff', padding: 8 }. Duplicate keys are a hard esbuild compile error.
+- CSS STRINGS — SINGLE LINE ONLY: NEVER split a CSS string value across multiple lines. String literals containing commas (rgba(), linear-gradient(), transition shorthand) MUST fit entirely on ONE line. BAD (syntax error): \`background: 'linear-gradient(rgba(255,\\n  255,0.03))'\`. GOOD: \`background: 'linear-gradient(rgba(255,255,0.03))'\`. A newline inside a JS string literal is a hard syntax error that will break the build. This applies to ALL gradient/rgba strings — \`linear-gradient(#0f172a 0%, #071029 100%)\` MUST be on a SINGLE line. NEVER break after the opening parenthesis of a gradient.
 - ${BANNED_IMPORTS_RULE}`;
 
   const budget = estimateComponentBudget(componentSpec, dependencyCode.length, String(component.purpose || ''));
@@ -1411,7 +1557,8 @@ async function generateFrontendApp(
     name: sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection'),
     importLine: `import ${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} from './${file.path.replace(/^src\//, '')}';`,
   }));
-  const rootFiles = filterRootComponents(componentFiles, compositionOrder);
+  const uiGenOrder: string[] | undefined = Array.isArray(uiSpec?.generationOrder) ? uiSpec.generationOrder : undefined;
+  const rootFiles = filterRootComponents(componentFiles, compositionOrder, uiGenOrder);
   const rootNames = rootFiles.map((f) => sanitizeIdentifier(path.basename(f.path, '.jsx'), 'GeneratedSection'));
 
   // Build a required-props summary for each root component from uiSpec, so App.jsx knows what to pass.
@@ -1447,6 +1594,20 @@ const API_BASE = window.__ENV__?.API_URL || import.meta.env.VITE_API_URL || 'htt
 const PROJECT_ID = window.__ENV__?.PROJECT_ID || import.meta.env.VITE_PROJECT_ID || '';
 ` : ''}
 
+ERROR BOUNDARY — you MUST include this class verbatim before the App function:
+\`\`\`
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(e) { return { error: e }; }
+  componentDidCatch(e, info) { console.error('[ErrorBoundary] ' + this.props.name + ':', e.message, info.componentStack); }
+  render() {
+    if (this.state.error) return <div style={{padding:'16px',background:'#fee2e2',color:'#991b1b',borderRadius:'8px',margin:'8px'}}>[{this.props.name}] {this.state.error.message}</div>;
+    return this.props.children;
+  }
+}
+\`\`\`
+Wrap EACH root component in JSX with <ErrorBoundary name="ComponentName">...</ErrorBoundary>. This catches runtime crashes and surfaces the broken component name in the console so errors can be diagnosed.
+
 RULES:
 - Export: export default function App() { ... }
 - Import ALL components listed above but only render the ROOT components in JSX.
@@ -1454,9 +1615,10 @@ RULES:
 - This file handles routing (BrowserRouter + Routes + Route) and/or page-switching state. Child components do NOT.
 - If multi-page: use BrowserRouter + Routes. If single-page with sections: render all root sections top-to-bottom.
 - Keep App.jsx lean: routing + layout shell + top-level state only. No business logic inside App.jsx itself.
-- SIZE: target 60-120 lines. Hard max 180 lines. Pass data to children via props, not inline logic.
+- SIZE: target 60-120 lines. Hard max 200 lines (ErrorBoundary adds ~10 lines). Pass data to children via props, not inline logic.
 - ${backendRequired ? 'Use API_BASE for all fetch calls. Always include project_id: PROJECT_ID in query params (GET/DELETE) or request body (POST/PUT). Handle loading and error states.' : 'No backend calls.'}
 - No TODOs, no stubs, no placeholder comments.
+- COMMENTS MUST USE // SYNTAX: Every comment line inside the function body MUST start with //. NEVER write bare English sentences without // — they are syntax errors.
 - Generation order: ${(uiSpec?.generationOrder || []).join(' -> ') || 'all components'}
 - ${BANNED_IMPORTS_RULE}`;
 
@@ -1523,17 +1685,25 @@ function extractClassNames(jsxSources: string[]): string[] {
   return Array.from(found).sort();
 }
 
+function verifyCssCoverage(cssContent: string, classNames: string[]): number {
+  if (classNames.length === 0) return 1;
+  const covered = classNames.filter((cn) => cssContent.includes(`.${cn}`));
+  return covered.length / classNames.length;
+}
+
 async function generateFrontendCss(manifest: FrontendManifest, requirements: any, appFile: GeneratedFile, componentFiles: GeneratedFile[], llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {
   const userMessage = String(requirements?.userMessage || '').slice(0, 400);
   const styleNotes = String((manifest as any)?.styleNotes || '').slice(0, 600);
   const classNames = extractClassNames([appFile.content, ...componentFiles.map((f) => f.content)]).slice(0, 220);
 
-  const systemPrompt = `Generate src/index.css for this React app: "${userMessage || manifest.appName}".
+  function buildCssPrompt(extraInstruction?: string): string {
+    return `Generate src/index.css for this React app: "${userMessage || manifest.appName}".
 
 Class names used in the JSX — write rules for all of them:
 ${classNames.map((c) => `.${c}`).join(', ') || '(no className attributes — emit a sensible base stylesheet)'}
 
 ${styleNotes ? `Style direction: ${styleNotes}` : ''}
+${extraInstruction ? `\nCRITICAL: ${extraInstruction}` : ''}
 
 RULES:
 - One complete, self-contained plain CSS file. CSS variables on :root are encouraged.
@@ -1541,6 +1711,7 @@ RULES:
 - Every class name listed above must have a rule. No omissions.
 - Write clean, minimal CSS — no duplicated selectors, no redundant rules, no commented-out blocks.
 - Target 150-300 lines. If you are over 400 lines you are over-engineering it — use variables and shared rules.`;
+  }
 
   // CSS for rich landing/marketing pages routinely lands at 12k-18k output
   // tokens. Use a generous ceiling close to ABSOLUTE_TOKEN_CEILING so we
@@ -1550,14 +1721,32 @@ RULES:
     model,
     'frontendCss',
     'src/index.css',
-    systemPrompt,
+    buildCssPrompt(),
     { appName: manifest.appName, classNames, styleNotes },
     { initial: 4000, ceiling: 12000 }
   );
   if (isProbablyTruncatedGeneratedFile(parsed.path, parsed.content)) {
     throw new Error(`frontendCss: generated content appears too short or incomplete for ${parsed.path}`);
   }
-  return validateGeneratedFile(parsed, 'src/index.css', 'frontend', 'frontendCss');
+  const cssFile = validateGeneratedFile(parsed, 'src/index.css', 'frontend', 'frontendCss');
+
+  // Verify coverage: if < 80% of classNames have rules, retry with the missing list injected.
+  const coverage = verifyCssCoverage(cssFile.content, classNames);
+  if (coverage < 0.8 && classNames.length > 0) {
+    const missing = classNames.filter((cn) => !cssFile.content.includes(`.${cn}`));
+    logWarn('codeGenerationAgent:css-coverage-low', { coverage: Math.round(coverage * 100), missingCount: missing.length, sample: missing.slice(0, 8) });
+    try {
+      const retryPrompt = buildCssPrompt(`The following class names are MISSING rules in your output — you MUST include a CSS rule for each: ${missing.map((c) => `.${c}`).join(', ')}`);
+      const retried = await generateFile(llmProxy, model, 'frontendCss:retry', 'src/index.css', retryPrompt, { appName: manifest.appName, classNames, missing }, { initial: 5000, ceiling: 14000 });
+      if (!isProbablyTruncatedGeneratedFile(retried.path, retried.content)) {
+        return validateGeneratedFile(retried, 'src/index.css', 'frontend', 'frontendCss:retry');
+      }
+    } catch (retryErr) {
+      logWarn('codeGenerationAgent:css-coverage-retry-failed', { error: (retryErr as Error).message });
+    }
+  }
+
+  return cssFile;
 }
 
 function buildBackendFilesFromManifest(manifest: BackendManifest): GeneratedFile[] {
@@ -1688,8 +1877,8 @@ function normalizeStateName(value: unknown): string {
 function transitionTo(currentState: string, nextState: string): string {
   const normalizedCurrent = normalizeStateName(currentState);
   const normalizedNext = normalizeStateName(nextState);
-  if (!normalizedCurrent) return normalizedNext || 'CLARIFICATION_REQUIRED';
-  if (!normalizedNext) return 'CLARIFICATION_REQUIRED';
+  if (!normalizedCurrent) return normalizedNext || AgentState.NEXT_CLARIFICATION;
+  if (!normalizedNext) return AgentState.NEXT_CLARIFICATION;
   return normalizedNext;
 }
 
@@ -1741,8 +1930,8 @@ export async function codeGenerationAgent(input: any) {
   }
   const blueprint = assertBlueprintIntegrationSafety(reviewedBlueprint);
 
-  const { model, apiKey } = getModelConfigForTask('code_generation');
-  const llmProxy = new LLMProxyClient({ apiKey, projectId: input?.projectId });
+  const [{ model, apiKey }, ...fallbacks] = getModelPriorityChain('code_generation');
+  const llmProxy = new LLMProxyClient({ apiKey, projectId: input?.projectId, fallbacks });
   const events: EventSink | undefined = typeof input.emitEvent === 'function' ? { emit: input.emitEvent } : undefined;
 
   const retrievedPatches: string[] = [];
@@ -1788,20 +1977,55 @@ export async function codeGenerationAgent(input: any) {
       ? (manifest.components || []).slice(0, authoritative)
       : (manifest.components || []);
 
-    // Scale concurrency with project size: small projects get fewer workers (less
-    // contention on the LLM proxy), large projects scale up to 12.
-    const COMPONENT_CONCURRENCY = Math.min(12, Math.max(4, Math.ceil(componentSpecs.length / 4)));
+    // Build dependency graph from uiSpec so we can sequence generation leaf-first.
+    // A component is "ready" once all components it depends on (its children) have
+    // been generated and their content is in generatedDependencies.
+    const componentDepMap = new Map<string, string[]>();
+    for (const spec of componentSpecs) {
+      const uiComp = uiSpec?.components?.find((c: any) => String(c.name || '') === String(spec.name || ''));
+      const deps = Array.isArray(uiComp?.dependencies) ? uiComp.dependencies.filter(Boolean) : [];
+      componentDepMap.set(String(spec.name || ''), deps);
+    }
+
     const componentResults: Array<{ index: number; file: GeneratedFile }> = [];
-    const queue = componentSpecs.map((component, index) => ({ component, index }));
     const generatedDependencies = new Map<string, string>();
 
+    // Ready queue: items whose dependencies are all satisfied.
+    // pending: indices of items not yet enqueued or generated.
+    const pendingIndices = new Set<number>(componentSpecs.map((_, i) => i));
+    const readyQueue: Array<{ component: typeof componentSpecs[0]; index: number }> = [];
+
+    function refreshReadyQueue(): void {
+      for (const idx of pendingIndices) {
+        const spec = componentSpecs[idx];
+        const deps = componentDepMap.get(String(spec.name || '')) || [];
+        const allReady = deps.every(dep => generatedDependencies.has(dep));
+        if (allReady) {
+          readyQueue.push({ component: spec, index: idx });
+          pendingIndices.delete(idx);
+        }
+      }
+    }
+    refreshReadyQueue(); // seed with leaf components (no deps)
+
+    // Run up to COMPONENT_CONCURRENCY workers; each worker picks from readyQueue
+    // and waits briefly when the queue is empty but pendingIndices is not yet drained.
+    const COMPONENT_CONCURRENCY = Math.min(10, Math.max(4, Math.ceil(componentSpecs.length / 6)));
+
     async function runComponentSlot(): Promise<void> {
-      while (queue.length > 0) {
-        const item = queue.shift();
-        if (!item) break;
+      while (true) {
+        const item = readyQueue.shift();
+        if (!item) {
+          if (pendingIndices.size === 0) break; // all done
+          await new Promise<void>(r => setTimeout(r, 60)); // wait for a dep to finish
+          continue;
+        }
         const { component, index } = item;
         try {
           const file = await generateFrontendComponent(component, manifest, input.requirements, llmProxy, model, uiSpec, generatedDependencies);
+          // Key by both component name AND bare filename so lookups from either side work.
+          const compName = String(component.name || '');
+          if (compName) generatedDependencies.set(compName, file.content);
           generatedDependencies.set(file.path.replace(/^src\/components\//, '').replace(/\.jsx$/, ''), file.content);
           componentResults.push({ index, file });
           events?.emit({ type: 'FILE_WRITTEN', filePath: file.path, message: `Generated ${file.path}`, payload: { path: file.path, content: file.content } });
@@ -1816,12 +2040,17 @@ export async function codeGenerationAgent(input: any) {
             content: `import React from 'react';\n/* STUB_COMPONENT: ${compName} — generation failed, needs real implementation */\nexport default function ${compName}() {\n  return <div className="section">${compName}</div>;\n}\n`,
           };
           componentResults.push({ index, file: stubFile });
+          // Mark as done (empty string) so waiting parents are unblocked — they'll get
+          // the stub content at generation time, which is better than waiting forever.
+          if (component.name) generatedDependencies.set(String(component.name), '');
+          generatedDependencies.set(safePath.replace(/^src\/components\//, '').replace(/\.jsx$/, ''), '');
           events?.emit({ type: 'STUB_COMPONENT', filePath: stubFile.path, message: `Stub emitted for ${stubFile.path} — generation failed: ${(err as Error).message}`, payload: { path: stubFile.path, content: stubFile.content, reason: (err as Error).message } });
         }
+        refreshReadyQueue(); // unlock components whose deps are now satisfied
       }
     }
 
-    await Promise.all(Array.from({ length: Math.min(COMPONENT_CONCURRENCY, componentSpecs.length) }, runComponentSlot));
+    await Promise.all(Array.from({ length: Math.min(COMPONENT_CONCURRENCY, Math.max(1, componentSpecs.length)) }, runComponentSlot));
     // Restore original blueprint ordering
     componentResults.sort((a, b) => a.index - b.index);
     const componentFiles = componentResults.map((r) => r.file);
@@ -1829,7 +2058,8 @@ export async function codeGenerationAgent(input: any) {
     let appFile: GeneratedFile;
     try {
       appFile = await generateFrontendApp(manifest, input.requirements, input.systemDesign, input.modification, componentFiles, llmProxy, model, uiSpec);
-      try { validateAppImports(appFile.content, componentFiles, blueprint, uiSpec); } catch (e) { logWarn('codeGenerationAgent:app-import-warning', { error: (e as Error).message }); }
+      // Throws on import path mismatches — caught below, triggers fallbackFrontendApp.
+      validateAppImports(appFile.content, componentFiles, blueprint, uiSpec);
     } catch (err) {
       logWarn('codeGenerationAgent:app-generation-fallback', { error: (err as Error).message });
       appFile = fallbackFrontendApp(manifest, componentFiles, hasBackend, uiSpec?.layoutStructure?.compositionOrder);

@@ -1,8 +1,9 @@
-import { getModelConfigForTask } from './modelRouter';
+import { getModelPriorityChain } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { debug, error as logError } from '../utils/logger';
 import type { ProjectBlueprint } from './blueprintContract';
 import { parseJsonResponse } from './llmUtils';
+import { AgentState } from './agentStates';
 
 export type BrainState = {
   activeState: string;
@@ -50,59 +51,18 @@ function normalizePages(pages: unknown): string[] {
   return Array.from(new Set(pages.map(coercePageName).filter(Boolean).map((page) => page.replace(/\s+page\s*$/i, '').replace(/\s+/g, ' ').trim()).filter(Boolean)));
 }
 
-async function assessSemanticGap(llmProxy: LLMProxyClient, model: string, input: { userMessage: string; result: RequirementAnalysisOutput }): Promise<{ score: number; reason: string; forceFrontendOnly: boolean }> {
-  // Quick keyword check for obvious frontend-only requests
-  const frontendOnlyKeywords = ['pricing page', 'static site', 'landing page', 'portfolio', 'brochure', 'informational', 'simple website', 'no backend'];
-  const userMsgLower = input.userMessage.toLowerCase();
-  const hasFrontendOnlyKeyword = frontendOnlyKeywords.some(keyword => userMsgLower.includes(keyword));
-
-  if (hasFrontendOnlyKeyword) {
-    return { score: 1.0, reason: 'Request contains frontend-only keywords', forceFrontendOnly: true };
-  }
-
-  const prompt = `You are assessing whether a website request and extracted requirements are semantically aligned with a frontend-only or backend-required implementation.
-
-Return ONLY JSON with shape:
-{"score":0.0,"reason":"short reason","forceFrontendOnly":true|false}
-
-Heuristics:
-- score closer to 1.0 means strong alignment and low ambiguity.
-- score closer to 0.0 means weak/contradictory requirements.
-- forceFrontendOnly should be true if the user request describes a static website, landing page, portfolio, pricing page, brochure, or informational site without any backend features.
-- Set forceFrontendOnly to true for requests that mention "frontend only", "static site", "no backend", "simple website", or similar.
-- Only keep backend_required as true if the request clearly needs server-side functionality, data persistence, user accounts, or API interactions.
-- For ambiguous requests, err on the side of frontend-only (forceFrontendOnly: true) to maintain flexibility.
-
-User message:
-${input.userMessage}
-
-Extracted requirements:
-${JSON.stringify(input.result, null, 2)}`;
-
-  const completion = await llmProxy.chatCompletion(
-    [
-      { role: 'system', content: prompt },
-      { role: 'user', content: input.userMessage },
-    ],
-    model,
-    0.0,
-    0.2,
-    500
-  );
-
-  const content = String(completion.choices?.[0]?.message?.content || '{}').replace(/```[a-zA-Z]*\s*|```/g, '').trim();
-  const parsed = parseJsonResponse((content.match(/{[\s\S]*}/) || ['{}'])[0]);
+function extractSemanticFields(parsed: any): { score: number; reason: string; forceFrontendOnly: boolean } {
   return {
-    score: typeof parsed.score === 'number' ? Math.max(0, Math.min(1, parsed.score)) : 0.5,
-    reason: typeof parsed.reason === 'string' ? parsed.reason : 'semantic-gap-analysis',
-    forceFrontendOnly: Boolean(parsed.forceFrontendOnly),
+    score: typeof parsed.semantic_score === 'number' ? Math.max(0, Math.min(1, parsed.semantic_score)) : 0.75,
+    reason: typeof parsed.semantic_reason === 'string' ? parsed.semantic_reason : 'inline-semantic-analysis',
+    forceFrontendOnly: Boolean(parsed.force_frontend_only),
   };
 }
 
 function transitionTo(currentState: string, nextState: string): string {
   const normalizedCurrent = String(currentState || '').trim();
   const normalizedNext = String(nextState || '').trim();
-  if (!normalizedNext) return 'CLARIFICATION_REQUIRED';
+  if (!normalizedNext) return AgentState.NEXT_CLARIFICATION;
   if (!normalizedCurrent) return normalizedNext;
   return normalizedNext;
 }
@@ -111,17 +71,17 @@ export async function requirementAnalysisAgent(input: { user_message: string; pr
   debug('requirementAnalysisAgent', { input });
   try {
     if (!input?.user_message) throw new Error('user_message required');
-    const { model, apiKey } = getModelConfigForTask('core_reasoning');
-    const llmProxy = new LLMProxyClient({ apiKey, projectId: input.projectId });
-    const activeState = String(input.activeState || input.globalState?.activeState || 'requirements');
-    if (activeState !== 'requirements') {
+    const [{ model, apiKey }, ...fallbacks] = getModelPriorityChain('requirement_analysis');
+    const llmProxy = new LLMProxyClient({ apiKey, projectId: input.projectId, fallbacks });
+    const activeState = String(input.activeState || input.globalState?.activeState || AgentState.REQUIREMENTS);
+    if (activeState !== AgentState.REQUIREMENTS) {
       return {
         updatedState: {
           activeState,
           domain: 'requirements',
           transitions: [...(input.globalState?.transitions || []), `blocked:${activeState}`],
         },
-        nextStateProposal: transitionTo(activeState, 'CLARIFICATION_REQUIRED'),
+        nextStateProposal: transitionTo(activeState, AgentState.NEXT_CLARIFICATION),
         consistencyScore: 0,
         output: {
           website_type: 'business',
@@ -138,13 +98,18 @@ export async function requirementAnalysisAgent(input: { user_message: string; pr
 - Infer a safe, complete website_type and pages set.
 - website_type must be one of: business, portfolio, saas, ecommerce, marketplace, dashboard, blog, landing_page, crm, lms, social, realtime, directory, api_only.
 - If the request is ambiguous, choose a safe default and add a short note.
-- Set backend_required to true ONLY if the request explicitly mentions backend features like database, API, authentication, server-side logic, data storage, user accounts, dynamic content from server, or real-time updates.
-- For static sites, landing pages, portfolios, pricing pages, brochure sites, informational websites, or any request that doesn't mention server-side features, set backend_required to false.
-- Examples of frontend-only: "pricing page", "portfolio website", "landing page", "static site", "simple website".
-- Examples requiring backend: "user login", "database", "API integration", "dynamic content", "real-time chat".
+- Set backend_required to true if the request mentions ANY server-side capability. Treat the following as backend signals (non-exhaustive): user accounts/login/auth, admin panel, roles/permissions, database/persistence, CRUD on any entity, API or endpoints, file/image upload, payments/checkout/orders, bookings/reservations, contact-form submissions stored anywhere, comments/likes/follows, notifications/email, chat/messaging/real-time, search over user-generated data, dashboards over dynamic data, multi-user collaboration, scheduling, content moderation, analytics ingestion, OAuth/SSO, webhooks.
+- Set backend_required to false ONLY for purely static / informational sites where every page renders from build-time content (typical: landing page, brochure, single-page portfolio with no contact-form storage, pricing page with no checkout, static blog without comments).
+- IMPORTANT: A request can mention "portfolio", "landing page", or any "site" keyword and STILL be a full-stack app — e.g. "portfolio + admin panel to manage projects", "landing page with email signup stored in a database", "blog with comments". Decide backend_required from the FUNCTIONAL capabilities described, not from the surface noun.
 - Only set auth_required to true if login/authentication/user accounts are explicitly requested.
 - pages can include up to 20 pages — list all requested pages, do not truncate.
-Respond ONLY with valid JSON with keys: website_type, pages, backend_required, auth_required, deployment_pref, notes.
+
+Also include these three semantic alignment fields in the same JSON object:
+- semantic_score: number 0.0–1.0. Closer to 1.0 = clear, unambiguous request. Closer to 0.0 = vague or contradictory.
+- semantic_reason: one short sentence explaining the score.
+- force_frontend_only: true if the request is clearly a static site, landing page, portfolio, brochure, or informational site with no backend needs; false otherwise.
+
+Respond ONLY with valid JSON with keys: website_type, pages, backend_required, auth_required, deployment_pref, notes, semantic_score, semantic_reason, force_frontend_only.
 Do NOT include Markdown fences.`;
     async function runRequirementAnalysisOnce(system: string, temperature: number): Promise<RequirementAnalysisOutput> {
       const completion = await llmProxy.chatCompletion(
@@ -192,8 +157,12 @@ Return ONLY JSON. No trailing commas. No extra keys. Do not include any text bef
       notes: parsed.notes,
     };
 
-    const semantic = await assessSemanticGap(llmProxy, model, { userMessage: input.user_message, result });
-    const forceFrontendOnly = semantic.forceFrontendOnly;
+    const semantic = extractSemanticFields(parsed);
+    // force_frontend_only is a SOFT hint: only downgrade when the model itself
+    // did not already detect backend signals. Never override an explicit
+    // backend_required=true (e.g. user asked for admin panel, auth, DB CRUD on
+    // a "portfolio" — the keyword must not silently kill those needs).
+    const forceFrontendOnly = semantic.forceFrontendOnly && !result.backend_required && !result.auth_required;
     const alignedResult: RequirementAnalysisOutput = {
       ...result,
       backend_required: forceFrontendOnly ? false : result.backend_required,
@@ -201,7 +170,7 @@ Return ONLY JSON. No trailing commas. No extra keys. Do not include any text bef
       notes: [result.notes, semantic.reason, forceFrontendOnly ? 'Semantic analysis indicates a frontend-only request.' : null].filter(Boolean).join(' ') || undefined,
     };
 
-    const nextStateProposal = semantic.score < 0.55 ? transitionTo(activeState, 'CLARIFICATION_REQUIRED') : transitionTo(activeState, 'SYSTEM_DESIGN');
+    const nextStateProposal = semantic.score < 0.55 ? transitionTo(activeState, AgentState.NEXT_CLARIFICATION) : transitionTo(activeState, AgentState.NEXT_SYSTEM_DESIGN);
     const output: RequirementAnalysisOutput = alignedResult;
 
     debug('requirementAnalysisAgent:result', { output, semantic });

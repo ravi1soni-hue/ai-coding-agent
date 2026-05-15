@@ -1,8 +1,9 @@
-import { getModelConfigForTask } from './modelRouter';
+import { getModelPriorityChain } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { debug, error as logError } from '../utils/logger';
 import type { ProjectBlueprint } from './blueprintContract';
 import { parseJsonResponse } from './llmUtils';
+import { AgentState } from './agentStates';
 
 export type ClarificationContext = {
   clarificationAnswers: Record<string, string>;
@@ -38,7 +39,10 @@ export type ClarificationOutput = {
 
 const MAX_QUESTIONS = 3;
 const MAX_ATTEMPTS = 3;
-const MAX_CLARIFICATION_ROUNDS = 5;
+const MAX_CLARIFICATION_ROUNDS_FULLSTACK = 5;
+// Frontend projects can be just as complex as fullstack ones (e.g. rich portfolios,
+// dashboards, e-commerce UIs). Allow the same ceiling and let semantic gap decide.
+const MAX_CLARIFICATION_ROUNDS_FRONTEND = 4;
 
 
 function normalizeQuestionList(value: unknown): string[] {
@@ -65,14 +69,17 @@ function normalizeText(value: unknown): string {
 
 function calculateSemanticGap(requirements: any, projectSpec: any): number {
   const text = JSON.stringify({ requirements, projectSpec }).toLowerCase();
+  // Positive signals: structural clarity — pages defined, sections named, purpose clear.
+  // Deliberately avoids specific platform/tech names so any project type scores fairly.
   const positive =
-    (/\bpricing page|landing page|dashboard|admin panel|checkout|portfolio|blog|store|saas|ecommerce|marketing site|single page|multi page\b/.test(text) ? 0.2 : 0) +
-    (/\breact|vite|frontend|backend|api|database|auth|postgres|express\b/.test(text) ? 0.2 : 0) +
-    (/\btitle|pages|components|routes|layout|navigation\b/.test(text) ? 0.15 : 0);
+    (Array.isArray(requirements?.pages) && requirements.pages.length > 0 ? 0.2 : 0) +
+    (/\bpages?\b|\bsections?\b|\bcomponents?\b|\broutes?\b|\blayout\b|\bnavigation\b/.test(text) ? 0.15 : 0) +
+    (/\bpurpose\b|\bfeatures?\b|\bgoal\b|\buser\b|\bcontent\b|\bdesign\b/.test(text) ? 0.15 : 0);
+  // Negative signals: vagueness and explicit deferral markers.
   const negative =
-    (/\bmaybe|some|various|several|etc|and\/or|whatever|something\b/.test(text) ? 0.15 : 0) +
-    (/\btbd|todo|placeholder|unspecified|unknown\b/.test(text) ? 0.2 : 0) +
-    (/\bnot sure|open to suggestions|need help deciding\b/.test(text) ? 0.15 : 0);
+    (/\bmaybe\b|\bvarious\b|\betc\b|\bwhatever\b/.test(text) ? 0.15 : 0) +
+    (/\btbd\b|\btodo\b|\bunspecified\b|\bunknown\b/.test(text) ? 0.2 : 0) +
+    (/\bnot sure\b|\bopen to suggestions\b|\bneed help deciding\b/.test(text) ? 0.15 : 0);
   return Math.max(0, Math.min(1, 0.45 + positive - negative));
 }
 
@@ -96,11 +103,12 @@ function shouldAskMoreQuestions(
   // Total questions already asked (best-effort, since spec/state may disagree).
   const totalAsked = Math.max(askedFromSpec, askedQuestionsList.length);
 
-  // Hard cap on clarification rounds to avoid infinite loops.
-  if (totalAsked >= MAX_CLARIFICATION_ROUNDS) return false;
+  const isFrontendOnly = !requirements?.backend_required;
+  const maxRounds = isFrontendOnly ? MAX_CLARIFICATION_ROUNDS_FRONTEND : MAX_CLARIFICATION_ROUNDS_FULLSTACK;
+  if (totalAsked >= maxRounds) return false;
 
   const semanticGap = calculateSemanticGap(requirements, projectSpec);
-  const targetCount = targetClarificationCount(semanticGap);
+  const targetCount = Math.min(targetClarificationCount(semanticGap), maxRounds);
 
   // If we haven't reached the target questions yet, keep asking.
   return totalAsked < targetCount;
@@ -109,24 +117,42 @@ function shouldAskMoreQuestions(
 function transitionTo(currentState: string, nextState: string): string {
   const normalizedCurrent = normalizeText(currentState);
   const normalizedNext = normalizeText(nextState);
-  if (!normalizedNext) return 'clarification_required';
+  if (!normalizedNext) return AgentState.NEXT_CLARIFICATION;
   if (!normalizedCurrent) return normalizedNext;
   return normalizedNext;
 }
 
 function buildClarificationPrompt(input: any, projectSpec: any): string {
-  return `You are a senior requirements clarification agent.
+  return `You are a senior product requirements clarification agent.
 
-Goal:
-- Extract the missing product decisions needed to design and generate the app safely.
-- Ask 2 to 3 blocking clarification questions at once when the request is incomplete or ambiguous.
-- Ask fewer questions only if the requirements are already specific enough.
-- Never repeat already asked or already answered questions.
-- Focus on decisions that materially affect UI, data model, navigation, authentication, roles, CRUD flows, integrations, deployment behavior, and any file or API contracts implied by the canonical project spec.
-- Use the canonical project spec as the source of truth when present.
-- Ask questions only if they are necessary to remove ambiguity in the spec.
+## Fixed tech stack — do NOT ask about these, ever
+The platform uses React + Vite (frontend), Node.js + TypeScript + Express (backend), and PostgreSQL (database). This is fixed infrastructure. Never ask the user about technology, database schema, data models, UI component names, library choices, or implementation approach. If a user volunteers these details in a prior answer, extract only the product intent — ignore the technical specifics.
+
+## Goal
+Ask only the product/functional questions needed to define WHAT to build, for WHOM, and with WHAT content or workflows. Match the question style to the app class — do not assume the request is a marketing/portfolio site.
+
+Good questions — pick the ones that fit the app class:
+- Audience & purpose: who uses this and what is the primary outcome they need?
+- Content sites (portfolio, landing, blog, business): what work/content/offerings should be showcased? What is the main call to action? What tone or style?
+- Apps with user accounts (SaaS, dashboards, CRM, admin, social): what user roles exist (e.g. admin vs. regular user) and what can each role do?
+- Data-driven apps: what are the main entities the user manages (e.g. orders, customers, posts, projects, bookings) and what actions can they take on each (create, edit, filter, export, share)?
+- Transactional apps (e-commerce, booking, marketplace): what does the purchase / booking / submission flow look like end to end?
+- Communication apps (chat, social, support): who can message whom, and what is the unit of conversation (DM, group, thread, comment)?
+- Pages / sections / navigation: what major screens or sections does the app need?
+- Integrations: are there external services the user expects to connect (payments, email, calendar, file storage, OAuth providers)? Only ask if the request implies one.
+
+Bad questions (never ask these):
+- What database, ORM, or schema should be used?
+- What UI components, design system, or libraries should be used?
+- What tech stack, framework, or hosting do you prefer?
+- What API structure or endpoints are needed?
+- What specific UI elements should be used to display X?
+
+## Rules
+- Ask 1 to 3 questions only when a product decision is genuinely missing and blocks design.
+- Never repeat already asked or answered questions.
+- If enough product detail exists to proceed, return confirmed=true with an empty questions array.
 - Do not ask generic filler questions.
-- If enough detail exists to proceed, return confirmed=true with an empty questions array.
 
 Canonical project spec (if present):
 ${JSON.stringify(projectSpec, null, 2)}
@@ -137,9 +163,8 @@ Return ONLY valid JSON with this exact shape:
   "confirmed": boolean
 }
 
-Rules:
 - questions must be an array of 0 to 3 strings
-- every question must be specific and answerable
+- every question must be about product/content, not implementation
 - if questions.length > 0 then confirmed must be false
 - if confirmed is true then questions must be []
 - no markdown, no prose`;
@@ -151,7 +176,7 @@ export async function clarificationAgent(input: any): Promise<StateAwareAgentRes
 
   const clarificationAnswers: Record<string, string> = input.clarificationAnswers || {};
   const askedQuestions: string[] = Array.isArray(input.askedQuestions) ? input.askedQuestions : [];
-  const activeState = String(input.activeState || input.globalState?.activeState || 'clarification');
+  const activeState = String(input.activeState || input.globalState?.activeState || AgentState.CLARIFICATION);
   const projectSpec = input.projectSpec || null;
   const context: ClarificationContext = {
     clarificationAnswers,
@@ -161,7 +186,7 @@ export async function clarificationAgent(input: any): Promise<StateAwareAgentRes
     lastAnswer: input.lastAnswer,
   };
 
-  if (!['clarification', 'requirements'].includes(activeState)) {
+  if (![AgentState.CLARIFICATION, AgentState.REQUIREMENTS].includes(activeState as any)) {
     const output: ClarificationOutput = {
       questions: [],
       confirmed: false,
@@ -176,14 +201,14 @@ export async function clarificationAgent(input: any): Promise<StateAwareAgentRes
         transitions: [...(input.globalState?.transitions || []), `blocked:${activeState}`],
         metadata: { reason: 'gate_closed' },
       },
-      nextStateProposal: transitionTo(activeState, 'clarification_required'),
+      nextStateProposal: transitionTo(activeState, AgentState.NEXT_CLARIFICATION),
       consistencyScore: 0,
       output,
     };
   }
 
-  const { model, apiKey } = getModelConfigForTask('clarification');
-  const llmProxy = new LLMProxyClient({ apiKey, projectId: input.projectId });
+  const [{ model, apiKey }, ...fallbacks] = getModelPriorityChain('clarification');
+  const llmProxy = new LLMProxyClient({ apiKey, projectId: input.projectId, fallbacks });
   const systemPrompt = buildClarificationPrompt(input, projectSpec);
 
   const userPrompt = JSON.stringify({
@@ -210,7 +235,7 @@ export async function clarificationAgent(input: any): Promise<StateAwareAgentRes
         model,
         0.4,
         0.9,
-        1400
+        400
       );
 
       const raw = completion.choices?.[0]?.message?.content || '{}';
@@ -227,9 +252,10 @@ export async function clarificationAgent(input: any): Promise<StateAwareAgentRes
       const semanticGap = calculateSemanticGap(input.requirements, projectSpec);
       const shouldContinue = shouldAskMoreQuestions(input.requirements, projectSpec, askedQuestions, clarificationAnswers);
 
-      // Hard guardrail: if we still believe we need clarifications, we must not
-      // "confirm/done" with an empty question set (otherwise the orchestration loop skips).
-      if (shouldContinue && questions.length === 0) {
+      // Hard guardrail: if we still believe we need clarifications and the LLM
+      // neither confirmed nor produced questions, force a retry.
+      // But if the LLM explicitly confirmed, trust it — the user gave enough detail.
+      if (shouldContinue && questions.length === 0 && !confirmed) {
         throw new Error('clarificationAgent:shouldContinue=true but LLM returned no questions');
       }
 
@@ -243,7 +269,7 @@ export async function clarificationAgent(input: any): Promise<StateAwareAgentRes
         context,
       };
 
-      const nextStateProposal = resolvedConfirmed ? transitionTo(activeState, 'system_design') : transitionTo(activeState, 'clarification_required');
+      const nextStateProposal = resolvedConfirmed ? transitionTo(activeState, AgentState.NEXT_SYSTEM_DESIGN) : transitionTo(activeState, AgentState.NEXT_CLARIFICATION);
 
       return {
         updatedState: {

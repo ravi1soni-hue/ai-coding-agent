@@ -1,7 +1,5 @@
 import path from 'path';
 import { debug } from '../utils/logger';
-import { LLMProxyClient } from './llmProxyClient';
-import { getModelConfigForTask } from './modelRouter';
 import {
   assertBlueprintIntegrationSafety,
   validateProjectBlueprint,
@@ -14,6 +12,7 @@ import {
 } from './blueprintContract';
 import { compileStructuredSpec, validateStructuredSpec, type StructuredSpec } from './structuredSpec';
 import { validateProjectConsistency, formatConsistencyIssues, type ConsistencyIssue } from './projectConsistency';
+import { AgentState } from './agentStates';
 
 export type BrainState = {
   activeState: string;
@@ -90,7 +89,7 @@ function deriveProjectType(requirements: any, backendRequired: boolean): Project
 function transitionTo(currentState: string, nextState: string): string {
   const normalizedCurrent = String(currentState || '').trim();
   const normalizedNext = String(nextState || '').trim();
-  if (!normalizedNext) return 'CLARIFICATION_REQUIRED';
+  if (!normalizedNext) return AgentState.NEXT_CLARIFICATION;
   if (!normalizedCurrent) return normalizedNext;
   return normalizedNext;
 }
@@ -249,18 +248,24 @@ function attemptBlueprintSelfHeal(
 }
 
 function semanticBlueprintScore(input: { structuredSpec: StructuredSpec; requirements: any; systemDesign?: any; uiSpec?: any }): number {
+  const { structuredSpec, requirements } = input;
+  // Score based on structural completeness of the spec, not specific file/platform names.
+  const hasComponents = Array.isArray(structuredSpec?.componentSchema) && structuredSpec.componentSchema.length > 0;
+  const hasFilePlan = Array.isArray(structuredSpec?.filePlan) && structuredSpec.filePlan.length > 0;
+  const hasPages = Array.isArray(requirements?.pages) && requirements.pages.length > 0;
+  const hasApiContracts = Array.isArray(structuredSpec?.apiContracts) && structuredSpec.apiContracts.length > 0;
   const text = JSON.stringify(input).toLowerCase();
   const score =
-    0.45 +
-    (/\bproject_id\b/.test(text) ? 0.08 : 0) +
-    (/\bapp\.jsx\b|\bindex\.css\b|\bmain\.jsx\b/.test(text) ? 0.08 : 0) +
-    (/\bapi\b|\broute\b|\bendpoint\b/.test(text) ? 0.08 : 0) +
-    (/\bcomponent\b|\bjsx\b/.test(text) ? 0.08 : 0) +
+    0.50 +
+    (hasComponents ? 0.12 : 0) +
+    (hasFilePlan ? 0.10 : 0) +
+    (hasPages ? 0.08 : 0) +
+    (hasApiContracts ? 0.06 : 0) +
     (/\bplaceholder\b|\btodo\b|\btbd\b/.test(text) ? -0.25 : 0);
   return Math.max(0, Math.min(1, score));
 }
 
-export function generateBlueprint(structuredSpec: StructuredSpec, systemDesign: any, requirements: any, uiSpec?: any): ProjectBlueprint {
+export function generateBlueprint(structuredSpec: StructuredSpec, _systemDesign: any, requirements: any, uiSpec?: any): ProjectBlueprint {
   const rootComponent = structuredSpec.componentSchema.find((component) => component.name === 'App');
   const generatedComponents = structuredSpec.componentSchema.filter((component) => component.name !== 'App');
   const componentFiles = generatedComponents.map((component) =>
@@ -421,8 +426,8 @@ export async function blueprintAgent(input: BlueprintInput): Promise<StateAwareA
   debug('blueprintAgent:start', { projectId: input.projectId });
   if (!input?.requirements) throw new Error('Blueprint input requires requirements');
 
-  const activeState = String(input.activeState || input.globalState?.activeState || 'blueprint');
-  if (!['blueprint', 'ui_spec', 'system_design', 'execution_plan'].includes(activeState)) {
+  const activeState = String(input.activeState || input.globalState?.activeState || AgentState.BLUEPRINT);
+  if (![AgentState.BLUEPRINT, AgentState.UI_SPEC, AgentState.SYSTEM_DESIGN, AgentState.EXECUTION_PLAN].includes(activeState as any)) {
     const fallbackBlueprint = generateBlueprint(
       input.structuredSpec
         ? validateStructuredSpec(input.structuredSpec)
@@ -438,7 +443,7 @@ export async function blueprintAgent(input: BlueprintInput): Promise<StateAwareA
         consistencyScore: 0,
         transitions: [...(input.globalState?.transitions || []), `blocked:${activeState}`],
       },
-      nextStateProposal: transitionTo(activeState, 'CLARIFICATION_REQUIRED'),
+      nextStateProposal: transitionTo(activeState, AgentState.NEXT_CLARIFICATION),
       consistencyScore: 0,
       output: fallbackBlueprint,
     };
@@ -471,8 +476,12 @@ export async function blueprintAgent(input: BlueprintInput): Promise<StateAwareA
     });
     if (report.ok) break;
     if (report.issues.length >= lastIssueCount) {
-      // Repairs aren't making progress — let the orchestrator see the failure.
-      throw new Error(`Blueprint self-heal stalled after ${pass} pass(es):\n${formatConsistencyIssues(report)}`);
+      // Repairs aren't converging — retrying the deterministic generator produces
+      // identical output, so tag the error as non-retriable so the orchestrator
+      // escalates upstream (re-run systemDesign/uiSpec) instead of looping here.
+      const err = new Error(`Blueprint self-heal stalled after ${pass} pass(es):\n${formatConsistencyIssues(report)}`);
+      (err as any).nonRetriable = true;
+      throw err;
     }
     lastIssueCount = report.issues.length;
     const { blueprint: repaired, repairs } = attemptBlueprintSelfHeal(blueprint, report.issues, {
@@ -483,8 +492,9 @@ export async function blueprintAgent(input: BlueprintInput): Promise<StateAwareA
     blueprint = repaired;
     debug('blueprintAgent:self_heal', { projectId: input.projectId, pass, repairs, remainingIssues: report.issues.length });
     if (repairs.length === 0) {
-      // No repair pattern matched the remaining issues — escalate.
-      throw new Error(`Blueprint validation failed with no applicable self-heal:\n${formatConsistencyIssues(report)}`);
+      const err = new Error(`Blueprint validation failed with no applicable self-heal:\n${formatConsistencyIssues(report)}`);
+      (err as any).nonRetriable = true;
+      throw err;
     }
   }
 
@@ -492,15 +502,18 @@ export async function blueprintAgent(input: BlueprintInput): Promise<StateAwareA
 
   debug('blueprintAgent:done', { projectId: input.projectId, fileCount: blueprint.files.length, routeCount: blueprint.backendRoutes.length, semanticScore });
 
+  // High score → advance to CODE_GENERATION. Low score → loop back upstream
+  // (UI_SPEC is the closest upstream stage; clarification is too far back).
+  const proposal = semanticScore < 0.55 ? AgentState.NEXT_UI_SPEC : AgentState.NEXT_CODE_GENERATION;
   return {
     updatedState: {
-      activeState: transitionTo(activeState, semanticScore < 0.55 ? 'CLARIFICATION_REQUIRED' : 'UI_SPEC'),
+      activeState: transitionTo(activeState, proposal),
       domain: 'blueprint',
       consistencyScore: semanticScore,
       transitions: [...(input.globalState?.transitions || []), `blueprint:${activeState}`],
       metadata: { projectId: input.projectId },
     },
-    nextStateProposal: semanticScore < 0.55 ? 'CLARIFICATION_REQUIRED' : 'UI_SPEC',
+    nextStateProposal: proposal,
     consistencyScore: semanticScore,
     output: blueprint,
   };

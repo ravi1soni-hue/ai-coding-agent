@@ -1,7 +1,8 @@
-import { getModelConfigForTask } from './modelRouter';
+import { getModelPriorityChain } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { debug, error as logError } from '../utils/logger';
 import { parseJsonResponse, scaledTokenBudget } from './llmUtils';
+import { AgentState } from './agentStates';
 
 export type BrainState = {
   activeState: string;
@@ -22,20 +23,23 @@ export type StateAwareAgentResult<T> = {
 function transitionTo(currentState: string, nextState: string): string {
   const normalizedCurrent = String(currentState || '').trim();
   const normalizedNext = String(nextState || '').trim();
-  if (!normalizedNext) return 'CLARIFICATION_REQUIRED';
+  if (!normalizedNext) return AgentState.NEXT_CLARIFICATION;
   if (!normalizedCurrent) return normalizedNext;
   return normalizedNext;
 }
 
 function semanticSystemDesignScore(input: { projectSpec: unknown; result: unknown }): number {
   const text = JSON.stringify(input).toLowerCase();
+  // Score based on design completeness signals, not specific platform names.
+  // High score = frontend defined, backend/db addressed, no stub indicators.
+  const result = (input.result as any) || {};
+  const hasFrontend = Boolean(result.frontend?.framework && result.frontend?.pages?.length > 0);
+  const hasBackendWhenNeeded = !result.backend || Boolean(result.backend?.routes?.length > 0);
   const score =
-    0.52 +
-    (/\breact-vite\b/.test(text) ? 0.08 : 0) +
-    (/\bvercel\b/.test(text) ? 0.05 : 0) +
-    (/\brailway\b/.test(text) ? 0.05 : 0) +
-    (/\bpostgres\b|\bdatabase\b/.test(text) ? 0.08 : 0) +
-    (/\bapi\b|\broute\b/.test(text) ? 0.08 : 0) +
+    0.55 +
+    (hasFrontend ? 0.15 : 0) +
+    (hasBackendWhenNeeded ? 0.10 : 0) +
+    (/\bapi\b|\broute\b|\bendpoint\b/.test(text) ? 0.08 : 0) +
     (/\bplaceholder\b|\btodo\b|\btbd\b/.test(text) ? -0.24 : 0);
   return Math.max(0, Math.min(1, score));
 }
@@ -44,8 +48,8 @@ export async function systemDesignAgent(input: any): Promise<StateAwareAgentResu
   debug('systemDesignAgent', { input });
   try {
     if (!input) throw new Error('Input required');
-    const { model, apiKey } = getModelConfigForTask('core_reasoning');
-    const llmProxy = new LLMProxyClient({ apiKey, projectId: input?.projectId });
+    const [{ model, apiKey }, ...fallbacks] = getModelPriorityChain('system_design');
+    const llmProxy = new LLMProxyClient({ apiKey, projectId: input?.projectId, fallbacks });
 
     const projectSpec = input.projectSpec || null;
     const backendRequired = Boolean(input?.requirements?.backend_required ?? input?.backend_required ?? projectSpec?.requirements?.backend_required);
@@ -59,6 +63,17 @@ export async function systemDesignAgent(input: any): Promise<StateAwareAgentResu
       : '';
 
     const systemPrompt = `You are a software architect. Design a complete technical architecture for the given requirements.
+
+## Fixed tech stack — non-negotiable
+- Frontend: React + Vite (always "react-vite"). Never change this.
+- Backend: Node.js + TypeScript + Express. Never change this.
+- Database: PostgreSQL. Never change this.
+- The user or project spec may mention other technologies (Prisma, Supabase, Firebase, Next.js, etc.). IGNORE those mentions entirely. Always output the fixed stack above.
+
+## backend_required = ${backendRequired}
+${backendRequired
+  ? '- backend_required is TRUE: include backend and database fields.'
+  : '- backend_required is FALSE: backend and database MUST be null. Do not design any database schema or backend routes, even if the project spec or user answers mention PostgreSQL, Prisma, or any database.'}
 
 Project spec context, if available:
 ${JSON.stringify(projectSpec, null, 2)}
@@ -92,8 +107,10 @@ Respond ONLY in JSON with this exact shape (no markdown fences):
   }` : 'null'},
   "auth": ${authRequired ? `{
     "type": "jwt",
-    "strategy": "email_password",
-    "tables": ["users with password_hash column"]
+    "strategy": "email_password | oauth | magic_link",
+    "providers": ["google", "github"],
+    "roles": ["admin", "user"],
+    "tables": ["users with password_hash column (or oauth_provider+oauth_id), role column if roles are needed"]
   }` : 'null'},
   "hosting": {
     "frontend": "vercel",
@@ -105,11 +122,12 @@ RULES:
 - frontend.framework must always be "react-vite"
 - hosting.frontend must always be "vercel"
 - hosting.backend must always be "railway" when backend is needed, else null
-- If backend_required is false: set backend, database to null
+- If backend_required is false: backend and database must be null — no exceptions
 - If auth_required is false: set auth to null
 - database.tables must list tables needed for the request with the columns that are actually used
 - Include created_at/updated_at timestamps on tables that need them
-- For auth: include the minimum users table needed for the request${feedbackBlock}`;
+- For auth: choose strategy that matches the request (email_password is default; oauth if Google/GitHub/social login is implied; magic_link if "passwordless" / "email link" is implied). Include roles only if the request mentions distinct user types (admin/staff/customer/owner/member etc.). The "providers" array applies only when strategy=oauth; otherwise omit it.
+- Database tables for auth must reflect the chosen strategy: email_password → users(email, password_hash); oauth → users(email, oauth_provider, oauth_id); magic_link → users(email) + login_tokens(token, email, expires_at). Add a role column to users when roles exist.${feedbackBlock}`;
 
     const userInput = JSON.stringify({
       requirements: input.requirements || input,
@@ -166,13 +184,13 @@ RULES:
     debug('systemDesignAgent:result', { result, consistencyScore });
     return {
       updatedState: {
-        activeState: consistencyScore < 0.58 ? transitionTo(input.activeState || input.globalState?.activeState || 'system_design', 'CLARIFICATION_REQUIRED') : transitionTo(input.activeState || input.globalState?.activeState || 'system_design', 'UI_SPEC'),
+        activeState: consistencyScore < 0.58 ? transitionTo(input.activeState || input.globalState?.activeState || AgentState.SYSTEM_DESIGN, AgentState.NEXT_CLARIFICATION) : transitionTo(input.activeState || input.globalState?.activeState || AgentState.SYSTEM_DESIGN, AgentState.NEXT_UI_SPEC),
         domain: 'system_design',
         consistencyScore,
-        transitions: [...(input.globalState?.transitions || []), `systemDesign:${String(input.activeState || input.globalState?.activeState || 'system_design')}`],
+        transitions: [...(input.globalState?.transitions || []), `systemDesign:${String(input.activeState || input.globalState?.activeState || AgentState.SYSTEM_DESIGN)}`],
         metadata: { backendRequired, authRequired },
       },
-      nextStateProposal: consistencyScore < 0.58 ? 'CLARIFICATION_REQUIRED' : 'UI_SPEC',
+      nextStateProposal: consistencyScore < 0.58 ? AgentState.NEXT_CLARIFICATION : AgentState.NEXT_UI_SPEC,
       consistencyScore,
       output: result,
     };

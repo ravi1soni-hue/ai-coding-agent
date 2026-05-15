@@ -61,24 +61,24 @@ function progressFromMemory(memory: ProjectMemory): number {
 async function writeSnapshot(scope: AdapterScope, memory: ProjectMemory): Promise<void> {
   const client = await getPgPool().connect();
   try {
+    /**
+     * Two-phase persistence:
+     *  1) Commit cursor fields (status/current_step/progress) in a lightweight transaction.
+     *     This MUST NOT be blocked by heavy JSON/artifact persistence.
+     *  2) Best-effort commit heavy fields + blackboard.
+     *
+     * This prevents the failure mode where WS events proceed but project_sessions.current_step
+     * stays NULL due to JSON serialization / JSONB write issues.
+     */
+
+    // Phase 1: lightweight cursor update
     await client.query('BEGIN');
-    // Update project snapshot
     await client.query(
       `UPDATE project_sessions
        SET
         status = COALESCE($3, status),
         current_step = COALESCE($4, current_step),
         progress = COALESCE($5, progress),
-        requirements = COALESCE($6::jsonb, requirements),
-        clarifications = COALESCE($7::jsonb, clarifications),
-        confirmation = COALESCE($8::jsonb, confirmation),
-        system_design = COALESCE($9::jsonb, system_design),
-        ui_spec = COALESCE($10::jsonb, ui_spec),
-        structured_spec = COALESCE($11::jsonb, structured_spec),
-        blueprint = COALESCE($12::jsonb, blueprint),
-        code_gen = COALESCE($13::jsonb, code_gen),
-        test_result = COALESCE($14::jsonb, test_result),
-        deployment = COALESCE($15::jsonb, deployment),
         last_active_at = NOW()
        WHERE id = $1 AND user_id = $2`,
       [
@@ -87,18 +87,10 @@ async function writeSnapshot(scope: AdapterScope, memory: ProjectMemory): Promis
         memoryStatusToDbStatus(memory),
         memory.currentState,
         progressFromMemory(memory),
-        JSON.stringify(memory.requirements),
-        JSON.stringify(memory.clarifications),
-        JSON.stringify(memory.confirmation),
-        JSON.stringify(memory.systemDesign),
-        JSON.stringify(memory.uiSpec?.uiSpec),
-        JSON.stringify(memory.uiSpec?.structuredSpec),
-        JSON.stringify(memory.blueprint?.blueprint),
-        JSON.stringify(memory.code),
-        JSON.stringify(memory.tests),
-        JSON.stringify(memory.deployment),
       ],
     );
+
+    // Keep blackboard cursor fields in the same lightweight transaction.
     await client.query(
       `INSERT INTO project_blackboards (id, project_id, user_id, state)
        VALUES ($1, $1, $2, $3::jsonb)
@@ -125,9 +117,55 @@ async function writeSnapshot(scope: AdapterScope, memory: ProjectMemory): Promis
         }),
       ],
     );
+
     await client.query('COMMIT');
+
+    // Phase 2: heavy fields (best-effort; do not block cursor durability)
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE project_sessions
+         SET
+          requirements = COALESCE($3::jsonb, requirements),
+          clarifications = COALESCE($4::jsonb, clarifications),
+          confirmation = COALESCE($5::jsonb, confirmation),
+          system_design = COALESCE($6::jsonb, system_design),
+          ui_spec = COALESCE($7::jsonb, ui_spec),
+          structured_spec = COALESCE($8::jsonb, structured_spec),
+          blueprint = COALESCE($9::jsonb, blueprint),
+          code_gen = COALESCE($10::jsonb, code_gen),
+          test_result = COALESCE($11::jsonb, test_result),
+          deployment = COALESCE($12::jsonb, deployment),
+          last_active_at = NOW()
+         WHERE id = $1 AND user_id = $2`,
+        [
+          scope.projectId,
+          scope.userId,
+          memory.requirements ? JSON.stringify(memory.requirements) : null,
+          memory.clarifications ? JSON.stringify(memory.clarifications) : null,
+          memory.confirmation ? JSON.stringify(memory.confirmation) : null,
+          memory.systemDesign ? JSON.stringify(memory.systemDesign) : null,
+          memory.uiSpec?.uiSpec ? JSON.stringify(memory.uiSpec.uiSpec) : null,
+          memory.uiSpec?.structuredSpec ? JSON.stringify(memory.uiSpec.structuredSpec) : null,
+          memory.blueprint?.blueprint ? JSON.stringify(memory.blueprint.blueprint) : null,
+          memory.code ? JSON.stringify(memory.code) : null,
+          memory.tests ? JSON.stringify(memory.tests) : null,
+          memory.deployment ? JSON.stringify(memory.deployment) : null,
+        ],
+      );
+
+      await client.query('COMMIT');
+    } catch (heavyErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      // Best-effort heavy persistence: cursor durability is already guaranteed in Phase 1.
+      logError('persistenceAdapter:writeSnapshot_heavy_failed', {
+        projectId: scope.projectId,
+        stage: memory.currentState,
+        error: heavyErr instanceof Error ? heavyErr.message : String(heavyErr),
+      });
+    }
   } catch (error) {
-    await client.query('ROLLBACK');
+    // If Phase 1 fails, propagate: this is the cursor durability transaction.
     throw error;
   } finally {
     client.release();
