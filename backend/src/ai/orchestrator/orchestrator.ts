@@ -7,6 +7,10 @@ import { codeGenerationAgent } from '../../agents/codeGenerationAgent';
 import { testFixAgent } from '../../agents/testFixAgent';
 import { deploymentAgent } from '../../agents/deploymentAgent';
 import { reviewerAgent } from '../../agents/reviewerAgent';
+import { reviewStage } from '../../agents/stageReviewer';
+import { fixStage } from '../../agents/stageFixer';
+import { getModelPriorityChain } from '../../agents/modelRouter';
+import { LLMProxyClient } from '../../agents/llmProxyClient';
 import { materializeProjectWorkspace, writeGeneratedFile } from '../../factory/projectFactory';
 import { runBuildWorker, cleanupWorkspace } from '../../workers/buildWorker';
 import { consolidateProjectSpec, validateProjectSpec } from '../../agents/projectSpec';
@@ -449,6 +453,7 @@ async function runFinalAudit(projectSpec: any, memory: ProjectMemory): Promise<v
   const reviewed = await reviewerAgent({
     projectId: memory.projectId,
     blueprint: memory.blueprint?.blueprint,
+    files: memory.code?.files,
     reviewerName: 'Final Audit Reviewer',
   } as any);
 
@@ -1017,6 +1022,68 @@ function assertConsistency(memory: ProjectMemory, command: OrchestrationCommand,
  * messages are the same strings produced by validateProjectConsistency, so we
  * have a single source of truth for what each pattern means.
  */
+/**
+ * LLM-assisted fallback for upstream triage. Only invoked when the rule-based
+ * classifier cannot map any issue to an upstream stage but issues remain —
+ * those would otherwise terminate the pipeline as a dead-end. The LLM is asked
+ * to pick the single upstream stage (ui_spec or system_design) most likely to
+ * unblock the run when re-entered with hints. Failures degrade silently to "no
+ * route" so a flaky proxy can never make routing worse than the deterministic
+ * baseline.
+ */
+async function llmTriageUpstreamFeedback(
+  issues: import('../contracts/orchestration').OrchestrationIssue[],
+  projectId: string,
+): Promise<{ targetStage: OrchestrationState | ''; issues: string[] }> {
+  const chain = getModelPriorityChain('orchestration');
+  const [primary, ...fallbacks] = chain;
+  if (!primary?.apiKey) return { targetStage: '', issues: [] };
+
+  const client = new LLMProxyClient({ apiKey: primary.apiKey, projectId, fallbacks });
+  const issueLines = issues
+    .map((i) => `- [${i.type}] ${String(i.message || '').slice(0, 240)}`)
+    .slice(0, 25)
+    .join('\n');
+
+  const system = [
+    'You triage blueprint-stage failures in a multi-agent code generation pipeline.',
+    'Decide which upstream stage to re-enter with hints. Allowed stages: "ui_spec", "system_design", or "" (none / not actionable upstream).',
+    'Respond with strict JSON: {"targetStage": "ui_spec"|"system_design"|"", "issues": string[]}.',
+    'Each entry in "issues" is a concrete hint the upstream agent can act on. If no upstream re-entry would help, return targetStage="" and issues=[].',
+  ].join(' ');
+  const user = `Blueprint-stage issues:\n${issueLines}\n\nReturn JSON only.`;
+
+  try {
+    const response = await client.chatCompletion(
+      [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      primary.model,
+      0.1,
+      0.9,
+      400,
+    );
+    const text = String(response?.choices?.[0]?.message?.content ?? response?.content ?? '').trim();
+    if (!text) return { targetStage: '', issues: [] };
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start < 0 || end <= start) return { targetStage: '', issues: [] };
+    const parsed = JSON.parse(text.slice(start, end + 1));
+    const target = parsed?.targetStage;
+    const hints = Array.isArray(parsed?.issues)
+      ? parsed.issues.map((s: unknown) => String(s)).filter((s: string) => s.trim().length > 0)
+      : [];
+    if ((target === 'ui_spec' || target === 'system_design') && hints.length > 0) {
+      return { targetStage: target, issues: hints };
+    }
+    return { targetStage: '', issues: [] };
+  } catch (err: any) {
+    logError('orchestrator:llm_triage_failed', { error: err?.message || String(err), projectId });
+    return { targetStage: '', issues: [] };
+  }
+}
+
 function extractUpstreamFeedback(issues: import('../contracts/orchestration').OrchestrationIssue[]): { targetStage: OrchestrationState | ''; issues: string[] } {
   const uiSpecHints: string[] = [];
   const systemDesignHints: string[] = [];
@@ -1056,6 +1123,71 @@ function extractUpstreamFeedback(issues: import('../contracts/orchestration').Or
   if (uiSpecHints.length > 0) return { targetStage: 'ui_spec', issues: uiSpecHints };
   if (systemDesignHints.length > 0) return { targetStage: 'system_design', issues: systemDesignHints };
   return { targetStage: '', issues: [] };
+}
+
+/**
+ * Stage-scoped review + fix loop. Returns when approved or when the fix
+ * budget is exhausted; caller handles non-approval (typically regenerate).
+ *
+ * Fails safe: a null fixer result (LLM error or schema-invalid patch) ends
+ * the loop so the caller can fall back to regeneration. The fixer enforces
+ * the stage's schema, so a malformed patch can never reach memory.
+ */
+async function runStageReviewFixLoop(args: {
+  stage: import('../../agents/stageReviewer').ReviewableStage;
+  projectId: string;
+  memory: ProjectMemory;
+  getArtifact: () => unknown;
+  installFix: (patched: unknown) => void;
+  maxFixLoops?: number;
+}): Promise<{ approved: boolean; notes: string[]; hints: string[] }> {
+  const maxFixLoops = args.maxFixLoops ?? 2;
+  let fixLoops = 0;
+  while (true) {
+    const review = await reviewStage({
+      stage: args.stage,
+      projectId: args.projectId,
+      requirements: args.memory.requirements,
+      clarifications: args.memory.clarifications,
+      artifact: args.getArtifact(),
+    });
+    if (review.approved) return { approved: true, notes: [], hints: [] };
+    if (fixLoops >= maxFixLoops) return { approved: false, notes: review.notes, hints: review.hints };
+
+    const fixed = await fixStage({
+      stage: args.stage,
+      projectId: args.projectId,
+      artifact: args.getArtifact(),
+      notes: review.hints,
+      requirements: args.memory.requirements,
+      clarifications: args.memory.clarifications,
+    });
+    if (!fixed) return { approved: false, notes: review.notes, hints: review.hints };
+
+    args.installFix(fixed.artifact);
+    appendHistory(
+      args.memory,
+      args.stage,
+      'stage_fix_applied',
+      `fixer applied ${fixed.applied.length}, rejected ${fixed.rejected.length}`,
+      { applied: fixed.applied, rejected: fixed.rejected },
+    );
+
+    // Fixer pushed back on every note — re-reviewing produces the same notes,
+    // so accept the fixer's judgement and stop looping.
+    if (fixed.allRejected) {
+      appendHistory(
+        args.memory,
+        args.stage,
+        'stage_review_overridden',
+        `fixer rejected all ${fixed.rejected.length} note(s) as false positives — accepting`,
+        fixed.rejected,
+      );
+      return { approved: true, notes: [], hints: [] };
+    }
+
+    fixLoops += 1;
+  }
 }
 
 function invalidateDownstream(memory: ProjectMemory, fromStage: OrchestrationState): void {
@@ -1188,77 +1320,164 @@ export async function runAIOrchestration(
     const feedbackForSystemDesign =
       memory.pendingFeedback?.targetStage === 'system_design' ? memory.pendingFeedback.issues.slice() : [];
 
-    // 5. System design
-    // Use only the stable, user-provided fields as the hash input for system_design.
-    // projectSpec also contains memory.systemDesign/uiSpec/blueprint which are undefined
-    // on the first run but populated on resume — causing a permanent hash mismatch.
-    const systemDesignHashInput = { userMessage: command.userMessage, requirements: memory.requirements, clarifications: memory.clarifications };
-    const systemDesignResult = await stageWrap(memory, 'system_design', systemDesignHashInput, async () => {
-      // Always run the real systemDesignAgent so it can produce a rich component tree,
-      // proper styling choices, and page-specific sub-components from the actual requirements.
-      // For frontend-only projects we strip backend/database/auth after the fact rather than
-      // skipping the agent entirely — the old shortcut returned a hardcoded react-vite+css
-      // shell with components == pages, which starved the blueprint and UI-spec of the detail
-      // they need to generate real code.
-      const result = await systemDesignAgent({
-        projectId: command.projectId,
+    // 5. System design — generate → (review → fix)* → regenerate on fix failure.
+    const maxSystemDesignRegenLoops = 2;
+    const maxSystemDesignFixLoops = 2;
+    let systemDesignRegenLoops = 0;
+    let systemDesignResult: StageResult<unknown>;
+    while (true) {
+      // Use only the stable, user-provided fields as the hash input for system_design.
+      // projectSpec also contains memory.systemDesign/uiSpec/blueprint which are undefined
+      // on the first run but populated on resume — causing a permanent hash mismatch.
+      const systemDesignHashInput = {
+        userMessage: command.userMessage,
         requirements: memory.requirements,
-        projectSpec,
-        previousIssues: feedbackForSystemDesign,
-      });
-      // For frontend-only projects, zero out backend artifacts so downstream stages
-      // (blueprint, codeGen) never try to wire a server that won't exist.
-      if (isFrontendOnlyRequirements(memory.requirements) && result.output) {
-        (result.output as any).backend = null;
-        (result.output as any).database = null;
-        (result.output as any).auth = null;
-        if ((result.output as any).hosting) {
-          (result.output as any).hosting.backend = null;
+        clarifications: memory.clarifications,
+        feedback: feedbackForSystemDesign.slice(),
+      };
+      systemDesignResult = await stageWrap(memory, 'system_design', systemDesignHashInput, async () => {
+        const result = await systemDesignAgent({
+          projectId: command.projectId,
+          requirements: memory.requirements,
+          projectSpec,
+          previousIssues: feedbackForSystemDesign,
+        });
+        if (isFrontendOnlyRequirements(memory.requirements) && result.output) {
+          (result.output as any).backend = null;
+          (result.output as any).database = null;
+          (result.output as any).auth = null;
+          if ((result.output as any).hosting) {
+            (result.output as any).hosting.backend = null;
+          }
         }
+        setSystemDesign(memory, result.output);
+        assertConsistencyWithSelfHeal(memory, command, 'system_design', repairSystemDesign);
+        return result.output;
+      }, {
+        ...opts,
+        percent: 25,
+        onRetry: (_attempt, err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg) feedbackForSystemDesign.push(msg);
+        },
+      });
+
+      if (systemDesignResult.status !== 'success') break;
+
+      const reviewOutcome = await runStageReviewFixLoop({
+        stage: 'system_design',
+        projectId: command.projectId,
+        memory,
+        getArtifact: () => memory.systemDesign,
+        installFix: (patched) => setSystemDesign(memory, patched as any),
+        maxFixLoops: maxSystemDesignFixLoops,
+      });
+      if (reviewOutcome.approved) break;
+
+      if (systemDesignRegenLoops >= maxSystemDesignRegenLoops) {
+        appendHistory(
+          memory,
+          'system_design',
+          'stage_review_unresolved',
+          `proceeding with ${reviewOutcome.notes.length} unresolved reviewer note(s)`,
+          reviewOutcome.notes,
+        );
+        break;
       }
-      setSystemDesign(memory, result.output);
-      assertConsistencyWithSelfHeal(memory, command, 'system_design', repairSystemDesign);
-      return result.output;
-    }, {
-      ...opts,
-      percent: 25,
-      onRetry: (_attempt, err) => {
-        // Push the previous error into previousIssues so systemDesignAgent
-        // gets explicit feedback on what to fix — not a blind re-run.
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg) feedbackForSystemDesign.push(msg);
-      },
-    });
+
+      appendHistory(
+        memory,
+        'system_design',
+        'stage_review_regenerate',
+        `${reviewOutcome.notes.length} note(s) after fix loop; regenerating system_design`,
+        reviewOutcome.notes,
+      );
+      for (const hint of reviewOutcome.hints) {
+        if (!feedbackForSystemDesign.includes(hint)) feedbackForSystemDesign.push(hint);
+      }
+      invalidateDownstream(memory, 'system_design');
+      memory.systemDesign = undefined;
+      systemDesignRegenLoops += 1;
+    }
 
     if (systemDesignResult.status !== 'success') return finalizeResult(memory, systemDesignResult, null, null);
 
-    // 6. UI spec
-    const uiSpecResult = await stageWrap(memory, 'ui_spec', memory.systemDesign, async () => {
-      const result = await uiSpecAgent({
-        projectId: command.projectId,
-        requirements: memory.requirements,
-        systemDesign: memory.systemDesign,
-        projectSpec,
-        previousIssues: feedbackForUiSpec,
-        globalState: {
-          activeState: memory.currentState,
+    // 6. UI spec — generate → (review → fix)* → regenerate on fix failure.
+    // On both caps exhausted, the existing blueprint-feedback loop is the
+    // safety net.
+    const maxUiSpecRegenLoops = 2;
+    const maxUiSpecFixLoops = 2;
+    let uiSpecRegenLoops = 0;
+    let uiSpecResult: StageResult<unknown>;
+    while (true) {
+      // Vary the stageWrap input hash by feedback length so the checkpoint
+      // cache does not short-circuit a forced re-run with new hints.
+      const uiSpecHashInput = { systemDesign: memory.systemDesign, feedback: feedbackForUiSpec.slice() };
+      uiSpecResult = await stageWrap(memory, 'ui_spec', uiSpecHashInput, async () => {
+        const result = await uiSpecAgent({
+          projectId: command.projectId,
+          requirements: memory.requirements,
+          systemDesign: memory.systemDesign,
           projectSpec,
-          consistencyScore: memory.uiSpec?.structuredSpec ? 1 : 0,
-          domain: 'ui_spec',
-          transitions: [],
+          previousIssues: feedbackForUiSpec,
+          globalState: {
+            activeState: memory.currentState,
+            projectSpec,
+            consistencyScore: memory.uiSpec?.structuredSpec ? 1 : 0,
+            domain: 'ui_spec',
+            transitions: [],
+          },
+        });
+        setUISpec(memory, { uiSpec: result.output, structuredSpec: result.output });
+        assertConsistencyWithSelfHeal(memory, command, 'ui_spec', repairUiSpec);
+        return result.output;
+      }, {
+        ...opts,
+        percent: 35,
+        onRetry: (_attempt, err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg) feedbackForUiSpec.push(msg);
         },
       });
-      setUISpec(memory, { uiSpec: result.output, structuredSpec: result.output });
-      assertConsistencyWithSelfHeal(memory, command, 'ui_spec', repairUiSpec);
-      return result.output;
-    }, {
-      ...opts,
-      percent: 35,
-      onRetry: (_attempt, err) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg) feedbackForUiSpec.push(msg);
-      },
-    });
+
+      if (uiSpecResult.status !== 'success') break;
+
+      const reviewOutcome = await runStageReviewFixLoop({
+        stage: 'ui_spec',
+        projectId: command.projectId,
+        memory,
+        getArtifact: () => memory.uiSpec?.structuredSpec,
+        installFix: (patched) => setUISpec(memory, { uiSpec: patched, structuredSpec: patched }),
+        maxFixLoops: maxUiSpecFixLoops,
+      });
+      if (reviewOutcome.approved) break;
+
+      if (uiSpecRegenLoops >= maxUiSpecRegenLoops) {
+        appendHistory(
+          memory,
+          'ui_spec',
+          'stage_review_unresolved',
+          `proceeding with ${reviewOutcome.notes.length} unresolved reviewer note(s)`,
+          reviewOutcome.notes,
+        );
+        break;
+      }
+
+      // Fix loop exhausted without approval — regenerate from scratch with hints.
+      appendHistory(
+        memory,
+        'ui_spec',
+        'stage_review_regenerate',
+        `${reviewOutcome.notes.length} note(s) after fix loop; regenerating ui_spec`,
+        reviewOutcome.notes,
+      );
+      for (const hint of reviewOutcome.hints) {
+        if (!feedbackForUiSpec.includes(hint)) feedbackForUiSpec.push(hint);
+      }
+      invalidateDownstream(memory, 'ui_spec');
+      memory.uiSpec = undefined;
+      uiSpecRegenLoops += 1;
+    }
 
     if (uiSpecResult.status !== 'success') return finalizeResult(memory, uiSpecResult, null, null);
 
@@ -1279,17 +1498,64 @@ export async function runAIOrchestration(
 
     lastBlueprintResult = blueprintResult;
 
+    // Track whether we're routing because of review rejection (synthetic issues
+    // tuned for LLM triage) vs blueprint-generation failure (real issues with
+    // patterns the deterministic classifier can match). Lets us skip the rule
+    // pass when we already know it won't match.
+    let routingFromReview = false;
+    let reviewIssues: import('../contracts/orchestration').OrchestrationIssue[] = [];
+
     if (blueprintResult.status === 'success') {
-      // Feedback consumed successfully; clear it so subsequent stages don't see stale hints.
-      memory.pendingFeedback = undefined;
-      designResolved = true;
-      break;
+      // Stage-scoped review + fix pass on the blueprint before accepting it.
+      const reviewOutcome = await runStageReviewFixLoop({
+        stage: 'blueprint',
+        projectId: command.projectId,
+        memory,
+        getArtifact: () => memory.blueprint?.blueprint,
+        installFix: (patched) => setBlueprint(memory, { blueprint: patched }),
+        maxFixLoops: 2,
+      });
+
+      if (reviewOutcome.approved) {
+        memory.pendingFeedback = undefined;
+        designResolved = true;
+        break;
+      }
+
+      // Fix loop exhausted — route upstream via llmTriageUpstreamFeedback.
+      // The deterministic extractUpstreamFeedback uses regex patterns tuned for
+      // blueprint-generation error messages; reviewer notes are written in
+      // different language and won't match, so skip it and save the call.
+      routingFromReview = true;
+      reviewIssues = reviewOutcome.hints.map((hint, idx) => ({
+        id: `blueprint_review_${designLoop}_${idx}`,
+        projectId: memory.projectId,
+        sessionId: memory.sessionId,
+        stage: 'blueprint' as OrchestrationState,
+        type: 'semantic_inconsistency' as const,
+        severity: 'medium' as const,
+        message: hint,
+        recoverable: true,
+      }));
+      appendHistory(
+        memory,
+        'blueprint',
+        'stage_review_rejected',
+        `${reviewOutcome.notes.length} unresolved blueprint note(s); routing upstream`,
+        reviewOutcome.notes,
+      );
     }
 
-    // Blueprint failed. Decide whether the failure points upstream (vocabulary or
-    // structural divergence the upstream agent could plausibly fix on rerun) or
-    // is a genuine dead-end.
-    const upstreamHints = extractUpstreamFeedback(blueprintResult.issues);
+    // Decide which upstream stage to re-enter:
+    //  - blueprint-generation failure: try deterministic rules first, fall back to LLM triage.
+    //  - blueprint-review rejection:   skip rules (won't match reviewer prose), go straight to LLM triage.
+    const issuesForTriage = routingFromReview ? reviewIssues : blueprintResult.issues;
+    let upstreamHints = routingFromReview
+      ? { targetStage: '' as OrchestrationState | '', issues: [] as string[] }
+      : extractUpstreamFeedback(blueprintResult.issues);
+    if (!upstreamHints.targetStage && issuesForTriage.length > 0) {
+      upstreamHints = await llmTriageUpstreamFeedback(issuesForTriage, memory.projectId);
+    }
     const canFeedback = designLoop < maxDesignFeedbackLoops && upstreamHints.targetStage && upstreamHints.issues.length > 0;
     if (!canFeedback) {
       return finalizeResult(memory, blueprintResult, null, null);

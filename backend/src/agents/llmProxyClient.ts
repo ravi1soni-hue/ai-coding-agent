@@ -59,6 +59,31 @@ export class LLMProxyClient {
   }
 
   /**
+   * Compute backoff delay for a retryable HTTP error.
+   * Honors the proxy's Retry-After header (seconds or HTTP-date) when present;
+   * otherwise uses exponential backoff with jitter. Capped at 30s so a single
+   * stuck attempt cannot stall the whole pipeline.
+   */
+  private computeRetryDelayMs(response: Response, attempt: number): number {
+    const cap = 30_000;
+    const retryAfter = response.headers.get('retry-after');
+    if (retryAfter) {
+      const asSeconds = Number(retryAfter);
+      if (Number.isFinite(asSeconds) && asSeconds >= 0) {
+        return Math.min(cap, Math.ceil(asSeconds * 1000));
+      }
+      const asDate = Date.parse(retryAfter);
+      if (!Number.isNaN(asDate)) {
+        const diff = asDate - Date.now();
+        if (diff > 0) return Math.min(cap, diff);
+      }
+    }
+    const base = 1000 * Math.pow(2, attempt);
+    const jitter = Math.floor(Math.random() * 500);
+    return Math.min(cap, base + jitter);
+  }
+
+  /**
    * Returns the ordered {model, apiKey} chain to attempt for a chatCompletion call.
    * If fallbacks were provided via the constructor (from modelRouter.getModelPriorityChain),
    * those are used — each with their own correct API key.
@@ -262,7 +287,7 @@ export class LLMProxyClient {
                 // broken for this model right now). Break immediately to try the next model.
                 if (isHtmlResponse) break;
                 if (attempt < 2) {
-                  await this.sleep(750 * (attempt + 1));
+                  await this.sleep(this.computeRetryDelayMs(response, attempt));
                   continue;
                 }
                 break;
@@ -274,7 +299,16 @@ export class LLMProxyClient {
             if (!response.ok) {
               this.log('chatCompletion error', { status: response.status, model: modelCandidate, chatUrl, data });
               if (this.shouldRetryStatus(response.status) && attempt < 2) {
-                await this.sleep(750 * (attempt + 1));
+                const delay = this.computeRetryDelayMs(response, attempt);
+                this.log('chatCompletion retrying after retryable status', {
+                  status: response.status,
+                  retryAfter: response.headers.get('retry-after'),
+                  attempt,
+                  delay,
+                  modelCandidate,
+                  chatUrl,
+                });
+                await this.sleep(delay);
                 continue;
               }
               throw new Error(this.formatHttpError('chatCompletion', response.status, response.statusText, data?.error?.message || data?.message || JSON.stringify(data).slice(0, 240)));

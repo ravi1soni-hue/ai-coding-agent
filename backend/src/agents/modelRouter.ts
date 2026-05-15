@@ -7,11 +7,12 @@ export type TaskType =
   | 'clarification'         // ClarificationAgent:        GPT4O_MINI > GEMINI_FLASH
   | 'system_design'         // SystemDesignAgent:         CLAUDE4 > GPT5_2 > KIMI_K2
   | 'ui_spec'               // UiSpecAgent:               GPT5_2 > CLAUDE4 > GPT4O
-  | 'code_generation'       // CodeGenerationAgent:       GPT5_2 > GROK3 > GPT5_MINI > DEEPSEEK_R1
-  | 'test_generation'       // TestGenerationAgent:       GPT5_MINI > DEEPSEEK_R1
-  | 'code_review'           // CodeReviewAgent (RESERVED — chain defined, no agent file yet): CLAUDE4 > GPT5_2
+  | 'code_generation'       // CodeGenerationAgent:       GPT5_2 > CLAUDE4 > GROK3 > GPT5_MINI > DEEPSEEK_R1
+  | 'test_generation'       // TestGenerationAgent:       GPT5_2 > CLAUDE4 > GPT5_MINI > DEEPSEEK_R1
+  | 'code_review'           // ReviewerAgent (LLM blueprint+code review): CLAUDE4 > GPT5_2
+  | 'stage_review'          // StageReviewer (per-stage cheap audit): GPT4O_MINI > GEMINI_FLASH
   | 'embedding'             // EmbeddingAgent:            EMBEDDING
-  | 'orchestration';        // Orchestrator:              GPT5_2 > KIMI_K2
+  | 'orchestration';        // Orchestrator routing decisions: GPT5_2 > KIMI_K2
 
 export interface ModelConfig {
   model: string;
@@ -70,20 +71,27 @@ export function getModelPriorityChain(task: TaskType): ModelConfig[] {
 
     case 'code_generation':
       return buildChain(
-        [config.GPT5_2_MODEL,    config.GROK3_MODEL,    config.GPT5_MINI_MODEL,    config.DEEPSEEK_R1_MODEL],
-        [config.GPT5_2_API_KEY,  config.GROK3_API_KEY,  config.GPT5_MINI_API_KEY,  config.DEEPSEEK_R1_API_KEY],
+        [config.GPT5_2_MODEL,    config.CLAUDE4_MODEL,    config.GROK3_MODEL,    config.GPT5_MINI_MODEL,    config.DEEPSEEK_R1_MODEL],
+        [config.GPT5_2_API_KEY,  config.CLAUDE4_API_KEY,  config.GROK3_API_KEY,  config.GPT5_MINI_API_KEY,  config.DEEPSEEK_R1_API_KEY],
       );
 
     case 'test_generation':
       return buildChain(
-        [config.GPT5_MINI_MODEL,    config.DEEPSEEK_R1_MODEL],
-        [config.GPT5_MINI_API_KEY,  config.DEEPSEEK_R1_API_KEY],
+        [config.GPT5_2_MODEL,    config.CLAUDE4_MODEL,    config.GPT5_MINI_MODEL,    config.DEEPSEEK_R1_MODEL],
+        [config.GPT5_2_API_KEY,  config.CLAUDE4_API_KEY,  config.GPT5_MINI_API_KEY,  config.DEEPSEEK_R1_API_KEY],
       );
 
     case 'code_review':
       return buildChain(
         [config.CLAUDE4_MODEL,    config.GPT5_2_MODEL],
         [config.CLAUDE4_API_KEY,  config.GPT5_2_API_KEY],
+      );
+
+    case 'stage_review':
+      // Per-stage audit runs after every upstream stage — keep it cheap and fast.
+      return buildChain(
+        [config.GPT4O_MINI_MODEL,    config.GEMINI_FLASH_MODEL],
+        [config.GPT4O_MINI_API_KEY,  config.GEMINI_FLASH_API_KEY],
       );
 
     case 'orchestration':
