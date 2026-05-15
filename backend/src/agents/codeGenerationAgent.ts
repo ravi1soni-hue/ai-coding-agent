@@ -476,7 +476,6 @@ function filterRootComponents(components: GeneratedFile[], compositionOrder?: st
 function fallbackFrontendApp(_manifest: FrontendManifest, components: GeneratedFile[], hasBackend = false, compositionOrder?: string[]): GeneratedFile {
   const rootComponents = filterRootComponents(components, compositionOrder);
   const imports = components.map((file) => `import ${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} from './${file.path.replace(/^src\//, '')}';`).join('\n');
-  const componentTags = rootComponents.map((file) => `        <${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} />`).join('\n');
   const apiInit = hasBackend ? `
   const API_BASE = window.__ENV__?.API_URL || import.meta.env.VITE_API_URL || 'http://localhost:3000';
   const PROJECT_ID = window.__ENV__?.PROJECT_ID || import.meta.env.VITE_PROJECT_ID || '';
@@ -493,16 +492,33 @@ function fallbackFrontendApp(_manifest: FrontendManifest, components: GeneratedF
   const apiStatus = hasBackend ? `
   {!apiReady && <div className="warning">Backend not connected. Using offline mode.</div>}` : '';
 
+  const wrappedTags = rootComponents
+    .map((file) => {
+      const name = sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection');
+      return `        <ErrorBoundary name="${name}"><${name} /></ErrorBoundary>`;
+    })
+    .join('\n');
+
   return {
     path: 'src/App.jsx',
     content: `import React from 'react';
 ${imports}
 
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(e) { return { error: e }; }
+  componentDidCatch(e, info) { console.error('[ErrorBoundary] ' + this.props.name + ':', e.message, info.componentStack); }
+  render() {
+    if (this.state.error) return <div style={{padding:'16px',background:'#fee2e2',color:'#991b1b',borderRadius:'8px',margin:'8px'}}>[{this.props.name}] {this.state.error.message}</div>;
+    return this.props.children;
+  }
+}
+
 export default function App() {
 ${apiInit}
   return (
     <main className="app-shell">
-${componentTags || '        <div className="content-grid" />'}
+${wrappedTags || '        <div className="content-grid" />'}
 ${apiStatus}
     </main>
   );
@@ -1525,6 +1541,20 @@ const API_BASE = window.__ENV__?.API_URL || import.meta.env.VITE_API_URL || 'htt
 const PROJECT_ID = window.__ENV__?.PROJECT_ID || import.meta.env.VITE_PROJECT_ID || '';
 ` : ''}
 
+ERROR BOUNDARY — you MUST include this class verbatim before the App function:
+\`\`\`
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(e) { return { error: e }; }
+  componentDidCatch(e, info) { console.error('[ErrorBoundary] ' + this.props.name + ':', e.message, info.componentStack); }
+  render() {
+    if (this.state.error) return <div style={{padding:'16px',background:'#fee2e2',color:'#991b1b',borderRadius:'8px',margin:'8px'}}>[{this.props.name}] {this.state.error.message}</div>;
+    return this.props.children;
+  }
+}
+\`\`\`
+Wrap EACH root component in JSX with <ErrorBoundary name="ComponentName">...</ErrorBoundary>. This catches runtime crashes and surfaces the broken component name in the console so errors can be diagnosed.
+
 RULES:
 - Export: export default function App() { ... }
 - Import ALL components listed above but only render the ROOT components in JSX.
@@ -1532,7 +1562,7 @@ RULES:
 - This file handles routing (BrowserRouter + Routes + Route) and/or page-switching state. Child components do NOT.
 - If multi-page: use BrowserRouter + Routes. If single-page with sections: render all root sections top-to-bottom.
 - Keep App.jsx lean: routing + layout shell + top-level state only. No business logic inside App.jsx itself.
-- SIZE: target 60-120 lines. Hard max 180 lines. Pass data to children via props, not inline logic.
+- SIZE: target 60-120 lines. Hard max 200 lines (ErrorBoundary adds ~10 lines). Pass data to children via props, not inline logic.
 - ${backendRequired ? 'Use API_BASE for all fetch calls. Always include project_id: PROJECT_ID in query params (GET/DELETE) or request body (POST/PUT). Handle loading and error states.' : 'No backend calls.'}
 - No TODOs, no stubs, no placeholder comments.
 - Generation order: ${(uiSpec?.generationOrder || []).join(' -> ') || 'all components'}

@@ -115,12 +115,26 @@ export async function runSmokeTest(workspaceDir: string): Promise<SmokeTestResul
     const hasContent = childCount > 0;
     const passed = hasContent && consoleErrors.length === 0;
 
-    const syntheticBuildLog = hasContent
-      ? consoleErrors.map(e => `error: runtime console error: ${e}`).join('\n')
-      : `error: App.jsx renders blank — React root has no children after page load\n` +
-        consoleErrors.map(e => `error: ${e}`).join('\n');
+    // Extract component names from ErrorBoundary console errors:
+    // "[ErrorBoundary] ComponentName: error message" → target that file specifically
+    const errorBoundaryRe = /\[ErrorBoundary\]\s+(\w+):\s+(.+)/;
+    const componentErrors: string[] = [];
+    for (const e of consoleErrors) {
+      const m = e.match(errorBoundaryRe);
+      if (m) {
+        componentErrors.push(`error: src/components/${m[1]}.jsx: runtime error: ${m[2]}`);
+      }
+    }
 
-    debug('smokeTest:result', { hasContent, childCount, consoleErrors: consoleErrors.length, passed });
+    const syntheticBuildLog = [
+      ...(!hasContent ? [`error: App.jsx renders blank — React root has no children after page load`] : []),
+      ...componentErrors,
+      ...consoleErrors
+        .filter(e => !errorBoundaryRe.test(e))
+        .map(e => `error: runtime: ${e}`),
+    ].join('\n');
+
+    debug('smokeTest:result', { hasContent, childCount, consoleErrors: consoleErrors.length, componentErrors: componentErrors.length, passed });
     return { passed, hasContent, consoleErrors, syntheticBuildLog };
 
   } finally {

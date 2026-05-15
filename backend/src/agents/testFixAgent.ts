@@ -2,11 +2,31 @@
 import crypto from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
+import ts from 'typescript';
 import { debug, warn as logWarn, error as logError } from '../utils/logger';
 import { config as envConfig } from '../config/env';
 import { getModelPriorityChain } from './modelRouter';
 import { LLMProxyClient } from './llmProxyClient';
 import { parseJsonResponse } from './llmUtils';
+
+/**
+ * Runs ts.transpileModule on a JS/TS/JSX file and returns any syntax errors.
+ * Used to validate patched files before writing them — avoids burning a retry
+ * cycle on a fix that the LLM got wrong again.
+ */
+function transpileCheck(filePath: string, content: string): string | null {
+  const ext = path.extname(filePath).toLowerCase();
+  if (!['.js', '.jsx', '.ts', '.tsx'].includes(ext)) return null;
+  const jsx = ['.jsx', '.tsx'].includes(ext) ? ts.JsxEmit.Preserve : undefined;
+  const result = ts.transpileModule(content, {
+    compilerOptions: { jsx, target: ts.ScriptTarget.ES2020 },
+    fileName: filePath,
+    reportDiagnostics: true,
+  });
+  const errors = (result.diagnostics || []).filter(d => d.category === ts.DiagnosticCategory.Error);
+  if (errors.length === 0) return null;
+  return errors.map(d => ts.flattenDiagnosticMessageText(d.messageText, '\n')).join('; ');
+}
 
 // Known third-party library versions for auto-remediation
 const KNOWN_LIBRARY_VERSIONS: Record<string, string> = {
@@ -923,7 +943,7 @@ Rules:
             })},
           ],
           model,
-          0.2,
+          0.0,  // temperature 0 for deterministic repair
           0.9,
           12000
         );
@@ -942,6 +962,12 @@ Rules:
         for (const patch of patches) {
           const target = files.find((f) => f.path === patch.path);
           if (!target) continue;
+          // Reject the patch if it still has syntax errors — don't burn a retry on a broken fix.
+          const syntaxErr = transpileCheck(patch.path, patch.content);
+          if (syntaxErr) {
+            logWarn('llmFixBuildErrors:patch-still-broken', { path: patch.path, error: syntaxErr });
+            continue;
+          }
           target.content = patch.content;
           changed = true;
           debug('llmFixBuildErrors:patched', { path: patch.path });
@@ -1049,7 +1075,7 @@ Return ONLY a delimited file block:
             })},
           ],
           model,
-          0.1,
+          0.0,  // temperature 0 for deterministic repair
           0.9,
           16000
         );
@@ -1060,21 +1086,27 @@ Return ONLY a delimited file block:
         if (m) {
           const newContent = m[2];
           if (newContent && newContent.trim().length > 50) {
-            const target = files.find((f) => f.path === errorFile.path);
-            if (target) {
-              target.content = newContent;
-              changed = true;
-              debug('specBasedFileRegeneration:regenerated', { path: errorFile.path });
-              if (workspaceDir) {
-                const subdir = errorFile.path.startsWith('backend/') ? 'backend' : 'frontend';
-                const relPath = errorFile.path.startsWith('backend/')
-                  ? errorFile.path.slice('backend/'.length)
-                  : errorFile.path;
-                const abs = path.join(workspaceDir, subdir, relPath);
-                try {
-                  await fs.mkdir(path.dirname(abs), { recursive: true });
-                  await fs.writeFile(abs, newContent, 'utf8');
-                } catch { /* best-effort */ }
+            // Reject if the LLM's regenerated file still has syntax errors
+            const syntaxErr = transpileCheck(errorFile.path, newContent);
+            if (syntaxErr) {
+              logWarn('specBasedFileRegeneration:regen-still-broken', { path: errorFile.path, error: syntaxErr });
+            } else {
+              const target = files.find((f) => f.path === errorFile.path);
+              if (target) {
+                target.content = newContent;
+                changed = true;
+                debug('specBasedFileRegeneration:regenerated', { path: errorFile.path });
+                if (workspaceDir) {
+                  const subdir = errorFile.path.startsWith('backend/') ? 'backend' : 'frontend';
+                  const relPath = errorFile.path.startsWith('backend/')
+                    ? errorFile.path.slice('backend/'.length)
+                    : errorFile.path;
+                  const abs = path.join(workspaceDir, subdir, relPath);
+                  try {
+                    await fs.mkdir(path.dirname(abs), { recursive: true });
+                    await fs.writeFile(abs, newContent, 'utf8');
+                  } catch { /* best-effort */ }
+                }
               }
             }
           }
