@@ -269,7 +269,7 @@ DECOMPOSITION RULES — these are absolute, non-negotiable:
 7. Items inside a list or grid (cards, rows, tiles) are inline JSX inside their container component — NOT separate component files, unless the same item type genuinely reappears in multiple unrelated places in the app.
 8. Toggle buttons, tab switchers, and small interactive controls that only exist within one section are inline JSX within that section — NOT separate component files.
 9. Navigation state (active page, current route) lives in App.jsx only. Child components receive the current page via props if needed.
-10. COMPONENT BUDGET: target (number of distinct pages) + 2 to 3 shared layout pieces (e.g. NavBar, Footer). Do NOT create separate components for every interactive element inside a single section.
+10. COMPONENT BUDGET — HARD LIMIT: Maximum components = (number of distinct pages × 3) + 2. For a 1-page app the hard max is 5 components. For a 2-page app: 8. For 3+ pages: 11. This is a generator capacity constraint, not a style preference. If you exceed it the build will fail. Inline all sub-features (search inputs, filter chips, loading states, empty states, cards) inside their parent section component — do NOT give each one its own file. Shared layout pieces (NavBar, Footer) count toward the budget.
 11. Name components after what they render: NavBar, HeroSection, ContactForm, Footer — never vague names like AppSection or MainComponent. NEVER name a component AppRouter, AppRoutes, RouterView, or any name ending in Router or Routes — routing lives exclusively in App.jsx, not in a component.
 12. contentData MUST list every concrete value a user sees in this component: item names, labels, numeric values, CTA text. These are the canonical source of truth — downstream code generation copies them verbatim and must not invent different values.
 13. NEVER add a prop named RouteView, routes, routeComponent, or any routing-related prop to a component's props interface. Components are not routers. If a component needs to know the current page, pass a simple string prop like currentPage.${feedbackBlock}`;
@@ -290,7 +290,7 @@ DECOMPOSITION RULES — these are absolute, non-negotiable:
       throw new Error('Component interfaces must be an array');
     }
 
-    const components: ComponentInterface[] = componentInterfaces.map((c: any, index: number) => ({
+    const components: ComponentInterface[] = (componentInterfaces as any[]).map((c: any, index: number) => ({
       name: c.name || `Component${index + 1}`,
       path: c.path || `src/components/Component${index + 1}.jsx`,
       purpose: c.purpose || 'Generated component',

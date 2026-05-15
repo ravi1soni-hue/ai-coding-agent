@@ -64,6 +64,17 @@ export async function systemDesignAgent(input: any): Promise<StateAwareAgentResu
 
     const systemPrompt = `You are a software architect. Design a complete technical architecture for the given requirements.
 
+## Fixed tech stack — non-negotiable
+- Frontend: React + Vite (always "react-vite"). Never change this.
+- Backend: Node.js + TypeScript + Express. Never change this.
+- Database: PostgreSQL. Never change this.
+- The user or project spec may mention other technologies (Prisma, Supabase, Firebase, Next.js, etc.). IGNORE those mentions entirely. Always output the fixed stack above.
+
+## backend_required = ${backendRequired}
+${backendRequired
+  ? '- backend_required is TRUE: include backend and database fields.'
+  : '- backend_required is FALSE: backend and database MUST be null. Do not design any database schema or backend routes, even if the project spec or user answers mention PostgreSQL, Prisma, or any database.'}
+
 Project spec context, if available:
 ${JSON.stringify(projectSpec, null, 2)}
 
@@ -109,7 +120,7 @@ RULES:
 - frontend.framework must always be "react-vite"
 - hosting.frontend must always be "vercel"
 - hosting.backend must always be "railway" when backend is needed, else null
-- If backend_required is false: set backend, database to null
+- If backend_required is false: backend and database must be null — no exceptions
 - If auth_required is false: set auth to null
 - database.tables must list tables needed for the request with the columns that are actually used
 - Include created_at/updated_at timestamps on tables that need them

@@ -510,6 +510,48 @@ async function fixCodeInComments(files: GeneratedFile[], workspaceDir?: string):
   }
 }
 
+/**
+ * Finds bare English prose lines inside JS function bodies (LLM forgot to add //)
+ * and prepends // to them. Pattern: a line that looks like a natural-language sentence
+ * (starts with uppercase, contains only word chars/spaces/punctuation, ends with a period)
+ * and lacks any JS syntax characters (=, (, ;, {, }, <, >, [, ], :, +, *, &, |, ?)
+ */
+async function fixBareProseComments(files: GeneratedFile[], workspaceDir?: string): Promise<void> {
+  // A "bare prose" line: trimmed starts with capital letter or lowercase word, contains
+  // words separated by spaces, no JS syntax operators, ends with a period OR is a
+  // multi-word phrase (>= 3 words) that would never be valid JS syntax.
+  const bareProseRe = /^(\s+)([A-Z][a-zA-Z]+([ \t]+[a-zA-Z'-]+){2,}\.?)(\s*)$/;
+  const jsSyntaxChars = /[=(){};:<>\[\]+\-*&|?!,\/\\]/;
+
+  for (const file of files) {
+    const ext = path.extname(file.path).toLowerCase();
+    if (!['.js', '.jsx', '.ts', '.tsx'].includes(ext)) continue;
+
+    const lines = file.content.split('\n');
+    let changed = false;
+    const out: string[] = [];
+
+    for (const line of lines) {
+      const trimmed = line.trimEnd();
+      if (bareProseRe.test(trimmed) && !jsSyntaxChars.test(trimmed.trim()) && !trimmed.trim().startsWith('//')) {
+        out.push(trimmed.replace(/^(\s+)/, '$1// '));
+        changed = true;
+      } else {
+        out.push(line);
+      }
+    }
+
+    if (changed) {
+      file.content = out.join('\n');
+      debug('testFixAgent:bare-prose-comment-fix', { path: file.path });
+      if (workspaceDir) {
+        const abs = path.join(workspaceDir, 'frontend', file.path);
+        try { await fs.writeFile(abs, file.content, 'utf8'); } catch {}
+      }
+    }
+  }
+}
+
 async function fixBrokenCssStrings(files: GeneratedFile[], workspaceDir?: string): Promise<void> {
   for (const file of files) {
     const ext = path.extname(file.path).toLowerCase();
@@ -1273,6 +1315,8 @@ export async function testFixAgent(input: {
     try { fixBareImportPaths(input.files, input.workspaceDir); } catch (err) { logWarn('testFixAgent:bare-import-paths-fix', err); }
     // Uncomment real code accidentally placed inside `//` comment lines by the LLM.
     try { await fixCodeInComments(input.files, input.workspaceDir); } catch (err) { logWarn('testFixAgent:code-in-comment-fix', err); }
+    // Prepend // to bare English prose lines that the LLM forgot to comment out.
+    try { await fixBareProseComments(input.files, input.workspaceDir); } catch (err) { logWarn('testFixAgent:bare-prose-comment-fix', err); }
     // Join CSS string literals that were split across lines by the LLM (syntax error).
     try { await fixBrokenCssStrings(input.files, input.workspaceDir); } catch (err) { logWarn('testFixAgent:broken-css-strings-fix', err); }
     // Fix duplicate `export default function X` where X was already declared.

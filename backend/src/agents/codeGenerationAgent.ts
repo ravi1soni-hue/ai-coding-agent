@@ -1445,6 +1445,7 @@ RULES — ALL are mandatory:
 - ROUTING PROHIBITION: NEVER import or use BrowserRouter, Router, Routes, Route, Switch, useNavigate, useLocation, Link from react-router in this file. Routing lives ONLY in App.jsx. This component receives its data via props.
 - ${backendRequired ? 'API CALLS: If this component fetches data, declare at the top of the function body: const API_BASE = window.__ENV__?.API_URL || import.meta.env.VITE_API_URL || \'http://localhost:3000\'; const PROJECT_ID = window.__ENV__?.PROJECT_ID || import.meta.env.VITE_PROJECT_ID || \'\'; — Always include project_id: PROJECT_ID in all GET/DELETE query params and POST/PUT/PATCH request bodies. Never hardcode URLs.' : 'No backend calls in this component.'}
 - No TODO comments, no placeholder text, no stub implementations.
+- COMMENTS MUST USE // SYNTAX: NEVER write plain English sentences inside a function body without a // prefix. Every comment line MUST start with //. BAD (syntax error): \`Validate required prop at runtime to help catch incorrect usage early.\` GOOD: \`// Validate required prop at runtime to help catch incorrect usage early.\` — A bare English sentence inside a function is a hard syntax error.
 - Real JSX with actual content matching the purpose — not lorem ipsum, not generic examples.
 - All imports at the top. Only import what you use.
 - useState/useEffect only if genuinely needed for THIS component's local behaviour.
@@ -1565,6 +1566,7 @@ RULES:
 - SIZE: target 60-120 lines. Hard max 200 lines (ErrorBoundary adds ~10 lines). Pass data to children via props, not inline logic.
 - ${backendRequired ? 'Use API_BASE for all fetch calls. Always include project_id: PROJECT_ID in query params (GET/DELETE) or request body (POST/PUT). Handle loading and error states.' : 'No backend calls.'}
 - No TODOs, no stubs, no placeholder comments.
+- COMMENTS MUST USE // SYNTAX: Every comment line inside the function body MUST start with //. NEVER write bare English sentences without // — they are syntax errors.
 - Generation order: ${(uiSpec?.generationOrder || []).join(' -> ') || 'all components'}
 - ${BANNED_IMPORTS_RULE}`;
 
