@@ -107,8 +107,10 @@ Respond ONLY in JSON with this exact shape (no markdown fences):
   }` : 'null'},
   "auth": ${authRequired ? `{
     "type": "jwt",
-    "strategy": "email_password",
-    "tables": ["users with password_hash column"]
+    "strategy": "email_password | oauth | magic_link",
+    "providers": ["google", "github"],
+    "roles": ["admin", "user"],
+    "tables": ["users with password_hash column (or oauth_provider+oauth_id), role column if roles are needed"]
   }` : 'null'},
   "hosting": {
     "frontend": "vercel",
@@ -124,7 +126,8 @@ RULES:
 - If auth_required is false: set auth to null
 - database.tables must list tables needed for the request with the columns that are actually used
 - Include created_at/updated_at timestamps on tables that need them
-- For auth: include the minimum users table needed for the request${feedbackBlock}`;
+- For auth: choose strategy that matches the request (email_password is default; oauth if Google/GitHub/social login is implied; magic_link if "passwordless" / "email link" is implied). Include roles only if the request mentions distinct user types (admin/staff/customer/owner/member etc.). The "providers" array applies only when strategy=oauth; otherwise omit it.
+- Database tables for auth must reflect the chosen strategy: email_password → users(email, password_hash); oauth → users(email, oauth_provider, oauth_id); magic_link → users(email) + login_tokens(token, email, expires_at). Add a role column to users when roles exist.${feedbackBlock}`;
 
     const userInput = JSON.stringify({
       requirements: input.requirements || input,

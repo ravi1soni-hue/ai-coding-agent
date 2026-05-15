@@ -346,6 +346,45 @@ function validateGeneratedFile(file: unknown, expectedPath: string | undefined, 
       throw new Error(`${label}: generated ${filePath} contains syntax or parse errors`);
     }
 
+    // ts.transpileModule misses two LLM-specific patterns that esbuild rejects at build:
+    //   1. Bare English sentences inside a function body (no `//` prefix).
+    //   2. Single/double-quoted CSS strings split across lines (unterminated literal).
+    // Catch them here so we retry at generation time, not after a wasted build cycle.
+    const lines = content.split('\n');
+    for (let li = 0; li < lines.length; li++) {
+      const trimmed = lines[li].trim();
+      if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('*')) continue;
+      // Bare-prose detector: starts with capital letter, ends in '.', no JS syntax tokens,
+      // ≥3 alphabetic words. Mirrors fixBareProseComments in testFixAgent.
+      if (
+        /^[A-Z]/.test(trimmed) &&
+        trimmed.endsWith('.') &&
+        !/[=(){};:<>\[\]+*&|?!`]/.test(trimmed) &&
+        (trimmed.match(/[A-Za-z]+/g) || []).length >= 3
+      ) {
+        throw new Error(`${label}: generated ${filePath} contains a bare English sentence at line ${li + 1} (LLM forgot the // prefix): "${trimmed.slice(0, 80)}"`);
+      }
+    }
+    // Unterminated-string detector: scan line-by-line for unbalanced single/double quotes
+    // (template literals with backticks are legal multi-line, so ignored).
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li];
+      let inDouble = false;
+      let inSingle = false;
+      let inBacktick = false;
+      for (let ci = 0; ci < line.length; ci++) {
+        const ch = line[ci];
+        if (ch === '\\') { ci++; continue; }
+        if (ch === '`' && !inDouble && !inSingle) inBacktick = !inBacktick;
+        else if (inBacktick) continue;
+        else if (ch === '"' && !inSingle) inDouble = !inDouble;
+        else if (ch === "'" && !inDouble) inSingle = !inSingle;
+      }
+      if (inDouble || inSingle) {
+        throw new Error(`${label}: generated ${filePath} has an unterminated string literal at line ${li + 1} (likely a CSS value split across lines): "${line.trim().slice(0, 80)}"`);
+      }
+    }
+
     // ts.transpileModule suppresses duplicate-identifier errors that esbuild catches at build time.
     // Detect the pattern: same symbol declared twice (e.g. `function Foo` then `export default function Foo`).
     const topLevelDeclRe = /^\s*(?:export\s+default\s+)?(?:function|const|class|let|var)\s+([A-Z][A-Za-z0-9_$]*)/gm;
@@ -1449,7 +1488,20 @@ RULES — ALL are mandatory:
 - Real JSX with actual content matching the purpose — not lorem ipsum, not generic examples.
 - All imports at the top. Only import what you use.
 - useState/useEffect only if genuinely needed for THIS component's local behaviour.
-- REACT-ICONS: Only use icon names that actually exist in react-icons v5. Safe Si icons: SiPython, SiTypescript, SiJavascript, SiReact, SiNodedotjs, SiDocker, SiKubernetes, SiAmazon, SiGooglecloud, SiMicrosoftazure, SiPostgresql, SiMongodb, SiRedis, SiGit, SiGithub, SiLinux, SiTensorflow, SiPytorch, SiOpenai, SiHuggingFace, SiMeta, SiVercel, SiNetlify, SiFastapi, SiFlask, SiDjango, SiGraphql, SiTailwindcss, SiVite. Safe Fa icons: FaHome, FaUser, FaSearch, FaCog, FaBell, FaTrash, FaEdit, FaSave, FaPlus, FaMinus, FaTimes, FaCheck, FaChevronDown, FaChevronUp, FaChevronLeft, FaChevronRight, FaArrowLeft, FaArrowRight, FaSignInAlt, FaSignOutAlt, FaLock, FaShieldAlt, FaUsers, FaUserPlus, FaCheckCircle, FaTimesCircle, FaExclamationCircle, FaInfoCircle, FaExclamationTriangle, FaEllipsisH, FaEllipsisV, FaTasks, FaChartBar, FaDatabase, FaServer, FaCode, FaTerminal, FaCloud, FaDownload, FaUpload, FaBalanceScale, FaGavel, FaRocket, FaBug, FaFlag, FaFlagCheckered, FaBolt, FaBookOpen. NEVER invent icon names — if unsure, use FaCircle or omit entirely. CRITICAL: FaScaleBalanced does NOT exist — use FaBalanceScale instead.
+- REACT-ICONS: Only use icon names that actually exist in react-icons v5. Pick icons that match the app's domain — do NOT default to dev-tools icons unless the app is dev-tools.
+  Safe Si (brand) icons: SiPython, SiTypescript, SiJavascript, SiReact, SiNodedotjs, SiDocker, SiKubernetes, SiAmazon, SiGooglecloud, SiMicrosoftazure, SiPostgresql, SiMongodb, SiRedis, SiGit, SiGithub, SiLinux, SiTensorflow, SiPytorch, SiOpenai, SiHuggingFace, SiMeta, SiVercel, SiNetlify, SiFastapi, SiFlask, SiDjango, SiGraphql, SiTailwindcss, SiVite, SiStripe, SiPaypal, SiVisa, SiMastercard, SiGoogle, SiApple, SiFacebook, SiInstagram, SiX, SiLinkedin, SiYoutube, SiTiktok, SiWhatsapp, SiSlack, SiDiscord, SiTelegram, SiSpotify, SiNetflix, SiAirbnb, SiUber, SiShopify.
+  Safe Fa (generic) icons — navigation/UI: FaHome, FaUser, FaSearch, FaCog, FaBell, FaTrash, FaEdit, FaSave, FaPlus, FaMinus, FaTimes, FaCheck, FaChevronDown, FaChevronUp, FaChevronLeft, FaChevronRight, FaArrowLeft, FaArrowRight, FaEllipsisH, FaEllipsisV, FaFilter, FaSort, FaBars, FaCircle.
+  Auth/security: FaSignInAlt, FaSignOutAlt, FaLock, FaUnlock, FaShieldAlt, FaKey, FaUserPlus, FaUsers, FaUserShield.
+  Status/feedback: FaCheckCircle, FaTimesCircle, FaExclamationCircle, FaInfoCircle, FaExclamationTriangle, FaQuestionCircle, FaSpinner.
+  Data/admin: FaTasks, FaChartBar, FaChartLine, FaChartPie, FaDatabase, FaServer, FaCode, FaTerminal, FaCloud, FaDownload, FaUpload, FaFile, FaFileAlt, FaFolder, FaPaperclip, FaTable, FaList.
+  Commerce/payments: FaShoppingCart, FaShoppingBag, FaCreditCard, FaMoneyBillAlt, FaDollarSign, FaTag, FaPercent, FaReceipt, FaBoxOpen, FaTruck, FaStore.
+  Communication: FaEnvelope, FaPhone, FaComments, FaCommentDots, FaPaperPlane, FaInbox, FaHeadset.
+  Social/engagement: FaHeart, FaStar, FaThumbsUp, FaThumbsDown, FaShare, FaBookmark, FaEye, FaEyeSlash.
+  Media: FaImage, FaImages, FaCamera, FaVideo, FaPlay, FaPause, FaMusic, FaMicrophone.
+  Calendar/time: FaCalendar, FaCalendarAlt, FaClock, FaHistory, FaStopwatch.
+  Location/travel: FaMapMarkerAlt, FaMap, FaPlane, FaCar, FaHotel, FaUtensils.
+  Misc generic: FaBalanceScale, FaGavel, FaRocket, FaBug, FaFlag, FaFlagCheckered, FaBolt, FaBookOpen, FaGraduationCap, FaBriefcase, FaBuilding, FaIndustry, FaHeartbeat, FaStethoscope.
+  NEVER invent icon names — if unsure, use FaCircle or omit entirely. CRITICAL: FaScaleBalanced does NOT exist — use FaBalanceScale instead.
 - JSX ATTRIBUTES: NEVER put the same attribute on a JSX element twice. BAD: <div style={base} style={{...base, color:'red'}}>. GOOD: <div style={{...base, color:'red'}}>. Duplicate attributes are a hard esbuild compile error.
 - OBJECT LITERALS: NEVER repeat the same key in a JS object. BAD: { padding: 12, background: '#fff', padding: 8 }. Duplicate keys are a hard esbuild compile error.
 - CSS STRINGS — SINGLE LINE ONLY: NEVER split a CSS string value across multiple lines. String literals containing commas (rgba(), linear-gradient(), transition shorthand) MUST fit entirely on ONE line. BAD (syntax error): \`background: 'linear-gradient(rgba(255,\\n  255,0.03))'\`. GOOD: \`background: 'linear-gradient(rgba(255,255,0.03))'\`. A newline inside a JS string literal is a hard syntax error that will break the build. This applies to ALL gradient/rgba strings — \`linear-gradient(#0f172a 0%, #071029 100%)\` MUST be on a SINGLE line. NEVER break after the opening parenthesis of a gradient.

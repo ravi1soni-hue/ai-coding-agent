@@ -206,7 +206,18 @@ export class LLMProxyClient {
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
 
-            const requestPayload = { model: modelCandidate, messages, temperature, top_p, max_tokens };
+            const normalizedMessages = Array.isArray(messages) ? messages : [];
+            const hasUserOrAssistant = normalizedMessages.some(
+              (m: any) =>
+                (m?.role === 'user' || m?.role === 'assistant') &&
+                typeof m?.content === 'string' &&
+                m.content.trim().length > 0,
+            );
+            const safeMessages = hasUserOrAssistant
+              ? normalizedMessages
+              : [{ role: 'user', content: ' ' }, ...normalizedMessages];
+
+            const requestPayload = { model: modelCandidate, messages: safeMessages, temperature, top_p, max_tokens };
             this.log('chatCompletion making request', {
               attempt: attempt + 1,
               modelCandidate,

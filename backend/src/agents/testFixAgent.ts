@@ -517,11 +517,56 @@ async function fixCodeInComments(files: GeneratedFile[], workspaceDir?: string):
  * and lacks any JS syntax characters (=, (, ;, {, }, <, >, [, ], :, +, *, &, |, ?)
  */
 async function fixBareProseComments(files: GeneratedFile[], workspaceDir?: string): Promise<void> {
-  // A "bare prose" line: trimmed starts with capital letter or lowercase word, contains
-  // words separated by spaces, no JS syntax operators, ends with a period OR is a
-  // multi-word phrase (>= 3 words) that would never be valid JS syntax.
-  const bareProseRe = /^(\s+)([A-Z][a-zA-Z]+([ \t]+[a-zA-Z'-]+){2,}\.?)(\s*)$/;
-  const jsSyntaxChars = /[=(){};:<>\[\]+\-*&|?!,\/\\]/;
+  // LLM-generated “prose” frequently appears as un-commented natural-language
+  // statements inside function bodies, which breaks parsing.
+  //
+  // Example failing line:
+  //   Open a resume file hosted at /resume.pdf in a new tab/window.
+  //
+  // The old regex was too strict (didn't allow /resume.pdf), so we use a broader
+  // heuristic:
+  // - must end with '.'
+  // - must not contain obvious JS syntax tokens
+  // - must contain >= 3 alphabetic words
+  //
+  // Also handles the inline case where prose is inserted between `{` and a call
+  // on the same line (e.g. `{ Open a... window.open(...)`).
+  function looksLikeBareProseSentence(trimmed: string): boolean {
+    if (!trimmed.endsWith('.')) return false;
+    if (trimmed.startsWith('//')) return false;
+    // If it already contains comment/code indicators, don't touch it.
+    if (/\b(window\.open|fetch)\s*\(/.test(trimmed)) return false;
+
+    // If it contains strong JS syntax tokens, it's not prose.
+    // NOTE: we intentionally do NOT forbid '/' because LLM prose often includes paths/URLs like /resume.pdf.
+    const forbidden = /[=(){};:<>\[\]+*&|?!]/;
+    if (forbidden.test(trimmed)) return false;
+
+    const words = trimmed.match(/[A-Za-z]+/g) || [];
+    if (words.length < 3) return false;
+
+    return true;
+  }
+
+  // Inline transformation: move prose before the next call onto its own commented line.
+  // Example:
+  //   const fn = () => { Open a... /resume.pdf. window.open('/resume.pdf', ...); };
+  // becomes:
+  //   const fn = () => {
+  //     // Open a... /resume.pdf.
+  //     window.open('/resume.pdf', ...);
+  //   };
+  function fixInlineProse(line: string): string {
+    const indent = (line.match(/^\s*/) || [''])[0];
+    const inlineRe = /(\{\s*)([A-Z][A-Za-z0-9\s/.'-]*?(?:\.[\s]*)+?)\s*((?:window\.[A-Za-z0-9_.]+|fetch)\s*\()/;
+    if (!inlineRe.test(line)) return line;
+
+    return line.replace(inlineRe, (_m, openBrace, prose, callStart) => {
+      const proseText = String(prose || '').trim();
+      if (!proseText) return line;
+      return `${openBrace}\n${indent}// ${proseText}\n${indent}${callStart}`;
+    });
+  }
 
   for (const file of files) {
     const ext = path.extname(file.path).toLowerCase();
@@ -532,9 +577,20 @@ async function fixBareProseComments(files: GeneratedFile[], workspaceDir?: strin
     const out: string[] = [];
 
     for (const line of lines) {
+      let working = line;
+
+      const fixedInline = fixInlineProse(working);
+      if (fixedInline !== working) {
+        changed = true;
+        // split in case we introduced newlines
+        out.push(...fixedInline.split('\n'));
+        continue;
+      }
+
       const trimmed = line.trimEnd();
-      if (bareProseRe.test(trimmed) && !jsSyntaxChars.test(trimmed.trim()) && !trimmed.trim().startsWith('//')) {
-        out.push(trimmed.replace(/^(\s+)/, '$1// '));
+      if (looksLikeBareProseSentence(trimmed)) {
+        const withComment = trimmed.replace(/^(\s+)/, '$1// ');
+        out.push(withComment);
         changed = true;
       } else {
         out.push(line);
@@ -1306,6 +1362,19 @@ export async function testFixAgent(input: {
     }
   }
 
+  // Snapshot the in-memory file contents — used by applyPreBuildFixesAndReportChange
+  // to detect whether any deterministic fixer actually mutated something. A handler
+  // that returns true without changes burns a rebuild cycle.
+  function fingerprintFiles(): string {
+    if (!input.files) return '';
+    return input.files.map((f) => `${f.path}::${f.content.length}::${crypto.createHash('sha1').update(f.content).digest('hex').slice(0, 16)}`).join('|');
+  }
+  async function applyPreBuildFixesAndReportChange(buildLogs?: string): Promise<boolean> {
+    const before = fingerprintFiles();
+    await applyPreBuildFixes(buildLogs);
+    return fingerprintFiles() !== before;
+  }
+
   // Helper: runs all deterministic pre-build fixes on the current in-memory files and
   // writes the results to disk. Called before the first attempt AND after each self-heal
   // so that package.json always reflects the healed file set.
@@ -1511,7 +1580,7 @@ Rules:
   const HANDLER_MAP: Record<FailureClass, Handler[]> = {
     missing_dependency: [
       // Deterministic: re-run package.json fixer (scans imports, adds known deps)
-      async (logs) => { await applyPreBuildFixes(logs); return true; },
+      async (logs) => applyPreBuildFixesAndReportChange(logs),
     ],
     missing_file: [
       // Spec-based regen: regenerate the missing file from blueprint spec
@@ -1525,7 +1594,7 @@ Rules:
     ],
     syntax_error: [
       // Deterministic: CSS string joiner + comment-code fixer
-      async (logs) => { await applyPreBuildFixes(logs); return true; },
+      async (logs) => applyPreBuildFixesAndReportChange(logs),
       // Spec regen: regenerate broken file from original spec
       async (logs) => input.files && input.blueprint
         ? specBasedFileRegeneration(input.files, logs, input.blueprint, input.workspaceDir, input.projectId)
@@ -1537,18 +1606,18 @@ Rules:
     ],
     bad_export: [
       // Deterministic: fixDuplicateExportDefaultInFiles is inside applyPreBuildFixes
-      async (logs) => { await applyPreBuildFixes(logs); return true; },
+      async (logs) => applyPreBuildFixesAndReportChange(logs),
       async (logs) => input.files && input.blueprint
         ? specBasedFileRegeneration(input.files, logs, input.blueprint, input.workspaceDir, input.projectId)
         : false,
     ],
     duplicate_key: [
       // Deterministic: fixDuplicateObjectKeys is inside applyPreBuildFixes
-      async (logs) => { await applyPreBuildFixes(logs); return true; },
+      async (logs) => applyPreBuildFixesAndReportChange(logs),
     ],
     bad_icon_import: [
       // Deterministic: fixReactIconsInFiles is inside applyPreBuildFixes
-      async (logs) => { await applyPreBuildFixes(logs); return true; },
+      async (logs) => applyPreBuildFixesAndReportChange(logs),
       async (logs) => input.files
         ? llmFixBuildErrors(input.files, logs, input.workspaceDir, input.projectId)
         : false,
@@ -1595,8 +1664,23 @@ Rules:
   const loopStart = Date.now();
   let attempt = 0;
   let lastResult: { success: boolean; logs: string } | undefined;
-  // Track which (failureClass, handlerIndex) pairs have been tried to avoid infinite loops
-  const triedHandlers = new Set<string>();
+  // Track which (failureClass, handlerIndex) pairs have been tried, SCOPED by the set
+  // of currently-broken files. When a new file enters the error set OR a file leaves
+  // it (progress!), the set is cleared so handlers can be re-tried for the new state.
+  let triedHandlers = new Set<string>();
+  let lastBrokenFilesKey = '';
+  // Per-file repair attempt counter — after 2 attempts on the same file with no
+  // progress, force-escalate to spec-based full regeneration for THAT file only.
+  const fileRepairAttempts = new Map<string, number>();
+
+  // Returns a stable, sorted signature of the file paths currently mentioned as
+  // broken in the build log. Used to detect when the repair set has shifted.
+  function brokenFilesSignature(logs: string): string {
+    if (!input.files) return '';
+    const errs = extractBuildErrors(logs);
+    const broken = findErrorFiles(errs, input.files).map((f) => f.path).sort();
+    return broken.join('|');
+  }
 
   try {
     while (Date.now() - loopStart < WALL_CLOCK_BUDGET_MS) {
@@ -1640,15 +1724,52 @@ Rules:
 
       lastResult = currentResult;
       const failureClass = classifyBuildFailure(lastResult.logs);
-      info(`Build failed — classified as: ${failureClass}`);
-      debug('testFixAgent:classified', { attempt, failureClass });
+      const brokenFilesKey = brokenFilesSignature(lastResult.logs);
+      // When the set of broken files changes, the repair state has progressed
+      // (or shifted) — reset handler tracking so handlers can be re-tried for
+      // the new state. Without this, the loop bails out as soon as the global
+      // handler set is exhausted even when new files entered the error set.
+      if (brokenFilesKey !== lastBrokenFilesKey) {
+        if (lastBrokenFilesKey !== '') {
+          info(`Broken-file set changed (${lastBrokenFilesKey || 'none'} → ${brokenFilesKey || 'none'}) — resetting handler tracking.`);
+        }
+        triedHandlers = new Set<string>();
+        lastBrokenFilesKey = brokenFilesKey;
+      }
+      // Bump the repair counter for every file currently broken; trigger forced
+      // per-file regeneration once any of them has been seen 2+ cycles.
+      const currentBrokenPaths = brokenFilesKey ? brokenFilesKey.split('|').filter(Boolean) : [];
+      for (const p of currentBrokenPaths) fileRepairAttempts.set(p, (fileRepairAttempts.get(p) || 0) + 1);
+      const stuckFiles = currentBrokenPaths.filter((p) => (fileRepairAttempts.get(p) || 0) >= 2);
+
+      info(`Build failed — classified as: ${failureClass}; broken: [${currentBrokenPaths.join(', ') || 'unknown'}]; stuck: [${stuckFiles.join(', ') || 'none'}]`);
+      debug('testFixAgent:classified', { attempt, failureClass, broken: currentBrokenPaths, stuck: stuckFiles });
+
+      // Forced escape valve: if any file has failed twice already, regenerate
+      // ONLY those files from spec before going back through the normal handler
+      // chain. This breaks the "same file keeps failing with shifting corruption"
+      // cycle that the per-class handler exhaustion can't escape on its own.
+      if (stuckFiles.length > 0 && input.files && input.blueprint) {
+        const escapeKey = `forced-regen:${stuckFiles.join(',')}`;
+        if (!triedHandlers.has(escapeKey)) {
+          triedHandlers.add(escapeKey);
+          info(`Escape valve: forcing spec-based regeneration of stuck files [${stuckFiles.join(', ')}]`);
+          try {
+            const fixed = await specBasedFileRegeneration(input.files, lastResult.logs, input.blueprint, input.workspaceDir, input.projectId);
+            if (fixed) {
+              await applyPreBuildFixes(lastResult.logs);
+              continue;
+            }
+          } catch (e) { logWarn('testFixAgent:forced-regen-error', e); }
+        }
+      }
 
       const handlers = HANDLER_MAP[failureClass];
       let anyHandlerApplied = false;
 
       for (let hi = 0; hi < handlers.length; hi++) {
         const handlerKey = `${failureClass}:${hi}`;
-        if (triedHandlers.has(handlerKey)) continue; // Skip handlers already tried for this class
+        if (triedHandlers.has(handlerKey)) continue; // Skip handlers already tried for this state
 
         let fixed = false;
         try {

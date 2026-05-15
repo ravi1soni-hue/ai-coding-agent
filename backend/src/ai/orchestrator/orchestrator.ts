@@ -686,7 +686,12 @@ async function runClarificationLoop(
         },
         clarificationAnswers: incomingAnswers,
         askedQuestions: priorAsked,
-        projectSpec: undefined,
+        projectSpec: {
+          userMessage: command.userMessage,
+          requirements: memory.requirements,
+          askedQuestions: priorAsked,
+          clarificationAnswers: incomingAnswers,
+        },
         modification: command.modification,
       });
       const clarification = toClarificationOutput(agentResult.output, incomingAnswers);
@@ -757,12 +762,25 @@ async function refineRequirementsFromClarifications(
     );
     const existingPages = Array.isArray(memory.requirements?.pages) ? memory.requirements!.pages : [];
     const mergedPages = Array.from(new Set([...existingPages, ...refined.pages].filter((p) => typeof p === 'string' && p.trim())));
+
+    // Detect explicit backend/auth signals in the clarification answers. These
+    // must NEVER be silently downgraded by a re-run of requirementAnalysis
+    // (the "portfolio" semantic override historically did this).
+    const answersBlob = answerEntries.map(([, a]) => String(a)).join(' \n ').toLowerCase();
+    const backendSignals = /\b(admin\s*panel|dashboard|cms|login|sign[-\s]?in|sign[-\s]?up|auth|account|user\s+(account|profile|management)|database|postgres|sql|crud|api|endpoint|server|backend|payment|stripe|checkout|order|booking|reservation|submit\s+(a\s+)?form|contact\s+form|store\s+submissions?|save\s+to|persist|upload|chat|message|notification|role[-\s]?based)\b/.test(answersBlob);
+    const authSignals = /\b(login|sign[-\s]?in|sign[-\s]?up|auth|account|password|role[-\s]?based|admin|protected\s+route)\b/.test(answersBlob);
+
+    const prevBackend = Boolean(memory.requirements?.backend_required);
+    const prevAuth = Boolean(memory.requirements?.auth_required);
+    const refinedBackend = typeof refined.backend_required === 'boolean' ? refined.backend_required : prevBackend;
+    const refinedAuth = typeof refined.auth_required === 'boolean' ? refined.auth_required : prevAuth;
+
     setRequirements(memory, {
       userMessage: command.userMessage,
       website_type: refined.website_type || memory.requirements?.website_type || 'business',
       pages: mergedPages.length > 0 ? mergedPages : (existingPages.length > 0 ? existingPages : ['home']),
-      backend_required: typeof refined.backend_required === 'boolean' ? refined.backend_required : Boolean(memory.requirements?.backend_required),
-      auth_required: typeof refined.auth_required === 'boolean' ? refined.auth_required : Boolean(memory.requirements?.auth_required),
+      backend_required: refinedBackend || prevBackend || backendSignals,
+      auth_required: refinedAuth || prevAuth || authSignals,
       deployment_pref: refined.deployment_pref || memory.requirements?.deployment_pref || 'auto',
       notes: [memory.requirements?.notes, refined.notes].filter(Boolean).join(' ') || undefined,
     });

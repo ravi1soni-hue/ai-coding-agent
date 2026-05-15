@@ -129,20 +129,22 @@ function buildClarificationPrompt(input: any, projectSpec: any): string {
 The platform uses React + Vite (frontend), Node.js + TypeScript + Express (backend), and PostgreSQL (database). This is fixed infrastructure. Never ask the user about technology, database schema, data models, UI component names, library choices, or implementation approach. If a user volunteers these details in a prior answer, extract only the product intent — ignore the technical specifics.
 
 ## Goal
-Ask only the product/content questions needed to define WHAT to build, for WHOM, and with WHAT content.
+Ask only the product/functional questions needed to define WHAT to build, for WHOM, and with WHAT content or workflows. Match the question style to the app class — do not assume the request is a marketing/portfolio site.
 
-Good questions (product/content):
-- What projects, work, or content should be showcased?
-- Who is the primary audience and what should they be able to do?
-- What is the main call to action?
-- What tone, style, or visual direction is wanted?
-- What sections or pages are needed?
+Good questions — pick the ones that fit the app class:
+- Audience & purpose: who uses this and what is the primary outcome they need?
+- Content sites (portfolio, landing, blog, business): what work/content/offerings should be showcased? What is the main call to action? What tone or style?
+- Apps with user accounts (SaaS, dashboards, CRM, admin, social): what user roles exist (e.g. admin vs. regular user) and what can each role do?
+- Data-driven apps: what are the main entities the user manages (e.g. orders, customers, posts, projects, bookings) and what actions can they take on each (create, edit, filter, export, share)?
+- Transactional apps (e-commerce, booking, marketplace): what does the purchase / booking / submission flow look like end to end?
+- Communication apps (chat, social, support): who can message whom, and what is the unit of conversation (DM, group, thread, comment)?
+- Pages / sections / navigation: what major screens or sections does the app need?
+- Integrations: are there external services the user expects to connect (payments, email, calendar, file storage, OAuth providers)? Only ask if the request implies one.
 
 Bad questions (never ask these):
-- What database or ORM should be used?
-- What data model or schema is needed?
-- What UI components or libraries should be used?
-- What tech stack or framework do you prefer?
+- What database, ORM, or schema should be used?
+- What UI components, design system, or libraries should be used?
+- What tech stack, framework, or hosting do you prefer?
 - What API structure or endpoints are needed?
 - What specific UI elements should be used to display X?
 

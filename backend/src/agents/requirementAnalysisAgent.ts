@@ -98,10 +98,9 @@ export async function requirementAnalysisAgent(input: { user_message: string; pr
 - Infer a safe, complete website_type and pages set.
 - website_type must be one of: business, portfolio, saas, ecommerce, marketplace, dashboard, blog, landing_page, crm, lms, social, realtime, directory, api_only.
 - If the request is ambiguous, choose a safe default and add a short note.
-- Set backend_required to true ONLY if the request explicitly mentions backend features like database, API, authentication, server-side logic, data storage, user accounts, dynamic content from server, or real-time updates.
-- For static sites, landing pages, portfolios, pricing pages, brochure sites, informational websites, or any request that doesn't mention server-side features, set backend_required to false.
-- Examples of frontend-only: "pricing page", "portfolio website", "landing page", "static site", "simple website".
-- Examples requiring backend: "user login", "database", "API integration", "dynamic content", "real-time chat".
+- Set backend_required to true if the request mentions ANY server-side capability. Treat the following as backend signals (non-exhaustive): user accounts/login/auth, admin panel, roles/permissions, database/persistence, CRUD on any entity, API or endpoints, file/image upload, payments/checkout/orders, bookings/reservations, contact-form submissions stored anywhere, comments/likes/follows, notifications/email, chat/messaging/real-time, search over user-generated data, dashboards over dynamic data, multi-user collaboration, scheduling, content moderation, analytics ingestion, OAuth/SSO, webhooks.
+- Set backend_required to false ONLY for purely static / informational sites where every page renders from build-time content (typical: landing page, brochure, single-page portfolio with no contact-form storage, pricing page with no checkout, static blog without comments).
+- IMPORTANT: A request can mention "portfolio", "landing page", or any "site" keyword and STILL be a full-stack app — e.g. "portfolio + admin panel to manage projects", "landing page with email signup stored in a database", "blog with comments". Decide backend_required from the FUNCTIONAL capabilities described, not from the surface noun.
 - Only set auth_required to true if login/authentication/user accounts are explicitly requested.
 - pages can include up to 20 pages — list all requested pages, do not truncate.
 
@@ -159,7 +158,11 @@ Return ONLY JSON. No trailing commas. No extra keys. Do not include any text bef
     };
 
     const semantic = extractSemanticFields(parsed);
-    const forceFrontendOnly = semantic.forceFrontendOnly;
+    // force_frontend_only is a SOFT hint: only downgrade when the model itself
+    // did not already detect backend signals. Never override an explicit
+    // backend_required=true (e.g. user asked for admin panel, auth, DB CRUD on
+    // a "portfolio" — the keyword must not silently kill those needs).
+    const forceFrontendOnly = semantic.forceFrontendOnly && !result.backend_required && !result.auth_required;
     const alignedResult: RequirementAnalysisOutput = {
       ...result,
       backend_required: forceFrontendOnly ? false : result.backend_required,

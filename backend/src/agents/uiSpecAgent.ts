@@ -260,17 +260,17 @@ Generate a JSON array with this exact shape (no markdown fences):
 ]
 
 DECOMPOSITION RULES — these are absolute, non-negotiable:
-1. ONE file = ONE UI responsibility. A component renders ONE thing (a navbar, a hero, a data table, a footer).
+1. ONE file = ONE UI responsibility. A component renders ONE thing — examples span any app type: navbar, hero, data table, kanban column, settings panel, checkout summary, dashboard chart, message thread, calendar grid, file upload zone, footer.
 2. App.jsx is the ONLY file allowed to contain BrowserRouter, Routes, Route, or any routing logic. NO component file may import or use react-router routing primitives.
-3. Every distinct page = its own component file (e.g. HomePage.jsx, DashboardPage.jsx).
-4. Every major section (hero, feature list, testimonials, FAQ, footer, nav bar) = its own component file.
-5. A component file must be ~80-150 lines of JSX. If you think it needs more, split it further.
+3. Every distinct page = its own component file (e.g. HomePage.jsx, DashboardPage.jsx, AdminPanel.jsx, CheckoutPage.jsx).
+4. Every major section gets its own component file. Examples by app class: marketing (hero, features, testimonials, FAQ, footer, navbar); SaaS/dashboard (sidebar, topbar, stats summary, data table, detail drawer); e-commerce (product list, product card, cart, checkout, order summary); CRM/admin (record list, record form, filters bar, bulk actions toolbar); social (post composer, feed, thread, profile header); marketplace (search filters, listing card, booking widget). Match the actual app — do NOT assume a marketing site.
+5. A component file should be ~80-200 lines of JSX. If a single component would exceed ~250 lines, split it — but always within the component budget in rule 10. Splitting must not exceed the budget; collapse onto inline JSX or compose siblings instead.
 6. NEVER combine multiple pages or sections into one component. NEVER name a component with a generic catch-all like "AppSection".
 7. Items inside a list or grid (cards, rows, tiles) are inline JSX inside their container component — NOT separate component files, unless the same item type genuinely reappears in multiple unrelated places in the app.
 8. Toggle buttons, tab switchers, and small interactive controls that only exist within one section are inline JSX within that section — NOT separate component files.
 9. Navigation state (active page, current route) lives in App.jsx only. Child components receive the current page via props if needed.
-10. COMPONENT BUDGET — HARD LIMIT: Maximum components = (number of distinct pages × 3) + 2. For a 1-page app the hard max is 5 components. For a 2-page app: 8. For 3+ pages: 11. This is a generator capacity constraint, not a style preference. If you exceed it the build will fail. Inline all sub-features (search inputs, filter chips, loading states, empty states, cards) inside their parent section component — do NOT give each one its own file. Shared layout pieces (NavBar, Footer) count toward the budget.
-11. Name components after what they render: NavBar, HeroSection, ContactForm, Footer — never vague names like AppSection or MainComponent. NEVER name a component AppRouter, AppRoutes, RouterView, or any name ending in Router or Routes — routing lives exclusively in App.jsx, not in a component.
+10. COMPONENT BUDGET — scales with actual scope, not just page count. The budget is: pages × 4, plus 1 per backend resource (CRUD entity / API route group), plus 2 shared (NavBar, Footer). Hard floor of 5 components, hard ceiling of 28. This accommodates: simple landing (5–8), portfolio (6–10), dashboard/SaaS (12–18), CRM/admin/e-commerce (16–24), full social/marketplace app (20–28). Inline sub-features (search inputs, filter chips, loading states, empty states, cards, modals) inside their parent section component — do NOT give each one its own file.
+11. Name components after what they render: NavBar, HeroSection, ContactForm, ProductCard, OrderTable, ChatThread, AdminUsersPanel, BookingCalendar — never vague names like AppSection or MainComponent. NEVER name a component AppRouter, AppRoutes, RouterView, or any name ending in Router or Routes — routing lives exclusively in App.jsx, not in a component.
 12. contentData MUST list every concrete value a user sees in this component: item names, labels, numeric values, CTA text. These are the canonical source of truth — downstream code generation copies them verbatim and must not invent different values.
 13. NEVER add a prop named RouteView, routes, routeComponent, or any routing-related prop to a component's props interface. Components are not routers. If a component needs to know the current page, pass a simple string prop like currentPage.${feedbackBlock}`;
 
@@ -564,15 +564,18 @@ RULES:
 
     debug('uiSpecAgent:final', { structuredSpec, consistencyScore });
 
+    // High consistency → advance to BLUEPRINT. Low consistency → stay/retry UI_SPEC.
+    const advance = consistencyScore >= 0.55;
+    const proposal = advance ? AgentState.NEXT_BLUEPRINT : AgentState.NEXT_UI_SPEC;
     return {
       updatedState: {
-        activeState: consistencyScore < 0.55 ? AgentState.NEXT_BLUEPRINT : AgentState.NEXT_UI_SPEC,
+        activeState: proposal,
         domain: 'ui_spec',
         consistencyScore,
         transitions: [String(input.globalState?.activeState || AgentState.SYSTEM_DESIGN), AgentState.UI_SPEC],
         metadata: { projectId: input.projectId },
       },
-      nextStateProposal: consistencyScore < 0.55 ? AgentState.NEXT_BLUEPRINT : AgentState.NEXT_UI_SPEC,
+      nextStateProposal: proposal,
       consistencyScore,
       output: structuredSpec,
     };

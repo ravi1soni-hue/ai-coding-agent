@@ -502,15 +502,18 @@ export async function blueprintAgent(input: BlueprintInput): Promise<StateAwareA
 
   debug('blueprintAgent:done', { projectId: input.projectId, fileCount: blueprint.files.length, routeCount: blueprint.backendRoutes.length, semanticScore });
 
+  // High score → advance to CODE_GENERATION. Low score → loop back upstream
+  // (UI_SPEC is the closest upstream stage; clarification is too far back).
+  const proposal = semanticScore < 0.55 ? AgentState.NEXT_UI_SPEC : AgentState.NEXT_CODE_GENERATION;
   return {
     updatedState: {
-      activeState: transitionTo(activeState, semanticScore < 0.55 ? AgentState.NEXT_CLARIFICATION : AgentState.NEXT_UI_SPEC),
+      activeState: transitionTo(activeState, proposal),
       domain: 'blueprint',
       consistencyScore: semanticScore,
       transitions: [...(input.globalState?.transitions || []), `blueprint:${activeState}`],
       metadata: { projectId: input.projectId },
     },
-    nextStateProposal: semanticScore < 0.55 ? AgentState.NEXT_CLARIFICATION : AgentState.NEXT_UI_SPEC,
+    nextStateProposal: proposal,
     consistencyScore: semanticScore,
     output: blueprint,
   };
