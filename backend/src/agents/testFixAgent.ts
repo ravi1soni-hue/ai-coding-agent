@@ -427,7 +427,7 @@ async function fixDuplicateJsxAttributes(files: GeneratedFile[], workspaceDir?: 
       debug('testFixAgent:duplicate-jsx-attr-fix', { path: file.path });
       if (workspaceDir) {
         const abs = path.join(workspaceDir, 'frontend', file.path);
-        try { await fs.writeFile(abs, result, 'utf8'); } catch { /* best-effort */ }
+        try { await fs.writeFile(abs, result, 'utf8'); } catch (writeErr) { logWarn('testFixAgent:disk-write', { path: abs, err: String(writeErr) }); }
       }
     }
   }
@@ -440,6 +440,76 @@ async function fixDuplicateJsxAttributes(files: GeneratedFile[], workspaceDir?: 
  * so we join it with the next line (repeat until closed).
  * Only touches JS/JSX/TS/TSX files. Mutates files in-place.
  */
+/**
+ * Detects files where real code was accidentally placed inside `//` comment lines
+ * (a known LLM truncation artifact). When a `//` comment line contains both a
+ * closing `}` that would end a function/component AND an `export default`, the
+ * entire comment content is uncommented so the build can parse it correctly.
+ */
+async function fixCodeInComments(files: GeneratedFile[], workspaceDir?: string): Promise<void> {
+  for (const file of files) {
+    const ext = path.extname(file.path).toLowerCase();
+    if (!['.js', '.jsx', '.ts', '.tsx'].includes(ext)) continue;
+
+    const lines = file.content.split('\n');
+    let changed = false;
+
+    // Detect runs of consecutive `//` comment lines that form a real code block.
+    // A run qualifies if: it contains a function/class/const declaration AND balances
+    // braces net-zero (complete block) or the run contains `export default`.
+    // We scan all runs, collect qualifying ones, then uncomment them.
+    const commentRunRe = /^(\s*)\/\/\s?(.*)$/;
+    let i = 0;
+    const out: string[] = [];
+    while (i < lines.length) {
+      // Collect a run of consecutive comment lines
+      if (!commentRunRe.test(lines[i])) {
+        out.push(lines[i++]);
+        continue;
+      }
+      const runStart = i;
+      const runLines: string[] = [];
+      while (i < lines.length && commentRunRe.test(lines[i])) {
+        runLines.push(lines[i++]);
+      }
+      // Extract indentation and body for each line in the run
+      const bodies = runLines.map(l => {
+        const m = l.match(commentRunRe)!;
+        return { indent: m[1], body: m[2] };
+      });
+      const runBody = bodies.map(b => b.body).join('\n');
+
+      const hasCodeKeyword = /\b(function|const|let|var|class|return|export default|=>)\b/.test(runBody);
+      const openBraces = (runBody.match(/[{(]/g) || []).length;
+      const closeBraces = (runBody.match(/[})]/g) || []).length;
+      const balanced = Math.abs(openBraces - closeBraces) <= 1; // allow 1 off for arrow fns
+      const hasExportDefault = runBody.includes('export default');
+
+      if (hasCodeKeyword && (balanced || hasExportDefault) && runLines.length >= 2) {
+        // Uncomment the entire run
+        for (const b of bodies) out.push(b.indent + b.body);
+        changed = true;
+        debug('testFixAgent:code-in-comment-fix', { path: file.path, runStart, runLength: runLines.length });
+      } else {
+        // Not a code block — keep as comments
+        for (const l of runLines) out.push(l);
+      }
+    }
+
+    if (changed) {
+      file.content = out.join('\n');
+      if (workspaceDir) {
+        const abs = path.join(workspaceDir, 'frontend', file.path);
+        try {
+          await fs.writeFile(abs, file.content, 'utf8');
+        } catch (writeErr) {
+          logWarn('testFixAgent:code-in-comment-disk-write', { path: abs, err: String(writeErr) });
+        }
+      }
+    }
+  }
+}
+
 async function fixBrokenCssStrings(files: GeneratedFile[], workspaceDir?: string): Promise<void> {
   for (const file of files) {
     const ext = path.extname(file.path).toLowerCase();
@@ -487,9 +557,32 @@ async function fixBrokenCssStrings(files: GeneratedFile[], workspaceDir?: string
     if (changed) {
       file.content = out.join('\n');
       debug('testFixAgent:broken-css-strings-fix', { path: file.path });
+    }
+
+    // Second pass: regex-based fix for gradient/rgba continuation lines that the
+    // string-scanner misses (e.g. template literals or partial-line joins).
+    // Pattern: a line that starts with a hex color (#rrggbb) or bare numeric continuation
+    // that can only appear as the continuation of a CSS value string.
+    const gradientContRe = /^(\s*)(#[0-9a-fA-F]{3,8}[^'"\n]*['"),])/;
+    const cssLines = file.content.split('\n');
+    let cssChanged = false;
+    for (let li = 1; li < cssLines.length; li++) {
+      if (gradientContRe.test(cssLines[li])) {
+        cssLines[li - 1] = cssLines[li - 1].trimEnd() + ' ' + cssLines[li].trimStart();
+        cssLines.splice(li, 1);
+        li--;
+        cssChanged = true;
+      }
+    }
+    if (cssChanged) {
+      file.content = cssLines.join('\n');
+      debug('testFixAgent:gradient-continuation-fix', { path: file.path });
+    }
+
+    if (changed || cssChanged) {
       if (workspaceDir) {
         const abs = path.join(workspaceDir, 'frontend', file.path);
-        try { await fs.writeFile(abs, file.content, 'utf8'); } catch { /* best-effort */ }
+        try { await fs.writeFile(abs, file.content, 'utf8'); } catch (writeErr) { logWarn('testFixAgent:disk-write', { path: abs, err: String(writeErr) }); }
       }
     }
   }
@@ -574,7 +667,7 @@ async function fixDuplicateObjectKeys(files: GeneratedFile[], workspaceDir?: str
       debug('testFixAgent:duplicate-object-keys-fix', { path: file.path });
       if (workspaceDir) {
         const abs = path.join(workspaceDir, 'frontend', file.path);
-        try { await fs.writeFile(abs, src, 'utf8'); } catch { /* best-effort */ }
+        try { await fs.writeFile(abs, src, 'utf8'); } catch (writeErr) { logWarn('testFixAgent:disk-write', { path: abs, err: String(writeErr) }); }
       }
     }
   }
@@ -610,7 +703,7 @@ async function fixDuplicateExportDefaultInFiles(files: GeneratedFile[], workspac
     debug('testFixAgent:duplicate-export-default-fix', { path: file.path, name });
     if (workspaceDir) {
       const abs = path.join(workspaceDir, 'frontend', file.path);
-      try { await fs.writeFile(abs, simpleFix, 'utf8'); } catch { /* best-effort */ }
+      try { await fs.writeFile(abs, simpleFix, 'utf8'); } catch (writeErr) { logWarn('testFixAgent:disk-write', { path: abs, err: String(writeErr) }); }
     }
   }
 }
@@ -633,7 +726,7 @@ async function fixReactIconsInFiles(files: GeneratedFile[], workspaceDir?: strin
         const abs = path.join(workspaceDir, 'frontend', file.path);
         try {
           await fs.writeFile(abs, fixed, 'utf8');
-        } catch { /* best-effort */ }
+        } catch (writeErr) { logWarn('testFixAgent:disk-write', { path: abs, err: String(writeErr) }); }
       }
     }
   }
@@ -851,7 +944,7 @@ function fixBareImportPaths(files: GeneratedFile[], workspaceDir?: string): void
       file.content = result;
       if (workspaceDir) {
         const abs = path.join(workspaceDir, 'frontend', file.path);
-        fs.writeFile(abs, result, 'utf8').catch(() => { /* best-effort */ });
+        fs.writeFile(abs, result, 'utf8').catch((writeErr) => { logWarn('testFixAgent:disk-write', { path: abs, err: String(writeErr) }); });
       }
     }
   }
@@ -980,7 +1073,7 @@ Rules:
             try {
               await fs.mkdir(path.dirname(abs), { recursive: true });
               await fs.writeFile(abs, patch.content, 'utf8');
-            } catch { /* best-effort */ }
+            } catch (writeErr) { logWarn('testFixAgent:disk-write', { path: abs, err: String(writeErr) }); }
           }
         }
       }));
@@ -1105,7 +1198,7 @@ Return ONLY a delimited file block:
                   try {
                     await fs.mkdir(path.dirname(abs), { recursive: true });
                     await fs.writeFile(abs, newContent, 'utf8');
-                  } catch { /* best-effort */ }
+                  } catch (writeErr) { logWarn('testFixAgent:disk-write', { path: abs, err: String(writeErr) }); }
                 }
               }
             }
@@ -1178,6 +1271,8 @@ export async function testFixAgent(input: {
     if (!input.files) return;
     // Fix bare import paths: `from 'components/Foo'` → `from './components/Foo'`
     try { fixBareImportPaths(input.files, input.workspaceDir); } catch (err) { logWarn('testFixAgent:bare-import-paths-fix', err); }
+    // Uncomment real code accidentally placed inside `//` comment lines by the LLM.
+    try { await fixCodeInComments(input.files, input.workspaceDir); } catch (err) { logWarn('testFixAgent:code-in-comment-fix', err); }
     // Join CSS string literals that were split across lines by the LLM (syntax error).
     try { await fixBrokenCssStrings(input.files, input.workspaceDir); } catch (err) { logWarn('testFixAgent:broken-css-strings-fix', err); }
     // Fix duplicate `export default function X` where X was already declared.
@@ -1225,140 +1320,332 @@ export async function testFixAgent(input: {
         info(`Detected ${stubFiles.length} stub component(s) — regenerating before build...`);
         const fakeLogs = stubFiles.map(f => `error: ${f.path}: STUB_COMPONENT placeholder must be replaced`).join('\n');
         await specBasedFileRegeneration(input.files, fakeLogs, input.blueprint, input.workspaceDir, input.projectId);
+        // Re-scan imports after stub regeneration — new files may introduce new dependencies.
+        await applyPreBuildFixes();
       }
     } catch (err) {
       logWarn('testFixAgent:stub-regen', err);
     }
   }
 
-  // Dynamic attempt budget: more components = more retries needed.
-  // 1-10 components → 3 attempts; +1 attempt per 10 additional components; hard cap at 6.
-  const componentFileCount = (input.files || []).filter(
-    (f) => f.path.startsWith('src/components/') || f.path.includes('/components/')
-  ).length;
-  // Scale retries with project size: 10 comps→4, 50 comps→9, 100 comps→10 (raised from cap of 6).
-  const maxRetries = Math.min(3 + Math.floor(componentFileCount / 8), 10);
+  // ── Failure classifier ───────────────────────────────────────────────────
+  // Maps build log text → a typed failure class so the loop can route to the
+  // right handler instead of blindly cycling through all fixers every attempt.
+  type FailureClass =
+    | 'missing_dependency'
+    | 'missing_file'
+    | 'syntax_error'
+    | 'bad_export'
+    | 'duplicate_key'
+    | 'bad_icon_import'
+    | 'type_error'
+    | 'runtime_blank'
+    | 'unknown';
 
-  // ── Build loop: dynamic attempts with AI fix between each ────────────────
+  function classifyBuildFailure(logs: string): FailureClass {
+    if (/Cannot find module|Module not found|Failed to resolve import/i.test(logs)) {
+      // Distinguish missing npm package vs missing local file
+      if (/Failed to resolve import ['"]\./.test(logs)) return 'missing_file';
+      return 'missing_dependency';
+    }
+    if (/Unterminated string constant|Unexpected token|Unexpected end of (input|file)|Expected.*but found/i.test(logs)) return 'syntax_error';
+    if (/Duplicate export|export default.*already (declared|defined)|Multiple exports named 'default'/i.test(logs)) return 'bad_export';
+    if (/Duplicate key|duplicate property/i.test(logs)) return 'duplicate_key';
+    if (/react-icons|FaIcon|is not exported from 'react-icons/i.test(logs)) return 'bad_icon_import';
+    if (/TS\d{4}|Type '.*' is not assignable|Property '.*' does not exist/i.test(logs)) return 'type_error';
+    return 'unknown';
+  }
+
+  // ── Unknown-failure diagnostic handler ──────────────────────────────────
+  // Last resort: ask the LLM to diagnose which file is broken and emit a
+  // repaired version as JSON. Validates the repair with transpileCheck before
+  // applying it so a bad LLM fix doesn't burn another retry cycle.
+  async function unknownDiagnosticHandler(logs: string): Promise<boolean> {
+    if (!input.files) return false;
+    try {
+      const errors = extractBuildErrors(logs);
+      const fileSummary = (input.files || [])
+        .filter(f => ['.js', '.jsx', '.ts', '.tsx'].includes(path.extname(f.path)))
+        .map(f => `${f.path} (${f.content.split('\n').length} lines)`)
+        .join('\n');
+
+      // Include content of files mentioned in the error log for context
+      const errorFiles = findErrorFiles(errors, input.files || []);
+      const fileContents = errorFiles.slice(0, 3).map(f =>
+        `=== ${f.path} ===\n${f.content.slice(0, 2000)}`
+      ).join('\n\n');
+
+      const prompt = `You are a build error diagnostic agent for a React + Vite project.
+
+BUILD ERRORS:
+${errors}
+
+PROJECT FILES:
+${fileSummary}
+
+BROKEN FILE CONTENT:
+${fileContents}
+
+Task: Identify exactly which file is broken, the root cause, and output a complete repaired version.
+
+Respond with ONLY this JSON (no markdown fences):
+{
+  "brokenFile": "src/components/Foo.jsx",
+  "rootCause": "one sentence description",
+  "repairedContent": "...complete fixed file content as a JSON string..."
+}
+
+Rules:
+- repairedContent must be the ENTIRE file, not a diff or partial snippet
+- Validate that braces, parentheses, and JSX tags are balanced before outputting
+- Use only React 18 + plain JSX — no TypeScript types in .jsx files
+- If you cannot determine a fix with high confidence, set repairedContent to null`;
+
+      const [{ model: primaryModel, apiKey }, ...fallbacks] = getModelPriorityChain('test_generation');
+      const client = new LLMProxyClient({ apiKey, projectId: input.projectId, fallbacks });
+      let rawResponse = '';
+      try {
+        const completion = await client.chatCompletion(
+          [{ role: 'user', content: prompt }],
+          primaryModel,
+          0,    // temperature=0 for deterministic repair
+          0.9,
+          4096
+        );
+        rawResponse = completion.choices?.[0]?.message?.content || '';
+      } catch (llmErr) {
+        logWarn('testFixAgent:unknown-handler-llm', llmErr);
+      }
+
+      const parsed = parseJsonResponse(rawResponse) as { brokenFile?: string; rootCause?: string; repairedContent?: string | null } | null;
+      if (!parsed || !parsed.brokenFile || !parsed.repairedContent) {
+        debug('testFixAgent:unknown-handler-null', { rootCause: parsed?.rootCause });
+        return false;
+      }
+
+      // Validate the repair before applying — don't accept a fix that introduces new syntax errors
+      const transpileErr = transpileCheck(parsed.brokenFile, parsed.repairedContent);
+      if (transpileErr) {
+        logWarn('testFixAgent:unknown-handler-bad-repair', { file: parsed.brokenFile, transpileErr });
+        return false;
+      }
+
+      // Apply the repair to in-memory files and disk
+      const target = (input.files || []).find(f => f.path === parsed.brokenFile || f.path.endsWith('/' + parsed.brokenFile!.split('/').pop()));
+      if (target) {
+        target.content = parsed.repairedContent;
+      } else {
+        // File wasn't in input.files — add it
+        (input.files || []).push({ path: parsed.brokenFile, content: parsed.repairedContent });
+      }
+
+      if (input.workspaceDir) {
+        const subdir = parsed.brokenFile.startsWith('backend/') ? '' : 'frontend';
+        const relPath = parsed.brokenFile.startsWith('backend/') ? parsed.brokenFile.slice('backend/'.length) : parsed.brokenFile;
+        const abs = path.join(input.workspaceDir, subdir, relPath);
+        try {
+          await fs.mkdir(path.dirname(abs), { recursive: true });
+          await fs.writeFile(abs, parsed.repairedContent, 'utf8');
+        } catch (writeErr) { logWarn('testFixAgent:unknown-handler-write', { path: abs, err: String(writeErr) }); }
+      }
+
+      info(`Diagnostic repair applied to ${parsed.brokenFile}: ${parsed.rootCause}`);
+      debug('testFixAgent:unknown-handler-applied', { file: parsed.brokenFile, rootCause: parsed.rootCause });
+      return true;
+    } catch (err) {
+      logWarn('testFixAgent:unknown-handler-error', err);
+      return false;
+    }
+  }
+
+  // ── Handler dispatch table ───────────────────────────────────────────────
+  // Each failure class maps to an ordered list of handlers. Handlers are tried
+  // in order; the first one that returns true short-circuits the rest.
+  // All handlers return true = "something changed, retry the build".
+  type Handler = (logs: string) => Promise<boolean>;
+
+  const HANDLER_MAP: Record<FailureClass, Handler[]> = {
+    missing_dependency: [
+      // Deterministic: re-run package.json fixer (scans imports, adds known deps)
+      async (logs) => { await applyPreBuildFixes(logs); return true; },
+    ],
+    missing_file: [
+      // Spec-based regen: regenerate the missing file from blueprint spec
+      async (logs) => input.files && input.blueprint
+        ? specBasedFileRegeneration(input.files, logs, input.blueprint, input.workspaceDir, input.projectId)
+        : false,
+      // Fallback: LLM patch to fix the import path
+      async (logs) => input.files
+        ? llmFixBuildErrors(input.files, logs, input.workspaceDir, input.projectId)
+        : false,
+    ],
+    syntax_error: [
+      // Deterministic: CSS string joiner + comment-code fixer
+      async (logs) => { await applyPreBuildFixes(logs); return true; },
+      // Spec regen: regenerate broken file from original spec
+      async (logs) => input.files && input.blueprint
+        ? specBasedFileRegeneration(input.files, logs, input.blueprint, input.workspaceDir, input.projectId)
+        : false,
+      // LLM patch: targeted fix of the broken lines
+      async (logs) => input.files
+        ? llmFixBuildErrors(input.files, logs, input.workspaceDir, input.projectId)
+        : false,
+    ],
+    bad_export: [
+      // Deterministic: fixDuplicateExportDefaultInFiles is inside applyPreBuildFixes
+      async (logs) => { await applyPreBuildFixes(logs); return true; },
+      async (logs) => input.files && input.blueprint
+        ? specBasedFileRegeneration(input.files, logs, input.blueprint, input.workspaceDir, input.projectId)
+        : false,
+    ],
+    duplicate_key: [
+      // Deterministic: fixDuplicateObjectKeys is inside applyPreBuildFixes
+      async (logs) => { await applyPreBuildFixes(logs); return true; },
+    ],
+    bad_icon_import: [
+      // Deterministic: fixReactIconsInFiles is inside applyPreBuildFixes
+      async (logs) => { await applyPreBuildFixes(logs); return true; },
+      async (logs) => input.files
+        ? llmFixBuildErrors(input.files, logs, input.workspaceDir, input.projectId)
+        : false,
+    ],
+    type_error: [
+      // LLM patch first — type errors need semantic understanding
+      async (logs) => input.files
+        ? llmFixBuildErrors(input.files, logs, input.workspaceDir, input.projectId)
+        : false,
+      async (logs) => input.files && input.blueprint
+        ? specBasedFileRegeneration(input.files, logs, input.blueprint, input.workspaceDir, input.projectId)
+        : false,
+    ],
+    runtime_blank: [
+      async (logs) => input.files && input.blueprint
+        ? specBasedFileRegeneration(input.files, logs, input.blueprint, input.workspaceDir, input.projectId)
+        : false,
+    ],
+    unknown: [
+      // Full LLM diagnosis: identify the broken file and emit a complete repair
+      async (logs) => unknownDiagnosticHandler(logs),
+      // Last resort: spec regen of any file mentioned in the logs
+      async (logs) => input.files && input.blueprint
+        ? specBasedFileRegeneration(input.files, logs, input.blueprint, input.workspaceDir, input.projectId)
+        : false,
+      // Final fallback: legacy fixFn (full-project heal)
+      async (logs) => {
+        if (!input.fixFn) return false;
+        const preSnapshot = input.workspaceDir ? await fingerprintWorkspace(input.workspaceDir) : undefined;
+        const healedFiles = await input.fixFn(logs);
+        if (healedFiles && healedFiles.length > 0) input.files = healedFiles;
+        if (input.workspaceDir && preSnapshot) {
+          const postSnapshot = await fingerprintWorkspace(input.workspaceDir);
+          if (preSnapshot === postSnapshot) return false;
+        }
+        return true;
+      },
+    ],
+  };
+
+  // ── Build loop: wall-clock budget, classify → dispatch → retry ──────────
+  const WALL_CLOCK_BUDGET_MS = 8 * 60 * 1000; // 8 min hard cap
   const MIN_ATTEMPT_BUDGET_MS = 60_000;
-  let retries = 0;
+  const loopStart = Date.now();
+  let attempt = 0;
   let lastResult: { success: boolean; logs: string } | undefined;
+  // Track which (failureClass, handlerIndex) pairs have been tried to avoid infinite loops
+  const triedHandlers = new Set<string>();
 
   try {
-    do {
+    while (Date.now() - loopStart < WALL_CLOCK_BUDGET_MS) {
       if (input.deadlineAt && input.deadlineAt - Date.now() < MIN_ATTEMPT_BUDGET_MS) {
         const remaining = Math.max(0, input.deadlineAt - Date.now());
-        throw new Error(`Orchestration timeout — only ${remaining}ms remaining before build attempt ${retries + 1}`);
+        throw new Error(`Orchestration timeout — only ${remaining}ms remaining before build attempt ${attempt + 1}`);
       }
-      info(`Build attempt ${retries + 1} of ${maxRetries} — running npm install and build (this can take a few minutes)...`);
-      debug('testFixAgent:attempt', { attempt: retries + 1, maxRetries });
+
+      attempt++;
+      info(`Build attempt ${attempt} — running npm install and build...`);
+      debug('testFixAgent:attempt', { attempt });
       const currentResult = await input.buildFn();
       debug('testFixAgent:buildResult', { success: currentResult.success });
 
       if (currentResult.success) {
-        info(retries > 0 ? `Build succeeded after ${retries + 1} attempt(s).` : 'Build succeeded.');
-        debug('testFixAgent:success', { fixed: retries > 0 });
+        info(attempt > 1 ? `Build succeeded after ${attempt} attempt(s).` : 'Build succeeded.');
+        debug('testFixAgent:success', { fixed: attempt > 1 });
 
         // Smoke test: verify the built app renders non-blank content in a headless browser.
-        // If blank, synthesize a build log from console errors and trigger one more fix pass.
-        if (input.workspaceDir && input.files && input.blueprint && retries < maxRetries - 1) {
+        if (input.workspaceDir && input.files && input.blueprint) {
           try {
             const { runSmokeTest } = await import('./smokeTest');
             const smoke = await runSmokeTest(input.workspaceDir);
             if (!smoke.hasContent && smoke.syntheticBuildLog) {
-              info('Smoke test detected blank render — attempting App.jsx fix...');
+              info('Smoke test detected blank render — running runtime_blank handler...');
               debug('testFixAgent:smoke-failed', { consoleErrors: smoke.consoleErrors });
-              await specBasedFileRegeneration(
-                input.files,
-                smoke.syntheticBuildLog,
-                input.blueprint,
-                input.workspaceDir,
-                input.projectId
-              );
-              // Let the loop do one more build attempt
-              retries++;
-              continue;
+              const handlers = HANDLER_MAP['runtime_blank'];
+              for (const handler of handlers) {
+                const fixed = await handler(smoke.syntheticBuildLog).catch(e => { logWarn('testFixAgent:smoke-handler', e); return false; });
+                if (fixed) { await applyPreBuildFixes(smoke.syntheticBuildLog); break; }
+              }
+              continue; // One more build attempt after smoke fix
             }
           } catch (smokeErr) {
             logWarn('testFixAgent:smoke-test-error', smokeErr);
           }
         }
 
-        return { ...currentResult, fixed: retries > 0 };
+        return { ...currentResult, fixed: attempt > 1 };
       }
 
       lastResult = currentResult;
+      const failureClass = classifyBuildFailure(lastResult.logs);
+      info(`Build failed — classified as: ${failureClass}`);
+      debug('testFixAgent:classified', { attempt, failureClass });
 
-      // Pass 1: lightweight LLM patch on the full file content (no truncation).
-      if (input.files && retries < maxRetries - 1) {
+      const handlers = HANDLER_MAP[failureClass];
+      let anyHandlerApplied = false;
+
+      for (let hi = 0; hi < handlers.length; hi++) {
+        const handlerKey = `${failureClass}:${hi}`;
+        if (triedHandlers.has(handlerKey)) continue; // Skip handlers already tried for this class
+
+        let fixed = false;
         try {
-          const patched = await llmFixBuildErrors(input.files, lastResult.logs, input.workspaceDir, input.projectId);
-          if (patched) {
-            info(`LLM targeted patch applied (attempt ${retries + 1}) — retrying build...`);
-            debug('testFixAgent:llm-patch-applied', { retry: retries + 1 });
-            retries++;
-            continue;
-          }
-        } catch (llmErr) {
-          logWarn('testFixAgent:llm-patch-error', llmErr);
+          fixed = await handlers[hi](lastResult.logs);
+        } catch (handlerErr) {
+          logWarn('testFixAgent:handler-error', { failureClass, handlerIndex: hi, err: String(handlerErr) });
+        }
+
+        if (fixed) {
+          triedHandlers.add(handlerKey);
+          await applyPreBuildFixes(lastResult.logs);
+          anyHandlerApplied = true;
+          info(`Handler ${hi + 1}/${handlers.length} for '${failureClass}' applied — retrying build...`);
+          break; // One handler per cycle — rebuild immediately, re-classify after
         }
       }
 
-      // Pass 2: spec-based file regeneration using blueprint component specs.
-      // Regenerates each broken file from its original spec rather than patching
-      // truncated content — eliminates the class of errors where the patch LLM
-      // produces a new broken file because it only saw half the original.
-      if (input.files && input.blueprint && retries < maxRetries - 1) {
-        try {
-          const regenned = await specBasedFileRegeneration(
-            input.files,
-            lastResult.logs,
-            input.blueprint,
-            input.workspaceDir,
-            input.projectId
-          );
-          if (regenned) {
-            info(`Spec-based file regeneration applied (attempt ${retries + 1}) — retrying build...`);
-            debug('testFixAgent:spec-regen-applied', { retry: retries + 1 });
-            await applyPreBuildFixes(lastResult.logs);
-            retries++;
-            continue;
-          }
-        } catch (specErr) {
-          logWarn('testFixAgent:spec-regen-error', specErr);
-        }
-      }
-
-      if (input.fixFn && retries < maxRetries - 1) {
-        info(`Build failed — invoking AI self-heal (attempt ${retries + 1})...`);
-        debug('testFixAgent:invoking-fixFn', { retry: retries + 1 });
-        try {
-          const preSnapshot = input.workspaceDir ? await fingerprintWorkspace(input.workspaceDir) : undefined;
-          const healedFiles = await input.fixFn(lastResult.logs);
-          // Sync input.files to the healed set so applyPreBuildFixes scans the right imports.
-          // Without this, package.json is updated against stale imports and new deps (e.g.
-          // react-router-dom) added by the healed code are silently missing from the build.
-          if (healedFiles && healedFiles.length > 0) {
-            input.files = healedFiles;
-          }
-          if (input.workspaceDir && preSnapshot) {
-            const postSnapshot = await fingerprintWorkspace(input.workspaceDir);
-            if (preSnapshot === postSnapshot) {
-              logWarn('testFixAgent:fixFn-noop', { retry: retries + 1, workspaceDir: input.workspaceDir });
-              break;
+      if (!anyHandlerApplied) {
+        // All handlers for this class are exhausted — try unknown as final escalation
+        if (failureClass !== 'unknown') {
+          info(`All '${failureClass}' handlers exhausted — escalating to diagnostic agent...`);
+          const unknownKey = `unknown:0:escalated-from:${failureClass}`;
+          if (!triedHandlers.has(unknownKey)) {
+            triedHandlers.add(unknownKey);
+            const fixed = await unknownDiagnosticHandler(lastResult.logs).catch(e => { logWarn('testFixAgent:escalation', e); return false; });
+            if (fixed) {
+              await applyPreBuildFixes(lastResult.logs);
+              continue;
             }
           }
-        } catch (fixErr) {
-          logError('testFixAgent:fixFn-error', { error: fixErr instanceof Error ? fixErr.message : String(fixErr), stage: 'fixFn', retries });
         }
-        // Re-apply deterministic fixes on the (possibly healed) files so package.json stays in sync.
-        await applyPreBuildFixes(lastResult.logs);
+        // Nothing worked — exit the loop
+        info('All handlers exhausted — build cannot be auto-fixed.');
+        break;
       }
-      retries++;
-    } while (retries < maxRetries);
+    }
 
+    const elapsed = Math.round((Date.now() - loopStart) / 1000);
     const lastLogs = lastResult?.logs || 'No build output.';
-    throw new Error(`Build failed after ${maxRetries} attempts.\n${lastLogs.slice(-2000)}`);
+    const failureClass = lastResult ? classifyBuildFailure(lastResult.logs) : 'unknown';
+    throw new Error(`Build failed after ${attempt} attempt(s) (${elapsed}s). Failure class: ${failureClass}.\n${lastLogs.slice(-2000)}`);
   } catch (err) {
     logError('testFixAgent', { error: err instanceof Error ? err.message : String(err), stage: 'testFixAgent', stack: err instanceof Error ? err.stack?.slice(0, 400) : undefined });
     throw err;

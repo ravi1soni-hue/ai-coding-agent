@@ -739,7 +739,7 @@ function sanitizeComponentName(rawName: string, index: number): string {
 }
 
 function frontendScaffold(manifest: FrontendManifest): GeneratedFile[] {
-  const dependencies = { react: '^18.3.1', 'react-dom': '^18.3.1', ...(manifest.dependencies || {}) };
+  const dependencies = { react: '^18.3.1', 'react-dom': '^18.3.1', 'prop-types': '^15.8.1', ...(manifest.dependencies || {}) };
   delete (dependencies as Record<string, string>).vite;
   delete (dependencies as Record<string, string>)['@vitejs/plugin-react'];
   return [
@@ -1451,7 +1451,7 @@ RULES — ALL are mandatory:
 - REACT-ICONS: Only use icon names that actually exist in react-icons v5. Safe Si icons: SiPython, SiTypescript, SiJavascript, SiReact, SiNodedotjs, SiDocker, SiKubernetes, SiAmazon, SiGooglecloud, SiMicrosoftazure, SiPostgresql, SiMongodb, SiRedis, SiGit, SiGithub, SiLinux, SiTensorflow, SiPytorch, SiOpenai, SiHuggingFace, SiMeta, SiVercel, SiNetlify, SiFastapi, SiFlask, SiDjango, SiGraphql, SiTailwindcss, SiVite. Safe Fa icons: FaHome, FaUser, FaSearch, FaCog, FaBell, FaTrash, FaEdit, FaSave, FaPlus, FaMinus, FaTimes, FaCheck, FaChevronDown, FaChevronUp, FaChevronLeft, FaChevronRight, FaArrowLeft, FaArrowRight, FaSignInAlt, FaSignOutAlt, FaLock, FaShieldAlt, FaUsers, FaUserPlus, FaCheckCircle, FaTimesCircle, FaExclamationCircle, FaInfoCircle, FaExclamationTriangle, FaEllipsisH, FaEllipsisV, FaTasks, FaChartBar, FaDatabase, FaServer, FaCode, FaTerminal, FaCloud, FaDownload, FaUpload, FaBalanceScale, FaGavel, FaRocket, FaBug, FaFlag, FaFlagCheckered, FaBolt, FaBookOpen. NEVER invent icon names — if unsure, use FaCircle or omit entirely. CRITICAL: FaScaleBalanced does NOT exist — use FaBalanceScale instead.
 - JSX ATTRIBUTES: NEVER put the same attribute on a JSX element twice. BAD: <div style={base} style={{...base, color:'red'}}>. GOOD: <div style={{...base, color:'red'}}>. Duplicate attributes are a hard esbuild compile error.
 - OBJECT LITERALS: NEVER repeat the same key in a JS object. BAD: { padding: 12, background: '#fff', padding: 8 }. Duplicate keys are a hard esbuild compile error.
-- CSS STRINGS — SINGLE LINE ONLY: NEVER split a CSS string value across multiple lines. String literals containing commas (rgba(), linear-gradient(), transition shorthand) MUST fit entirely on ONE line. BAD (syntax error): \`background: 'linear-gradient(rgba(255,\\n  255,0.03))'\`. GOOD: \`background: 'linear-gradient(rgba(255,255,0.03))'\`. A newline inside a JS string literal is a hard syntax error that will break the build.
+- CSS STRINGS — SINGLE LINE ONLY: NEVER split a CSS string value across multiple lines. String literals containing commas (rgba(), linear-gradient(), transition shorthand) MUST fit entirely on ONE line. BAD (syntax error): \`background: 'linear-gradient(rgba(255,\\n  255,0.03))'\`. GOOD: \`background: 'linear-gradient(rgba(255,255,0.03))'\`. A newline inside a JS string literal is a hard syntax error that will break the build. This applies to ALL gradient/rgba strings — \`linear-gradient(#0f172a 0%, #071029 100%)\` MUST be on a SINGLE line. NEVER break after the opening parenthesis of a gradient.
 - ${BANNED_IMPORTS_RULE}`;
 
   const budget = estimateComponentBudget(componentSpec, dependencyCode.length, String(component.purpose || ''));
