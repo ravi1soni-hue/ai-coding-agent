@@ -65,6 +65,38 @@ const KNOWN_LIBRARY_VERSIONS: Record<string, string> = {
   // Frontend — maps
   'leaflet': '^1.9.4',
   'react-leaflet': '^4.2.1',
+  // Frontend — drag & drop
+  'react-beautiful-dnd': '^13.1.1',
+  '@dnd-kit/core': '^6.1.0',
+  '@dnd-kit/sortable': '^7.0.0',
+  '@dnd-kit/utilities': '^3.2.2',
+  'react-dnd': '^16.0.1',
+  'react-dnd-html5-backend': '^16.0.1',
+  // Frontend — file / media
+  'react-dropzone': '^14.2.3',
+  'react-image-crop': '^11.0.5',
+  'react-colorful': '^5.6.1',
+  // Frontend — forms / selects
+  'react-select': '^5.8.0',
+  'react-datepicker': '^6.1.0',
+  // Frontend — markdown / code
+  'react-markdown': '^9.0.1',
+  'remark-gfm': '^4.0.0',
+  'prismjs': '^1.29.0',
+  'highlight.js': '^11.9.0',
+  // Frontend — UI component libraries
+  '@mui/material': '^5.15.0',
+  '@mui/icons-material': '^5.15.0',
+  'antd': '^5.12.0',
+  'primereact': '^10.2.0',
+  'prop-types': '^15.8.1',
+  // Frontend — virtualization / tables
+  'react-virtualized': '^9.22.5',
+  'react-window': '^1.8.10',
+  'react-table': '^7.8.0',
+  // Frontend — misc utilities
+  'react-copy-to-clipboard': '^5.1.0',
+  'react-use': '^17.5.0',
   // Frontend — notifications / UI utilities
   'react-toastify': '^10.0.4',
   'sonner': '^1.3.1',
@@ -79,18 +111,6 @@ const KNOWN_LIBRARY_VERSIONS: Record<string, string> = {
   '@radix-ui/react-checkbox': '^1.0.4',
   '@radix-ui/react-switch': '^1.0.3',
   'cmdk': '^0.2.1',
-  // Frontend — component libraries
-  '@mui/material': '^5.15.0',
-  '@mui/icons-material': '^5.15.0',
-  'antd': '^5.12.0',
-  'primereact': '^10.2.0',
-  'react-select': '^5.8.0',
-  'react-datepicker': '^4.25.0',
-  'react-dropzone': '^14.2.3',
-  'react-table': '^7.8.0',
-  'react-virtualized': '^9.22.5',
-  'react-window': '^1.8.10',
-  'react-markdown': '^9.0.1',
   // Backend — dev tooling
   'tsx': '^4.7.0',
   'ts-node': '^10.9.2',
@@ -645,7 +665,10 @@ function validateAndFixPackageJson(files: GeneratedFile[], pkgPath: 'package.jso
   const conflicts: string[] = [];
   for (const mod of importedModules) {
     if (!allDeclared.has(mod)) {
-      missing[mod] = KNOWN_LIBRARY_VERSIONS[mod] ?? 'latest';
+      if (KNOWN_LIBRARY_VERSIONS[mod]) {
+        missing[mod] = KNOWN_LIBRARY_VERSIONS[mod];
+      }
+      // else: skip unknown packages — adding them as 'latest' can crash npm install
     } else {
       // Check for version conflicts
       const existingVersion = deps[mod] || devDeps[mod];
@@ -787,6 +810,34 @@ async function ensureDbInitSql(files: GeneratedFile[], workspaceDir: string): Pr
 }
 
 /**
+ * Fixes bare (non-relative) import paths that should be relative.
+ * e.g. `from 'components/Button'` → `from './components/Button'`
+ * Vite treats these as node_modules, causing module-not-found errors.
+ */
+function fixBareImportPaths(files: GeneratedFile[], workspaceDir?: string): void {
+  const SRC_PREFIXES = ['components/', 'pages/', 'hooks/', 'utils/', 'services/', 'lib/', 'context/', 'store/', 'types/'];
+  for (const file of files) {
+    if (!/\.(jsx?|tsx?)$/.test(file.path)) continue;
+    let changed = false;
+    const result = file.content.replace(/from\s+(['"])([^'"]+)\1/g, (match, q, imp) => {
+      if (imp.startsWith('.') || imp.startsWith('/')) return match;
+      if (SRC_PREFIXES.some(p => imp.startsWith(p))) {
+        changed = true;
+        return `from ${q}./${imp}${q}`;
+      }
+      return match;
+    });
+    if (changed) {
+      file.content = result;
+      if (workspaceDir) {
+        const abs = path.join(workspaceDir, 'frontend', file.path);
+        fs.writeFile(abs, result, 'utf8').catch(() => { /* best-effort */ });
+      }
+    }
+  }
+}
+
+/**
  * Extracts the most actionable error lines from build logs.
  * Returns at most ~3000 chars so it fits in the LLM prompt budget.
  */
@@ -806,7 +857,7 @@ function findErrorFiles(errors: string, files: GeneratedFile[]): GeneratedFile[]
   return files.filter((f) => {
     const base = path.basename(f.path);
     return errors.includes(f.path) || errors.includes(base);
-  }).slice(0, 6); // cap to avoid oversized prompts
+  }).slice(0, 24); // raised from 6: large projects can have 30+ broken files
 }
 
 /**
@@ -836,7 +887,7 @@ async function llmFixBuildErrors(
     const llmProxy = new LLMProxyClient({ apiKey, projectId, fallbacks });
 
     const systemPrompt = `You are a build-error repair specialist for React/Vite/TypeScript projects.
-You are given build error logs and the source files that caused them.
+You are given build error logs and ONE source file that caused errors.
 Return ONLY valid JSON — no markdown, no prose — in this exact shape:
 {
   "patches": [
@@ -850,58 +901,196 @@ Rules:
 - Do not add packages that are not in package.json.
 - If you cannot fix a file confidently, omit it from patches.`;
 
-    const userPrompt = JSON.stringify({
-      errors,
-      files: errorFiles.map((f) => ({ path: f.path, content: f.content.slice(0, 6000) })),
-    });
-
-    const completion = await llmProxy.chatCompletion(
-      [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      model,
-      0.2,
-      0.9,
-      4096
-    );
-
-    const raw = completion.choices?.[0]?.message?.content || '{}';
-    debug('llmFixBuildErrors:raw', { snippet: raw.slice(0, 300) });
-
-    const parsed = parseJsonResponse(raw);
-    const patches: Array<{ path: string; content: string }> = Array.isArray(parsed?.patches)
-      ? parsed.patches.filter(
-          (p: unknown): p is { path: string; content: string } =>
-            typeof (p as any)?.path === 'string' && typeof (p as any)?.content === 'string'
-        )
-      : [];
-
-    if (patches.length === 0) return false;
-
     let changed = false;
-    for (const patch of patches) {
-      const target = files.find((f) => f.path === patch.path);
-      if (!target) continue;
-      target.content = patch.content;
-      changed = true;
-      debug('llmFixBuildErrors:patched', { path: patch.path });
-      if (workspaceDir) {
-        const subdir = patch.path.startsWith('backend/') ? 'backend' : 'frontend';
-        const relPath = patch.path.startsWith('backend/')
-          ? patch.path.slice('backend/'.length)
-          : patch.path;
-        const abs = path.join(workspaceDir, subdir, relPath);
-        try {
-          await fs.mkdir(path.dirname(abs), { recursive: true });
-          await fs.writeFile(abs, patch.content, 'utf8');
-        } catch { /* best-effort */ }
+
+    // Send one LLM call per file to avoid context overflow when many files are broken.
+    // 3 concurrent calls keeps throughput high without hammering rate limits.
+    const FILE_BATCH = 3;
+    for (let i = 0; i < errorFiles.length; i += FILE_BATCH) {
+      const batch = errorFiles.slice(i, i + FILE_BATCH);
+      const results = await Promise.allSettled(batch.map(async (errorFile) => {
+        // Filter log lines that mention this specific file to reduce prompt size
+        const fileErrors = errors.split('\n')
+          .filter(l => l.includes(errorFile.path) || l.includes(path.basename(errorFile.path)) || /error/i.test(l))
+          .slice(0, 40).join('\n');
+
+        const completion = await llmProxy.chatCompletion(
+          [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: JSON.stringify({
+              errors: fileErrors,
+              file: { path: errorFile.path, content: errorFile.content },
+            })},
+          ],
+          model,
+          0.2,
+          0.9,
+          12000
+        );
+
+        const raw = completion.choices?.[0]?.message?.content || '{}';
+        debug('llmFixBuildErrors:raw', { path: errorFile.path, snippet: raw.slice(0, 200) });
+
+        const parsed = parseJsonResponse(raw);
+        const patches: Array<{ path: string; content: string }> = Array.isArray(parsed?.patches)
+          ? parsed.patches.filter(
+              (p: unknown): p is { path: string; content: string } =>
+                typeof (p as any)?.path === 'string' && typeof (p as any)?.content === 'string'
+            )
+          : [];
+
+        for (const patch of patches) {
+          const target = files.find((f) => f.path === patch.path);
+          if (!target) continue;
+          target.content = patch.content;
+          changed = true;
+          debug('llmFixBuildErrors:patched', { path: patch.path });
+          if (workspaceDir) {
+            const subdir = patch.path.startsWith('backend/') ? 'backend' : 'frontend';
+            const relPath = patch.path.startsWith('backend/')
+              ? patch.path.slice('backend/'.length)
+              : patch.path;
+            const abs = path.join(workspaceDir, subdir, relPath);
+            try {
+              await fs.mkdir(path.dirname(abs), { recursive: true });
+              await fs.writeFile(abs, patch.content, 'utf8');
+            } catch { /* best-effort */ }
+          }
+        }
+      }));
+
+      for (const r of results) {
+        if (r.status === 'rejected') logWarn('llmFixBuildErrors:file-error', r.reason);
       }
     }
 
     return changed;
   } catch (err) {
     logWarn('llmFixBuildErrors:error', err);
+    return false;
+  }
+}
+
+/**
+ * Spec-based file regeneration: when a file fails to build, extract its
+ * component spec from the blueprint and regenerate it from spec + error
+ * rather than patching from truncated content.
+ * Returns true if at least one file was regenerated.
+ */
+async function specBasedFileRegeneration(
+  files: GeneratedFile[],
+  buildLogs: string,
+  blueprint?: any,
+  workspaceDir?: string,
+  projectId?: string
+): Promise<boolean> {
+  const errors = extractBuildErrors(buildLogs);
+  if (!errors.trim()) return false;
+
+  const errorFiles = findErrorFiles(errors, files);
+  if (errorFiles.length === 0) return false;
+
+  const componentSpecs: any[] = blueprint?.strict?.structure?.frontend?.components || [];
+
+  try {
+    const [{ model, apiKey }, ...fallbacks] = getModelPriorityChain('test_generation');
+    const llmProxy = new LLMProxyClient({ apiKey, projectId, fallbacks });
+
+    let changed = false;
+
+    // Process in parallel batches of 8 — serial was ~10s/file causing deadline bleed
+    const PARALLEL_BATCH = 8;
+    for (let batchStart = 0; batchStart < errorFiles.length; batchStart += PARALLEL_BATCH) {
+      const batch = errorFiles.slice(batchStart, batchStart + PARALLEL_BATCH);
+      const results = await Promise.allSettled(batch.map(async (errorFile) => {
+        const componentName = path.basename(errorFile.path, path.extname(errorFile.path));
+        const spec = componentSpecs.find((c: any) =>
+          c.name === componentName ||
+          c.filePath === errorFile.path ||
+          String(c.filePath || '').endsWith('/' + path.basename(errorFile.path))
+        );
+
+        const blueprintFileEntry = Array.isArray(blueprint?.files)
+          ? blueprint.files.find((f: any) => f.path === errorFile.path)
+          : null;
+
+        const systemPrompt = `You are a React component repair specialist for Vite/React projects.
+${spec ? `Component spec:
+- Name: ${spec.name}
+- Purpose: ${spec.purpose}
+- Props: ${JSON.stringify(spec.props || [])}
+- Render logic: ${spec.renderLogic || ''}
+${spec.contentData ? `- Exact content values (use verbatim): ${JSON.stringify(spec.contentData)}` : ''}` : `Component: ${componentName}`}
+${blueprintFileEntry ? `Blueprint purpose: ${blueprintFileEntry.purpose}` : ''}
+
+You are given the current broken file and the build errors it caused.
+Regenerate the file COMPLETELY from scratch using the spec above — fix all errors.
+
+RULES:
+- Export: export default function ${componentName}(props) { ... }
+- No routing primitives (BrowserRouter, Routes, Route, Link) in this file.
+- No TODO comments, no placeholder text, no stub implementations.
+- All CSS string values on ONE line — never split rgba() or gradient() across lines.
+- Never duplicate JSX attributes or object keys.
+- Only import packages that are available in a standard React+Vite project.
+
+Return ONLY a delimited file block:
+<<<FILE:${errorFile.path}>>>
+...complete fixed file content...
+<<<END>>>`;
+
+        const completion = await llmProxy.chatCompletion(
+          [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: JSON.stringify({
+              path: errorFile.path,
+              currentContent: errorFile.content,
+              buildErrors: errors,
+            })},
+          ],
+          model,
+          0.1,
+          0.9,
+          16000
+        );
+
+        const raw = completion.choices?.[0]?.message?.content || '';
+        const FILE_BLOCK_RE = /<<<FILE:([^\n>]+?)>{2,3}\s*\n([\s\S]*?)\n?<<<END>>>/;
+        const m = raw.match(FILE_BLOCK_RE);
+        if (m) {
+          const newContent = m[2];
+          if (newContent && newContent.trim().length > 50) {
+            const target = files.find((f) => f.path === errorFile.path);
+            if (target) {
+              target.content = newContent;
+              changed = true;
+              debug('specBasedFileRegeneration:regenerated', { path: errorFile.path });
+              if (workspaceDir) {
+                const subdir = errorFile.path.startsWith('backend/') ? 'backend' : 'frontend';
+                const relPath = errorFile.path.startsWith('backend/')
+                  ? errorFile.path.slice('backend/'.length)
+                  : errorFile.path;
+                const abs = path.join(workspaceDir, subdir, relPath);
+                try {
+                  await fs.mkdir(path.dirname(abs), { recursive: true });
+                  await fs.writeFile(abs, newContent, 'utf8');
+                } catch { /* best-effort */ }
+              }
+            }
+          }
+        }
+      }));
+
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          logWarn('specBasedFileRegeneration:batch-file-error', result.reason);
+        }
+      }
+    }
+
+    return changed;
+  } catch (err) {
+    logWarn('specBasedFileRegeneration:error', err);
     return false;
   }
 }
@@ -916,6 +1105,8 @@ export async function testFixAgent(input: {
   emitInfo?: (message: string) => void;
   /** Epoch ms deadline. Attempts are skipped when < 60 s remain. */
   deadlineAt?: number;
+  /** Project blueprint — used by specBasedFileRegeneration for per-file spec context. */
+  blueprint?: any;
 }) {
   debug('testFixAgent:start', { workspaceDir: input.workspaceDir, projectId: input.projectId });
   const info = (msg: string) => { try { input.emitInfo?.(msg); } catch { /* best-effort */ } };
@@ -953,6 +1144,8 @@ export async function testFixAgent(input: {
   // so that package.json always reflects the healed file set.
   async function applyPreBuildFixes(buildLogs?: string): Promise<void> {
     if (!input.files) return;
+    // Fix bare import paths: `from 'components/Foo'` → `from './components/Foo'`
+    try { fixBareImportPaths(input.files, input.workspaceDir); } catch (err) { logWarn('testFixAgent:bare-import-paths-fix', err); }
     // Join CSS string literals that were split across lines by the LLM (syntax error).
     try { await fixBrokenCssStrings(input.files, input.workspaceDir); } catch (err) { logWarn('testFixAgent:broken-css-strings-fix', err); }
     // Fix duplicate `export default function X` where X was already declared.
@@ -990,7 +1183,31 @@ export async function testFixAgent(input: {
 
   await applyPreBuildFixes();
 
-  // ── Build loop: up to 3 attempts with AI fix between each ─────────────────
+  // ── Pre-build: regenerate stub components before first build ─────────────
+  // Stubs compile successfully (no build error) but render as blank <div>s.
+  // Detect them by marker comment and regenerate from spec before the first attempt.
+  if (input.files && input.blueprint) {
+    try {
+      const stubFiles = input.files.filter(f => f.content.includes('STUB_COMPONENT'));
+      if (stubFiles.length > 0) {
+        info(`Detected ${stubFiles.length} stub component(s) — regenerating before build...`);
+        const fakeLogs = stubFiles.map(f => `error: ${f.path}: STUB_COMPONENT placeholder must be replaced`).join('\n');
+        await specBasedFileRegeneration(input.files, fakeLogs, input.blueprint, input.workspaceDir, input.projectId);
+      }
+    } catch (err) {
+      logWarn('testFixAgent:stub-regen', err);
+    }
+  }
+
+  // Dynamic attempt budget: more components = more retries needed.
+  // 1-10 components → 3 attempts; +1 attempt per 10 additional components; hard cap at 6.
+  const componentFileCount = (input.files || []).filter(
+    (f) => f.path.startsWith('src/components/') || f.path.includes('/components/')
+  ).length;
+  // Scale retries with project size: 10 comps→4, 50 comps→9, 100 comps→10 (raised from cap of 6).
+  const maxRetries = Math.min(3 + Math.floor(componentFileCount / 8), 10);
+
+  // ── Build loop: dynamic attempts with AI fix between each ────────────────
   const MIN_ATTEMPT_BUDGET_MS = 60_000;
   let retries = 0;
   let lastResult: { success: boolean; logs: string } | undefined;
@@ -1001,21 +1218,47 @@ export async function testFixAgent(input: {
         const remaining = Math.max(0, input.deadlineAt - Date.now());
         throw new Error(`Orchestration timeout — only ${remaining}ms remaining before build attempt ${retries + 1}`);
       }
-      info(`Build attempt ${retries + 1} of 3 — running npm install and build (this can take a few minutes)...`);
-      debug('testFixAgent:attempt', { attempt: retries + 1 });
+      info(`Build attempt ${retries + 1} of ${maxRetries} — running npm install and build (this can take a few minutes)...`);
+      debug('testFixAgent:attempt', { attempt: retries + 1, maxRetries });
       const currentResult = await input.buildFn();
       debug('testFixAgent:buildResult', { success: currentResult.success });
 
       if (currentResult.success) {
         info(retries > 0 ? `Build succeeded after ${retries + 1} attempt(s).` : 'Build succeeded.');
         debug('testFixAgent:success', { fixed: retries > 0 });
+
+        // Smoke test: verify the built app renders non-blank content in a headless browser.
+        // If blank, synthesize a build log from console errors and trigger one more fix pass.
+        if (input.workspaceDir && input.files && input.blueprint && retries < maxRetries - 1) {
+          try {
+            const { runSmokeTest } = await import('./smokeTest');
+            const smoke = await runSmokeTest(input.workspaceDir);
+            if (!smoke.hasContent && smoke.syntheticBuildLog) {
+              info('Smoke test detected blank render — attempting App.jsx fix...');
+              debug('testFixAgent:smoke-failed', { consoleErrors: smoke.consoleErrors });
+              await specBasedFileRegeneration(
+                input.files,
+                smoke.syntheticBuildLog,
+                input.blueprint,
+                input.workspaceDir,
+                input.projectId
+              );
+              // Let the loop do one more build attempt
+              retries++;
+              continue;
+            }
+          } catch (smokeErr) {
+            logWarn('testFixAgent:smoke-test-error', smokeErr);
+          }
+        }
+
         return { ...currentResult, fixed: retries > 0 };
       }
 
       lastResult = currentResult;
 
-      // Lightweight LLM patch pass before the expensive full-regen fixFn.
-      if (input.files && retries < 2) {
+      // Pass 1: lightweight LLM patch on the full file content (no truncation).
+      if (input.files && retries < maxRetries - 1) {
         try {
           const patched = await llmFixBuildErrors(input.files, lastResult.logs, input.workspaceDir, input.projectId);
           if (patched) {
@@ -1029,7 +1272,32 @@ export async function testFixAgent(input: {
         }
       }
 
-      if (input.fixFn && retries < 2) {
+      // Pass 2: spec-based file regeneration using blueprint component specs.
+      // Regenerates each broken file from its original spec rather than patching
+      // truncated content — eliminates the class of errors where the patch LLM
+      // produces a new broken file because it only saw half the original.
+      if (input.files && input.blueprint && retries < maxRetries - 1) {
+        try {
+          const regenned = await specBasedFileRegeneration(
+            input.files,
+            lastResult.logs,
+            input.blueprint,
+            input.workspaceDir,
+            input.projectId
+          );
+          if (regenned) {
+            info(`Spec-based file regeneration applied (attempt ${retries + 1}) — retrying build...`);
+            debug('testFixAgent:spec-regen-applied', { retry: retries + 1 });
+            await applyPreBuildFixes(lastResult.logs);
+            retries++;
+            continue;
+          }
+        } catch (specErr) {
+          logWarn('testFixAgent:spec-regen-error', specErr);
+        }
+      }
+
+      if (input.fixFn && retries < maxRetries - 1) {
         info(`Build failed — invoking AI self-heal (attempt ${retries + 1})...`);
         debug('testFixAgent:invoking-fixFn', { retry: retries + 1 });
         try {
@@ -1055,10 +1323,10 @@ export async function testFixAgent(input: {
         await applyPreBuildFixes(lastResult.logs);
       }
       retries++;
-    } while (retries < 3);
+    } while (retries < maxRetries);
 
     const lastLogs = lastResult?.logs || 'No build output.';
-    throw new Error(`Build failed after 3 attempts.\n${lastLogs.slice(-2000)}`);
+    throw new Error(`Build failed after ${maxRetries} attempts.\n${lastLogs.slice(-2000)}`);
   } catch (err) {
     logError('testFixAgent', { error: err instanceof Error ? err.message : String(err), stage: 'testFixAgent', stack: err instanceof Error ? err.stack?.slice(0, 400) : undefined });
     throw err;

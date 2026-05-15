@@ -168,6 +168,13 @@ type StageOptions = {
   percent?: number;
   /** Global wall-clock deadline for automated orchestration work. */
   deadlineAt?: number;
+  /**
+   * Called before each retry attempt (attempt >= 1) with the error from the
+   * previous attempt. Handlers can mutate their captured input to inject error
+   * context (e.g. previousIssues) so that the LLM sees what went wrong and
+   * corrects it, rather than re-running with identical inputs blindly.
+   */
+  onRetry?: (attempt: number, lastError: unknown) => void;
 };
 
 async function persistMemory(memory: ProjectMemory, persistence?: PersistenceAdapter): Promise<void> {
@@ -205,7 +212,7 @@ async function stageWrap<T>(
   handler: () => Promise<T>,
   options: StageOptions = {}
 ): Promise<StageResult<T>> {
-  const { adapter, persistence, percent, deadlineAt } = options;
+  const { adapter, persistence, percent, deadlineAt, onRetry } = options;
   const policy = currentPolicy(memory);
   // NOTE: sessionId is intentionally excluded from inputHash — sessionId changes on every
   // server restart, which would cause all prior checkpoints to be cache-misses, breaking
@@ -251,6 +258,11 @@ async function stageWrap<T>(
 
   while (shouldRetryStage(attempt, policy)) {
     try {
+      // Give the caller a chance to mutate its captured input (e.g. inject
+      // previousIssues) before each retry so the handler sees what failed.
+      if (attempt > 0 && lastError !== null && onRetry) {
+        try { onRetry(attempt, lastError); } catch { /* best-effort */ }
+      }
       markStage(memory, stage);
 
       // Persist immediately on stage entry so REST snapshot readers see
@@ -1189,7 +1201,16 @@ export async function runAIOrchestration(
       setSystemDesign(memory, result.output);
       assertConsistencyWithSelfHeal(memory, command, 'system_design', repairSystemDesign);
       return result.output;
-    }, { ...opts, percent: 25 });
+    }, {
+      ...opts,
+      percent: 25,
+      onRetry: (_attempt, err) => {
+        // Push the previous error into previousIssues so systemDesignAgent
+        // gets explicit feedback on what to fix — not a blind re-run.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg) feedbackForSystemDesign.push(msg);
+      },
+    });
 
     if (systemDesignResult.status !== 'success') return finalizeResult(memory, systemDesignResult, null, null);
 
@@ -1212,7 +1233,14 @@ export async function runAIOrchestration(
       setUISpec(memory, { uiSpec: result.output, structuredSpec: result.output });
       assertConsistencyWithSelfHeal(memory, command, 'ui_spec', repairUiSpec);
       return result.output;
-    }, { ...opts, percent: 35 });
+    }, {
+      ...opts,
+      percent: 35,
+      onRetry: (_attempt, err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg) feedbackForUiSpec.push(msg);
+      },
+    });
 
     if (uiSpecResult.status !== 'success') return finalizeResult(memory, uiSpecResult, null, null);
 
@@ -1374,6 +1402,7 @@ export async function runAIOrchestration(
       workspaceDir: materializedRevision.workspaceDir,
       projectId: command.projectId,
       deadlineAt: testDeadlineAt,
+      blueprint: memory.blueprint?.blueprint,
       fixFn: async (logs: string) => {
         await selfHealWithCodeGeneration(memory, command, projectSpec, logs, command.projectId, testDeadlineAt);
         // Write healed files to disk so testFixAgent's fingerprint check detects a real change.

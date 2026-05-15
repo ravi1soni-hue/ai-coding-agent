@@ -446,34 +446,31 @@ function fallbackFrontendManifest(requirements: any, uiSpec?: any): FrontendMani
 }
 
 // Returns components that should be rendered directly in App.jsx (root-level only).
-// Uses compositionOrder from uiSpec when available; otherwise infers from import analysis.
-function filterRootComponents(components: GeneratedFile[], compositionOrder?: string[]): GeneratedFile[] {
+// Priority: (1) compositionOrder from uiSpec, (2) last 40% of generationOrder (page-level roots),
+// (3) all components as fallback.
+// The old sibling-import heuristic is removed — with dependency-ordered parallel generation,
+// leaf components don't import siblings, so the heuristic misclassified everything as a root.
+function filterRootComponents(components: GeneratedFile[], compositionOrder?: string[], uiGenOrder?: string[]): GeneratedFile[] {
   const nameOf = (f: GeneratedFile) => sanitizeIdentifier(path.basename(f.path, '.jsx'), 'GeneratedSection');
+
   if (compositionOrder && compositionOrder.length > 0) {
-    // Normalize to lowercase so "PricingSection" matches "pricingsection" file basename variants
     const orderLower = compositionOrder.map((n) => n.toLowerCase());
     const ordered = components
       .filter((f) => orderLower.includes(nameOf(f).toLowerCase()))
-      .sort((a, b) => {
-        const ai = orderLower.indexOf(nameOf(a).toLowerCase());
-        const bi = orderLower.indexOf(nameOf(b).toLowerCase());
-        return ai - bi;
-      });
+      .sort((a, b) => orderLower.indexOf(nameOf(a).toLowerCase()) - orderLower.indexOf(nameOf(b).toLowerCase()));
     if (ordered.length > 0) return ordered;
   }
-  // Heuristic: a component is a child if it is imported or used as JSX tag in any sibling.
-  const childNames = new Set<string>();
-  for (const file of components) {
-    for (const other of components) {
-      if (other === file) continue;
-      const n = nameOf(other);
-      if (file.content.includes(`import ${n}`) || file.content.includes(`<${n}`)) {
-        childNames.add(n);
-      }
-    }
+
+  // uiSpec generationOrder is leaf-first (children before parents).
+  // The last 40% of the order are page-level compositors — those are the roots App.jsx renders.
+  if (uiGenOrder && uiGenOrder.length > 0) {
+    const cutoff = Math.floor(uiGenOrder.length * 0.6);
+    const rootNames = new Set(uiGenOrder.slice(cutoff).map((n) => n.toLowerCase()));
+    const roots = components.filter((f) => rootNames.has(nameOf(f).toLowerCase()));
+    if (roots.length > 0) return roots;
   }
-  const roots = components.filter((f) => !childNames.has(nameOf(f)));
-  return roots.length > 0 ? roots : components;
+
+  return components;
 }
 
 function fallbackFrontendApp(_manifest: FrontendManifest, components: GeneratedFile[], hasBackend = false, compositionOrder?: string[]): GeneratedFile {
@@ -1124,8 +1121,9 @@ function estimateComponentBudget(
 function estimateAppBudget(importsCount: number, backendRequired: boolean): TokenBudget {
   const initial = 1800 + importsCount * 120 + (backendRequired ? 500 : 0);
   return normalizeBudget({
-    initial: Math.max(2000, Math.min(6000, initial)),
-    ceiling: 20000,
+    // No cap: 100 components needs ~14k tokens; capping at 6k guaranteed truncation.
+    initial: Math.max(2000, initial),
+    ceiling: 32000,
   });
 }
 
@@ -1394,7 +1392,16 @@ async function generateFrontendComponent(
   const backendRequired = Boolean(requirements?.backend_required || requirements?.auth_required);
   const componentSpec = uiSpec?.components?.find((c: any) => c.name === componentName);
   const dependencyCode = componentSpec?.dependencies
-    ?.map((dep: string) => ({ dep, code: generatedDependencies?.get(dep)?.slice(0, 500) }))
+    ?.map((dep: string) => {
+      const content = generatedDependencies?.get(dep);
+      if (!content) return { dep, code: undefined };
+      // Extract only the exported function signature + props destructuring instead of
+      // truncating raw content to 500 chars. This gives the parent LLM the exact prop
+      // names without wasting tokens on implementation details.
+      const sigMatch = content.match(/export\s+default\s+function\s+\w+\s*\(([^)]*)\)/);
+      const sig = sigMatch ? `export default function ${dep}(${sigMatch[1]}) { /* ... */ }` : `export default function ${dep}(props) { /* ... */ }`;
+      return { dep, code: sig.slice(0, 400) };
+    })
     .filter((d: any) => d.code) || [];
 
   const contentData = componentSpec?.contentData && typeof componentSpec.contentData === 'object' ? componentSpec.contentData : null;
@@ -1481,7 +1488,8 @@ async function generateFrontendApp(
     name: sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection'),
     importLine: `import ${sanitizeIdentifier(path.basename(file.path, '.jsx'), 'GeneratedSection')} from './${file.path.replace(/^src\//, '')}';`,
   }));
-  const rootFiles = filterRootComponents(componentFiles, compositionOrder);
+  const uiGenOrder: string[] | undefined = Array.isArray(uiSpec?.generationOrder) ? uiSpec.generationOrder : undefined;
+  const rootFiles = filterRootComponents(componentFiles, compositionOrder, uiGenOrder);
   const rootNames = rootFiles.map((f) => sanitizeIdentifier(path.basename(f.path, '.jsx'), 'GeneratedSection'));
 
   // Build a required-props summary for each root component from uiSpec, so App.jsx knows what to pass.
@@ -1593,17 +1601,25 @@ function extractClassNames(jsxSources: string[]): string[] {
   return Array.from(found).sort();
 }
 
+function verifyCssCoverage(cssContent: string, classNames: string[]): number {
+  if (classNames.length === 0) return 1;
+  const covered = classNames.filter((cn) => cssContent.includes(`.${cn}`));
+  return covered.length / classNames.length;
+}
+
 async function generateFrontendCss(manifest: FrontendManifest, requirements: any, appFile: GeneratedFile, componentFiles: GeneratedFile[], llmProxy: LLMProxyClient, model: string): Promise<GeneratedFile> {
   const userMessage = String(requirements?.userMessage || '').slice(0, 400);
   const styleNotes = String((manifest as any)?.styleNotes || '').slice(0, 600);
   const classNames = extractClassNames([appFile.content, ...componentFiles.map((f) => f.content)]).slice(0, 220);
 
-  const systemPrompt = `Generate src/index.css for this React app: "${userMessage || manifest.appName}".
+  function buildCssPrompt(extraInstruction?: string): string {
+    return `Generate src/index.css for this React app: "${userMessage || manifest.appName}".
 
 Class names used in the JSX — write rules for all of them:
 ${classNames.map((c) => `.${c}`).join(', ') || '(no className attributes — emit a sensible base stylesheet)'}
 
 ${styleNotes ? `Style direction: ${styleNotes}` : ''}
+${extraInstruction ? `\nCRITICAL: ${extraInstruction}` : ''}
 
 RULES:
 - One complete, self-contained plain CSS file. CSS variables on :root are encouraged.
@@ -1611,6 +1627,7 @@ RULES:
 - Every class name listed above must have a rule. No omissions.
 - Write clean, minimal CSS — no duplicated selectors, no redundant rules, no commented-out blocks.
 - Target 150-300 lines. If you are over 400 lines you are over-engineering it — use variables and shared rules.`;
+  }
 
   // CSS for rich landing/marketing pages routinely lands at 12k-18k output
   // tokens. Use a generous ceiling close to ABSOLUTE_TOKEN_CEILING so we
@@ -1620,14 +1637,32 @@ RULES:
     model,
     'frontendCss',
     'src/index.css',
-    systemPrompt,
+    buildCssPrompt(),
     { appName: manifest.appName, classNames, styleNotes },
     { initial: 4000, ceiling: 12000 }
   );
   if (isProbablyTruncatedGeneratedFile(parsed.path, parsed.content)) {
     throw new Error(`frontendCss: generated content appears too short or incomplete for ${parsed.path}`);
   }
-  return validateGeneratedFile(parsed, 'src/index.css', 'frontend', 'frontendCss');
+  const cssFile = validateGeneratedFile(parsed, 'src/index.css', 'frontend', 'frontendCss');
+
+  // Verify coverage: if < 80% of classNames have rules, retry with the missing list injected.
+  const coverage = verifyCssCoverage(cssFile.content, classNames);
+  if (coverage < 0.8 && classNames.length > 0) {
+    const missing = classNames.filter((cn) => !cssFile.content.includes(`.${cn}`));
+    logWarn('codeGenerationAgent:css-coverage-low', { coverage: Math.round(coverage * 100), missingCount: missing.length, sample: missing.slice(0, 8) });
+    try {
+      const retryPrompt = buildCssPrompt(`The following class names are MISSING rules in your output — you MUST include a CSS rule for each: ${missing.map((c) => `.${c}`).join(', ')}`);
+      const retried = await generateFile(llmProxy, model, 'frontendCss:retry', 'src/index.css', retryPrompt, { appName: manifest.appName, classNames, missing }, { initial: 5000, ceiling: 14000 });
+      if (!isProbablyTruncatedGeneratedFile(retried.path, retried.content)) {
+        return validateGeneratedFile(retried, 'src/index.css', 'frontend', 'frontendCss:retry');
+      }
+    } catch (retryErr) {
+      logWarn('codeGenerationAgent:css-coverage-retry-failed', { error: (retryErr as Error).message });
+    }
+  }
+
+  return cssFile;
 }
 
 function buildBackendFilesFromManifest(manifest: BackendManifest): GeneratedFile[] {
@@ -1858,20 +1893,55 @@ export async function codeGenerationAgent(input: any) {
       ? (manifest.components || []).slice(0, authoritative)
       : (manifest.components || []);
 
-    // Scale concurrency with project size: small projects get fewer workers (less
-    // contention on the LLM proxy), large projects scale up to 12.
-    const COMPONENT_CONCURRENCY = Math.min(12, Math.max(4, Math.ceil(componentSpecs.length / 4)));
+    // Build dependency graph from uiSpec so we can sequence generation leaf-first.
+    // A component is "ready" once all components it depends on (its children) have
+    // been generated and their content is in generatedDependencies.
+    const componentDepMap = new Map<string, string[]>();
+    for (const spec of componentSpecs) {
+      const uiComp = uiSpec?.components?.find((c: any) => String(c.name || '') === String(spec.name || ''));
+      const deps = Array.isArray(uiComp?.dependencies) ? uiComp.dependencies.filter(Boolean) : [];
+      componentDepMap.set(String(spec.name || ''), deps);
+    }
+
     const componentResults: Array<{ index: number; file: GeneratedFile }> = [];
-    const queue = componentSpecs.map((component, index) => ({ component, index }));
     const generatedDependencies = new Map<string, string>();
 
+    // Ready queue: items whose dependencies are all satisfied.
+    // pending: indices of items not yet enqueued or generated.
+    const pendingIndices = new Set<number>(componentSpecs.map((_, i) => i));
+    const readyQueue: Array<{ component: typeof componentSpecs[0]; index: number }> = [];
+
+    function refreshReadyQueue(): void {
+      for (const idx of pendingIndices) {
+        const spec = componentSpecs[idx];
+        const deps = componentDepMap.get(String(spec.name || '')) || [];
+        const allReady = deps.every(dep => generatedDependencies.has(dep));
+        if (allReady) {
+          readyQueue.push({ component: spec, index: idx });
+          pendingIndices.delete(idx);
+        }
+      }
+    }
+    refreshReadyQueue(); // seed with leaf components (no deps)
+
+    // Run up to COMPONENT_CONCURRENCY workers; each worker picks from readyQueue
+    // and waits briefly when the queue is empty but pendingIndices is not yet drained.
+    const COMPONENT_CONCURRENCY = Math.min(10, Math.max(4, Math.ceil(componentSpecs.length / 6)));
+
     async function runComponentSlot(): Promise<void> {
-      while (queue.length > 0) {
-        const item = queue.shift();
-        if (!item) break;
+      while (true) {
+        const item = readyQueue.shift();
+        if (!item) {
+          if (pendingIndices.size === 0) break; // all done
+          await new Promise<void>(r => setTimeout(r, 60)); // wait for a dep to finish
+          continue;
+        }
         const { component, index } = item;
         try {
           const file = await generateFrontendComponent(component, manifest, input.requirements, llmProxy, model, uiSpec, generatedDependencies);
+          // Key by both component name AND bare filename so lookups from either side work.
+          const compName = String(component.name || '');
+          if (compName) generatedDependencies.set(compName, file.content);
           generatedDependencies.set(file.path.replace(/^src\/components\//, '').replace(/\.jsx$/, ''), file.content);
           componentResults.push({ index, file });
           events?.emit({ type: 'FILE_WRITTEN', filePath: file.path, message: `Generated ${file.path}`, payload: { path: file.path, content: file.content } });
@@ -1886,12 +1956,17 @@ export async function codeGenerationAgent(input: any) {
             content: `import React from 'react';\n/* STUB_COMPONENT: ${compName} — generation failed, needs real implementation */\nexport default function ${compName}() {\n  return <div className="section">${compName}</div>;\n}\n`,
           };
           componentResults.push({ index, file: stubFile });
+          // Mark as done (empty string) so waiting parents are unblocked — they'll get
+          // the stub content at generation time, which is better than waiting forever.
+          if (component.name) generatedDependencies.set(String(component.name), '');
+          generatedDependencies.set(safePath.replace(/^src\/components\//, '').replace(/\.jsx$/, ''), '');
           events?.emit({ type: 'STUB_COMPONENT', filePath: stubFile.path, message: `Stub emitted for ${stubFile.path} — generation failed: ${(err as Error).message}`, payload: { path: stubFile.path, content: stubFile.content, reason: (err as Error).message } });
         }
+        refreshReadyQueue(); // unlock components whose deps are now satisfied
       }
     }
 
-    await Promise.all(Array.from({ length: Math.min(COMPONENT_CONCURRENCY, componentSpecs.length) }, runComponentSlot));
+    await Promise.all(Array.from({ length: Math.min(COMPONENT_CONCURRENCY, Math.max(1, componentSpecs.length)) }, runComponentSlot));
     // Restore original blueprint ordering
     componentResults.sort((a, b) => a.index - b.index);
     const componentFiles = componentResults.map((r) => r.file);
@@ -1899,7 +1974,8 @@ export async function codeGenerationAgent(input: any) {
     let appFile: GeneratedFile;
     try {
       appFile = await generateFrontendApp(manifest, input.requirements, input.systemDesign, input.modification, componentFiles, llmProxy, model, uiSpec);
-      try { validateAppImports(appFile.content, componentFiles, blueprint, uiSpec); } catch (e) { logWarn('codeGenerationAgent:app-import-warning', { error: (e as Error).message }); }
+      // Throws on import path mismatches — caught below, triggers fallbackFrontendApp.
+      validateAppImports(appFile.content, componentFiles, blueprint, uiSpec);
     } catch (err) {
       logWarn('codeGenerationAgent:app-generation-fallback', { error: (err as Error).message });
       appFile = fallbackFrontendApp(manifest, componentFiles, hasBackend, uiSpec?.layoutStructure?.compositionOrder);
